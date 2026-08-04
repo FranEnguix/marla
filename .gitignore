@@ -212,7 +212,6 @@ __marimo__/
 .DS_Store
 
 # Generated at runtime, not source (see `marla init` / `marla run`)
-examples/
 experiment_templates/
 runs/
 debug/
