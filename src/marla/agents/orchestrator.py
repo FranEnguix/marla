@@ -86,6 +86,8 @@ class OrchestratorLifecycleBehaviour(OneShotBehaviour):
                 consultation_cost=agent.consultation_cost,
                 consult_fn=self._consult if agent.consultation_enabled else None,
                 stop_event=agent.stop_event,
+                eval_episodes=agent.config.metrics.eval_episodes,
+                eval_every_rollouts=agent.config.metrics.eval_every_rollouts,
             )
         except Exception as exc:  # unrecoverable environment/model error
             logger.exception("Training failed for run %s", agent.run_id)

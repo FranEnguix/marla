@@ -160,6 +160,16 @@ class PlanMakerAgentConfig(MarlaBaseModel):
 class MetricsConfig(MarlaBaseModel):
     output_directory: str = "runs"
     record_decisions: bool = True
+    # Periodic deterministic (greedy) evaluation episodes, run with the
+    # current policy weights between rollouts (an EvalCallback-style pass,
+    # not a genuine held-out generalization test -- MARLA's config has a
+    # single environment.scenario, not a train/test scenario split; see
+    # learning/rollout.py's run_evaluation_episodes). 0 disables it, which
+    # is the default: this adds real wall-clock cost (extra episodes, and
+    # in assisted mode extra Plan Maker consultations), so existing configs
+    # opt in rather than getting it for free.
+    eval_episodes: int = Field(default=0, ge=0)
+    eval_every_rollouts: int = Field(default=1, gt=0)
 
 
 class ReproducibilityConfig(MarlaBaseModel):

@@ -115,6 +115,16 @@ class EpisodeSummary:
     consultation_count: int = 0
     consultation_cost: float = 0.0
     schema_rejection_count: int = 0
+    # Which training rollout this episode belongs to (training episode) or
+    # immediately followed (eval episode) -- lets metrics/plots bucket
+    # returns by training progress instead of raw episode index. None for
+    # episodes summarized outside run_training_loop (e.g. direct
+    # RolloutCollector use in tests).
+    rollout: int | None = None
+    # True for a deterministic (greedy) evaluation episode from
+    # run_evaluation_episodes, contributing nothing to the PPO buffer.
+    # False for an ordinary stochastic training episode.
+    is_eval: bool = False
 
 
 class RolloutCollector:
@@ -134,6 +144,7 @@ class RolloutCollector:
         consultation_cost: float = 0.0,
         consult_fn: ConsultFn | None = None,
         stop_event: asyncio.Event | None = None,
+        deterministic: bool = False,
     ) -> None:
         if consultation_enabled and consult_fn is None:
             raise ValueError("consult_fn is required when consultation_enabled=True")
@@ -146,6 +157,10 @@ class RolloutCollector:
         self._consultation_cost = consultation_cost
         self._consult_fn = consult_fn
         self._stop_event = stop_event
+        # Greedy (argmax) action/query selection instead of sampling, for a
+        # deterministic evaluation pass (see run_evaluation_episodes) -- not
+        # used by ordinary training rollout collection.
+        self._deterministic = deterministic
 
         self._episode_id = 0
         self._state: EnvironmentState | None = None
@@ -284,6 +299,7 @@ class RolloutCollector:
                         consultation_count=self._episode_consultation_count,
                         consultation_cost=self._episode_consultation_cost_total,
                         schema_rejection_count=self._episode_schema_rejection_count,
+                        is_eval=self._deterministic,
                     )
                 )
                 self._state = None
@@ -305,7 +321,7 @@ class RolloutCollector:
         if not self._consultation_enabled:
             probs = step_out.base_probs.detach()
             distribution = torch.distributions.Categorical(probs=probs)
-            sampled = distribution.sample()
+            sampled = probs.argmax() if self._deterministic else distribution.sample()
             action_index = int(sampled.item())
             action_log_prob = float(distribution.log_prob(sampled))
             return {
@@ -330,8 +346,11 @@ class RolloutCollector:
         query_probability = compute_query_probability(
             self._policy, step_out, len(legal_actions), self._consultation_cost
         )
-        query_dist = torch.distributions.Bernoulli(probs=query_probability.detach())
-        sampled_query = bool(query_dist.sample().item())
+        if self._deterministic:
+            sampled_query = bool(query_probability.detach().item() >= 0.5)
+        else:
+            query_dist = torch.distributions.Bernoulli(probs=query_probability.detach())
+            sampled_query = bool(query_dist.sample().item())
 
         consultation_cost = 0.0
         plan_maker_confidence = None
@@ -376,8 +395,11 @@ class RolloutCollector:
 
         final_decision = compute_final_decision(self._policy, step_out, sampled_query, plan_maker_confidence)
         final_probs = torch.softmax(final_decision.final_logits.detach(), dim=-1)
-        action_dist = torch.distributions.Categorical(probs=final_probs)
-        action_index = int(action_dist.sample().item())
+        if self._deterministic:
+            action_index = int(final_probs.argmax().item())
+        else:
+            action_dist = torch.distributions.Categorical(probs=final_probs)
+            action_index = int(action_dist.sample().item())
 
         joint = compute_joint_log_probability(
             query_probability.detach(), sampled_query, final_decision.final_logits.detach(), action_index
@@ -412,3 +434,52 @@ class RolloutCollector:
         with torch.no_grad():
             probe = self._policy.step(next_graph_obs, next_legal, next_rstate)
         return float(probe.value)
+
+
+# Kept far above any realistic training seed range (base_seed is normally a
+# small int from experiment.seed) so a deterministic evaluation pass never
+# regenerates a scenario instance a training episode already used.
+EVAL_SEED_OFFSET = 1_000_000_000
+
+
+async def run_evaluation_episodes(
+    policy: RecurrentPolicy,
+    adapter: NasimEmuAdapter,
+    run_id: str,
+    num_episodes: int,
+    seed_start: int,
+    consultation_enabled: bool = False,
+    consultation_cost: float = 0.0,
+    consult_fn: ConsultFn | None = None,
+) -> list[EpisodeSummary]:
+    """Runs ``num_episodes`` deterministic (greedy) episodes with the
+    current policy weights and reports their returns, contributing nothing
+    to the PPO buffer -- an ``EvalCallback``-style periodic evaluation pass
+    (see e.g. stable-baselines3), not a genuine held-out generalization
+    test: MARLA's config has a single ``environment.scenario``, not a
+    train/test scenario split, so this measures the current policy's
+    performance without exploration noise on the same scenario training
+    uses, not generalization to unseen scenarios.
+
+    Reuses ``adapter`` rather than building a second instance: training and
+    evaluation never run concurrently (this is awaited strictly between
+    rollout-collection phases in ``run_training_loop``), and
+    ``NasimEmuAdapter`` holds no state of its own between ``reset()`` calls.
+    """
+    policy.eval()
+    try:
+        collector = RolloutCollector(
+            adapter=adapter,
+            policy=policy,
+            run_id=run_id,
+            base_seed=seed_start,
+            consultation_enabled=consultation_enabled,
+            consultation_cost=consultation_cost,
+            consult_fn=consult_fn,
+            deterministic=True,
+        )
+        with torch.no_grad():
+            _, summaries = await collector.collect(num_episodes * adapter.max_episode_steps)
+    finally:
+        policy.train()
+    return summaries[:num_episodes]

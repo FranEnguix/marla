@@ -41,6 +41,7 @@ _EPISODES_FIELDS = [
     "run_id", "variant", "episode_id", "seed", "scenario", "goal_success", "nasimemu_return",
     "training_return", "benchmark_return", "environment_steps", "rl_decisions", "steps_to_goal",
     "episode_seconds", "consultation_count", "consultation_cost", "schema_rejection_count", "finish_reason",
+    "rollout", "is_eval",
 ]
 
 _DECISIONS_FIELDS = [
@@ -131,11 +132,16 @@ def _decision_row(config: Config, record: StepRecord) -> dict[str, Any]:
     }
 
 
-def write_episodes_csv(run_dir: Path, config: Config, episode_summaries: list[EpisodeSummary]) -> None:
+def write_episodes_csv(
+    run_dir: Path,
+    config: Config,
+    episode_summaries: list[EpisodeSummary],
+    eval_episode_summaries: list[EpisodeSummary] = (),
+) -> None:
     variant = _variant(config)
     scenario = config.environment.scenario
     rows = []
-    for summary in episode_summaries:
+    for summary in [*episode_summaries, *eval_episode_summaries]:
         rows.append(
             {
                 "run_id": summary.run_id,
@@ -159,6 +165,8 @@ def write_episodes_csv(run_dir: Path, config: Config, episode_summaries: list[Ep
                 "consultation_cost": summary.consultation_cost,
                 "schema_rejection_count": summary.schema_rejection_count,
                 "finish_reason": summary.finish_reason,
+                "rollout": summary.rollout,
+                "is_eval": summary.is_eval,
             }
         )
     _write_csv(run_dir / "episodes.csv", _EPISODES_FIELDS, rows)
@@ -181,6 +189,7 @@ def write_summary_json(
     update_metrics: list[dict[str, Any]],
     all_records: list[StepRecord],
     environment_steps: int,
+    eval_episode_summaries: list[EpisodeSummary] = (),
 ) -> None:
     def _mean(values: list[float]) -> float | None:
         return sum(values) / len(values) if values else None
@@ -237,6 +246,13 @@ def write_summary_json(
         ),
         "total_training_environment_steps": environment_steps,
         "total_training_seconds": total_training_seconds,
+        # Deterministic (greedy) periodic evaluation episodes -- see
+        # config.metrics.eval_episodes / learning/rollout.py's
+        # run_evaluation_episodes. Empty/None when eval_episodes == 0.
+        "eval_episode_count": len(eval_episode_summaries),
+        "eval_goal_success_rate": _mean([1.0 if s.goal_success else 0.0 for s in eval_episode_summaries]),
+        "mean_eval_return": _mean([s.nasimemu_return for s in eval_episode_summaries]),
+        "median_eval_return": _median([s.nasimemu_return for s in eval_episode_summaries]),
     }
     (run_dir / "summary.json").write_text(json.dumps(summary_dict, indent=2), encoding="utf-8")
 
@@ -321,12 +337,15 @@ def write_run_artifacts(
     write_metadata_json(run_dir, config, resolved_device, start_time, end_time, status)
 
     episode_summaries = result.episode_summaries if result is not None else []
+    eval_episode_summaries = result.eval_episode_summaries if result is not None else []
     update_metrics = result.update_metrics if result is not None else []
     all_records = result.all_records if result is not None else []
     environment_steps = result.environment_steps if result is not None else 0
 
-    write_episodes_csv(run_dir, config, episode_summaries)
+    write_episodes_csv(run_dir, config, episode_summaries, eval_episode_summaries)
     write_updates_csv(run_dir, config, update_metrics)
-    write_summary_json(run_dir, episode_summaries, update_metrics, all_records, environment_steps)
+    write_summary_json(
+        run_dir, episode_summaries, update_metrics, all_records, environment_steps, eval_episode_summaries
+    )
     if config.metrics.record_decisions:
         write_decisions_csv(run_dir, config, all_records)

@@ -66,6 +66,10 @@ class NasimEmuAdapter:
             augment_with_action=False,
         )
 
+    @property
+    def max_episode_steps(self) -> int:
+        return self._max_episode_steps
+
     def reset(self, seed: int | None = None) -> EnvironmentState:
         """Start a new episode, generating a fresh scenario instance.
 

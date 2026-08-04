@@ -328,6 +328,10 @@ def summarize(
     typer.echo(f"  mean Plan Maker latency: {_fmt(summary['mean_plan_maker_latency_ms'])}ms")
     typer.echo(f"  schema rejection rate: {_fmt(summary['schema_rejection_rate'])}")
     typer.echo(f"  advice changed top action rate: {_fmt(summary['advice_changed_top_action_rate'])}")
+    if summary.get("eval_episode_count"):  # absent in summary.json written before eval episodes existed
+        typer.echo(f"  eval episodes: {summary['eval_episode_count']}")
+        typer.echo(f"  eval goal success rate: {_fmt(summary.get('eval_goal_success_rate'))}")
+        typer.echo(f"  mean eval return: {_fmt(summary.get('mean_eval_return'))}")
     typer.echo(
         f"  total training: {summary['total_training_environment_steps']} steps, "
         f"{_fmt(summary['total_training_seconds'], 1)}s"

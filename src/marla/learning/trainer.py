@@ -25,7 +25,14 @@ from marla.environment.nasimemu_adapter import NasimEmuAdapter
 from marla.learning.gae import compute_gae
 from marla.learning.ppo import optimize
 from marla.learning.recurrent_policy import RecurrentPolicy
-from marla.learning.rollout import ConsultFn, EpisodeSummary, RolloutCollector, StepRecord
+from marla.learning.rollout import (
+    EVAL_SEED_OFFSET,
+    ConsultFn,
+    EpisodeSummary,
+    RolloutCollector,
+    StepRecord,
+    run_evaluation_episodes,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -39,6 +46,7 @@ class TrainingResult:
     environment_steps: int = 0
     all_records: list[StepRecord] = field(default_factory=list)
     stopped_by_user: bool = False
+    eval_episode_summaries: list[EpisodeSummary] = field(default_factory=list)
 
 
 def build_policy_and_optimizer(
@@ -63,6 +71,8 @@ async def run_training_loop(
     consultation_cost: float = 0.0,
     consult_fn: ConsultFn | None = None,
     stop_event: asyncio.Event | None = None,
+    eval_episodes: int = 0,
+    eval_every_rollouts: int = 1,
 ) -> TrainingResult:
     """Repeated rollout-collect/PPO-update cycles over pre-built components.
 
@@ -90,6 +100,8 @@ async def run_training_loop(
     for rollout_index in range(1, num_rollouts + 1):
         logger.info("Rollout %d/%d: collecting %d environment steps...", rollout_index, num_rollouts, ppo_config.rollout_steps)
         records, summaries = await collector.collect(ppo_config.rollout_steps)
+        for summary in summaries:
+            summary.rollout = rollout_index
         result.episode_summaries.extend(summaries)
         result.environment_steps += len(records)
         result.all_records.extend(records)
@@ -144,6 +156,32 @@ async def run_training_loop(
                 update_metrics["checkpoint_id"] = None  # no checkpointing wired into this run loop yet
             result.update_metrics.extend(metrics)
 
+        if eval_episodes > 0 and rollout_index % eval_every_rollouts == 0:
+            logger.info(
+                "Rollout %d/%d: running %d deterministic evaluation episode(s)...",
+                rollout_index, num_rollouts, eval_episodes,
+            )
+            eval_summaries = await run_evaluation_episodes(
+                policy=policy,
+                adapter=adapter,
+                run_id=run_id,
+                num_episodes=eval_episodes,
+                seed_start=EVAL_SEED_OFFSET,  # same fixed episodes every checkpoint -- an apples-to-apples test set
+                consultation_enabled=consultation_enabled,
+                consultation_cost=consultation_cost,
+                consult_fn=consult_fn,
+            )
+            for summary in eval_summaries:
+                summary.rollout = rollout_index
+            result.eval_episode_summaries.extend(eval_summaries)
+            if eval_summaries:
+                logger.info(
+                    "Rollout %d/%d: evaluation mean return %.2f over %d episode(s)",
+                    rollout_index, num_rollouts,
+                    sum(s.nasimemu_return for s in eval_summaries) / len(eval_summaries),
+                    len(eval_summaries),
+                )
+
         if stop_event is not None and stop_event.is_set():
             logger.info("Stop requested; ending training after %d environment step(s)", result.environment_steps)
             result.stopped_by_user = True
@@ -185,4 +223,6 @@ async def run_baseline_training(
         num_rollouts=num_rollouts,
         device=resolved_device,
         seed=resolved_seed,
+        eval_episodes=config.metrics.eval_episodes,
+        eval_every_rollouts=config.metrics.eval_every_rollouts,
     )

@@ -195,3 +195,23 @@ def test_redact_helper_hides_a_raw_secret_shaped_key():
     assert result["password"] == "***REDACTED***"
     assert result["password_env"] == "MARLA_X_PASSWORD"
     assert result["nested"]["api_key"] == "***REDACTED***"
+
+
+def test_metrics_eval_episodes_defaults_to_disabled():
+    config = parse_config(minimal_config_dict("scenario-name-without-yaml-suffix"))
+    assert config.metrics.eval_episodes == 0
+    assert config.metrics.eval_every_rollouts == 1
+
+
+def test_metrics_eval_episodes_rejects_negative_value():
+    d = minimal_config_dict("scenario-name-without-yaml-suffix")
+    d["metrics"] = {"eval_episodes": -1}
+    with pytest.raises(ConfigError):
+        parse_config(d)
+
+
+def test_metrics_eval_every_rollouts_rejects_non_positive_value():
+    d = minimal_config_dict("scenario-name-without-yaml-suffix")
+    d["metrics"] = {"eval_every_rollouts": 0}
+    with pytest.raises(ConfigError):
+        parse_config(d)

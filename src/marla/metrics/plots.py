@@ -37,6 +37,7 @@ def generate_plots(run_dir: Path, plots_dir: Path) -> list[Path]:
             written += _plot_query_behavior(updates, plots_dir)
             written += _plot_training_dynamics(updates, plots_dir)
             written += _plot_optimization_diagnostics(updates, plots_dir)
+            written += _plot_learning_rate(updates, plots_dir)
 
     decisions_path = run_dir / "decisions.csv"
     if decisions_path.exists() and decisions_path.stat().st_size > 0:
@@ -55,13 +56,53 @@ def _save(fig, path: Path) -> Path:
     return path
 
 
+def _split_train_eval(episodes: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame, str]:
+    """Splits into (train, eval, x_column), tolerating older episodes.csv
+    files written before ``rollout``/``is_eval`` existed (see writer.py)."""
+    if "is_eval" not in episodes.columns or "rollout" not in episodes.columns:
+        return episodes, episodes.iloc[0:0], "episode_id"
+    train = episodes[episodes["is_eval"] == False]  # noqa: E712 (pandas bool comparison)
+    eval_ = episodes[episodes["is_eval"] == True]  # noqa: E712
+    x_col = "rollout" if train["rollout"].notna().any() or eval_["rollout"].notna().any() else "episode_id"
+    return train, eval_, x_col
+
+
+def _grouped_mean_and_band(df: pd.DataFrame, x_col: str, y_col: str, window: int = 5):
+    """Mean +/- an uncertainty band of ``y_col`` per ``x_col`` value.
+
+    Real cross-sample std where more than one row shares an x value (e.g. a
+    batch of eval episodes at one checkpoint); otherwise a rolling std
+    across nearby points as a local-variability estimate, plus a light
+    rolling mean for readability -- the standard smoothed-learning-curve-
+    with-uncertainty-band presentation for single-run RL training curves.
+    """
+    grouped = df.groupby(x_col)[y_col].agg(["mean", "std"]).sort_index()
+    window = max(1, min(window, len(grouped)))
+    mean = grouped["mean"].rolling(window, min_periods=1).mean()
+    rolling_std = grouped["mean"].rolling(window, min_periods=1).std()
+    band = grouped["std"].fillna(rolling_std).fillna(0.0)
+    return grouped.index.to_numpy(), mean.to_numpy(), band.to_numpy()
+
+
 def _plot_episode_returns(episodes: pd.DataFrame, plots_dir: Path) -> list[Path]:
+    train, eval_, x_col = _split_train_eval(episodes)
+    x_label = "Rollout" if x_col == "rollout" else "Episode"
+
     fig, ax = plt.subplots(figsize=(8, 4.5))
-    ax.plot(episodes["episode_id"], episodes["benchmark_return"], marker=".", label="benchmark_return")
-    ax.plot(episodes["episode_id"], episodes["training_return"], marker=".", label="training_return", alpha=0.7)
-    ax.set_xlabel("Episode")
-    ax.set_ylabel("Return")
-    ax.set_title("Episode return over training")
+
+    if not train.empty:
+        x, mean, band = _grouped_mean_and_band(train, x_col, "benchmark_return")
+        ax.plot(x, mean, label="train (stochastic policy)", color="tab:blue")
+        ax.fill_between(x, mean - band, mean + band, color="tab:blue", alpha=0.2)
+
+    if not eval_.empty:
+        x, mean, band = _grouped_mean_and_band(eval_, x_col, "benchmark_return")
+        ax.plot(x, mean, label="eval (greedy policy)", color="tab:orange", linestyle="--", marker=".")
+        ax.fill_between(x, mean - band, mean + band, color="tab:orange", alpha=0.2)
+
+    ax.set_xlabel(x_label)
+    ax.set_ylabel("Average reward (benchmark return)")
+    ax.set_title("Average reward over training")
     ax.legend()
     ax.grid(alpha=0.3)
     return [_save(fig, plots_dir / "episode_returns.png")]
@@ -132,26 +173,41 @@ def _plot_decision_diagnostics(decisions: pd.DataFrame, plots_dir: Path) -> list
 
 def _plot_episode_efficiency(episodes: pd.DataFrame, plots_dir: Path) -> list[Path]:
     # NASimEmu-agents' reference implementation tracks goal-success rate and
-    # episode length as its primary training-progress signals (alongside
-    # return, already covered by episode_returns.png); this is the MARLA
-    # equivalent, using a rolling window so the trend is readable even
-    # though goal_success is a per-episode 0/1.
-    window = max(1, min(10, len(episodes)))
+    # episode length (train vs. eval) as its primary training-progress
+    # signals alongside return (episode_returns.png); same train/eval split
+    # and smoothed-mean-with-band presentation as there (see
+    # _grouped_mean_and_band), tolerating older runs with no eval data.
+    train, eval_, x_col = _split_train_eval(episodes)
+    train = train.assign(goal_success=train["goal_success"].astype(float))
+    if not eval_.empty:
+        eval_ = eval_.assign(goal_success=eval_["goal_success"].astype(float))
+    x_label = "Rollout" if x_col == "rollout" else "Episode"
+
     fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(10, 4))
 
-    success_rate = episodes["goal_success"].astype(float).rolling(window, min_periods=1).mean()
-    ax1.plot(episodes["episode_id"], success_rate)
-    ax1.set_xlabel("Episode")
-    ax1.set_ylabel(f"Goal success rate (rolling mean, window={window})")
+    x, mean, band = _grouped_mean_and_band(train, x_col, "goal_success")
+    ax1.plot(x, mean, label="train (stochastic policy)", color="tab:blue")
+    ax1.fill_between(x, (mean - band).clip(0, 1), (mean + band).clip(0, 1), color="tab:blue", alpha=0.2)
+    if not eval_.empty:
+        x, mean, band = _grouped_mean_and_band(eval_, x_col, "goal_success")
+        ax1.plot(x, mean, label="eval (greedy policy)", color="tab:orange", linestyle="--", marker=".")
+        ax1.fill_between(x, (mean - band).clip(0, 1), (mean + band).clip(0, 1), color="tab:orange", alpha=0.2)
+    ax1.set_xlabel(x_label)
+    ax1.set_ylabel("Goal success rate")
     ax1.set_ylim(0, 1)
     ax1.set_title("Goal success rate over training")
+    ax1.legend()
     ax1.grid(alpha=0.3)
 
-    ax2.plot(episodes["episode_id"], episodes["environment_steps"], label="environment steps", alpha=0.8)
-    if episodes["steps_to_goal"].notna().any():
-        ax2.plot(episodes["episode_id"], episodes["steps_to_goal"], label="steps to goal", alpha=0.8)
-    ax2.set_xlabel("Episode")
-    ax2.set_ylabel("Steps")
+    x, mean, band = _grouped_mean_and_band(train, x_col, "environment_steps")
+    ax2.plot(x, mean, label="train (stochastic policy)", color="tab:blue")
+    ax2.fill_between(x, mean - band, mean + band, color="tab:blue", alpha=0.2)
+    if not eval_.empty:
+        x, mean, band = _grouped_mean_and_band(eval_, x_col, "environment_steps")
+        ax2.plot(x, mean, label="eval (greedy policy)", color="tab:orange", linestyle="--", marker=".")
+        ax2.fill_between(x, mean - band, mean + band, color="tab:orange", alpha=0.2)
+    ax2.set_xlabel(x_label)
+    ax2.set_ylabel("Episode length (environment steps)")
     ax2.set_title("Episode length over training")
     ax2.legend()
     ax2.grid(alpha=0.3)
@@ -159,21 +215,29 @@ def _plot_episode_efficiency(episodes: pd.DataFrame, plots_dir: Path) -> list[Pa
 
 
 def _plot_training_dynamics(updates: pd.DataFrame, plots_dir: Path) -> list[Path]:
-    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(10, 4), sharex=True)
-    ax1.plot(updates["update"], updates["action_entropy"], label="action_entropy")
-    ax1.plot(updates["update"], updates["query_entropy"], label="query_entropy")
-    ax1.set_xlabel("PPO update")
-    ax1.set_ylabel("Entropy")
-    ax1.set_title("Policy entropy over training")
-    ax1.legend()
-    ax1.grid(alpha=0.3)
-
-    ax2.plot(updates["update"], updates["learning_rate"], color="tab:orange")
-    ax2.set_xlabel("PPO update")
-    ax2.set_ylabel("Learning rate")
-    ax2.set_title("Learning rate over training")
-    ax2.grid(alpha=0.3)
+    fig, ax = plt.subplots(figsize=(8, 4.5))
+    ax.plot(updates["update"], updates["action_entropy"], label="action_entropy")
+    ax.plot(updates["update"], updates["query_entropy"], label="query_entropy")
+    ax.set_xlabel("PPO update")
+    ax.set_ylabel("Entropy")
+    ax.set_title("Policy entropy over training")
+    ax.legend()
+    ax.grid(alpha=0.3)
     return [_save(fig, plots_dir / "training_dynamics.png")]
+
+
+def _plot_learning_rate(updates: pd.DataFrame, plots_dir: Path) -> list[Path]:
+    fig, ax = plt.subplots(figsize=(8, 4.5))
+    ax.plot(updates["update"], updates["learning_rate"], color="tab:orange")
+    ax.set_xlabel("PPO update")
+    ax.set_ylabel("Learning rate")
+    is_constant = updates["learning_rate"].nunique() <= 1
+    title = "Learning rate over training"
+    if is_constant:
+        title += " (constant -- no scheduler configured)"
+    ax.set_title(title)
+    ax.grid(alpha=0.3)
+    return [_save(fig, plots_dir / "learning_rate.png")]
 
 
 def _plot_optimization_diagnostics(updates: pd.DataFrame, plots_dir: Path) -> list[Path]:

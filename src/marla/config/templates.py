@@ -77,6 +77,13 @@ rl_orchestrator:
 metrics:
   output_directory: runs
   record_decisions: true
+  # Periodic deterministic (greedy) evaluation episodes, so `marla summarize`
+  # has a real train-vs-eval reward/episode-length curve out of the box.
+  # Cheap here since there's no Plan Maker to consult -- the assisted
+  # template below leaves this at 0 (disabled) since each eval episode
+  # would also consult the Plan Maker, and see MetricsConfig's docstring.
+  eval_episodes: 2
+  eval_every_rollouts: 2
 
 reproducibility:
   deterministic_torch: true
@@ -189,6 +196,11 @@ agents:
 metrics:
   output_directory: runs
   record_decisions: true
+  # eval_episodes defaults to 0 (disabled): a periodic deterministic
+  # evaluation pass would consult the Plan Maker again for each eval
+  # episode's queries, doubling real model-inference cost for this
+  # quickstart. See baseline_quickstart.yaml's metrics section, and
+  # MetricsConfig's docstring, for what enabling it gets you.
 
 reproducibility:
   deterministic_torch: true

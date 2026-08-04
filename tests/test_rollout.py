@@ -7,7 +7,7 @@ import torch
 from marla.config.loader import load_config
 from marla.environment.nasimemu_adapter import NasimEmuAdapter
 from marla.learning.recurrent_policy import RecurrentPolicy
-from marla.learning.rollout import RolloutCollector
+from marla.learning.rollout import EVAL_SEED_OFFSET, RolloutCollector, run_evaluation_episodes
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 SMALL_SCENARIO = str((REPO_ROOT / "NASimEmu/scenarios/sm_entry_dmz_one_subnet.v2.yaml").resolve())
@@ -187,3 +187,69 @@ async def test_collect_sets_bootstrap_value_when_stopped_mid_step_not_at_episode
     assert len(records) == 1
     assert records[0].terminated is False
     assert records[0].bootstrap_value is not None
+
+
+@pytest.mark.asyncio
+async def test_deterministic_collector_is_reproducible_across_runs():
+    # A deterministic (greedy) collector must always pick the same action
+    # for the same policy weights/state -- unlike the stochastic training
+    # path, two independent collect() calls from the same seed must produce
+    # an identical action sequence.
+    config = load_config(REPO_ROOT / "examples" / "baseline.yaml")
+    policy = RecurrentPolicy(config.policy)
+
+    def make_deterministic_collector():
+        adapter = NasimEmuAdapter(
+            scenario=SMALL_SCENARIO, max_episode_steps=6,
+            completion_reward=config.objective.completion_reward,
+            premature_finish_penalty=config.objective.premature_finish_penalty,
+        )
+        return RolloutCollector(adapter, policy, run_id="test-run", base_seed=1, deterministic=True)
+
+    first, _ = await make_deterministic_collector().collect(10)
+    second, _ = await make_deterministic_collector().collect(10)
+
+    assert [r.selected_action_index for r in first] == [r.selected_action_index for r in second]
+
+
+@pytest.mark.asyncio
+async def test_run_evaluation_episodes_tags_summaries_as_eval_and_restores_train_mode():
+    config = load_config(REPO_ROOT / "examples" / "baseline.yaml")
+    adapter = NasimEmuAdapter(
+        scenario=SMALL_SCENARIO, max_episode_steps=6,
+        completion_reward=config.objective.completion_reward,
+        premature_finish_penalty=config.objective.premature_finish_penalty,
+    )
+    policy = RecurrentPolicy(config.policy)
+
+    summaries = await run_evaluation_episodes(
+        policy=policy, adapter=adapter, run_id="test-run", num_episodes=2, seed_start=EVAL_SEED_OFFSET,
+    )
+
+    assert len(summaries) == 2
+    assert all(s.is_eval for s in summaries)
+    assert policy.training is True  # eval() must not leak into subsequent training
+
+
+@pytest.mark.asyncio
+async def test_run_evaluation_episodes_uses_fixed_seeds_regardless_of_training_progress():
+    # The same eval seed range must be reused every checkpoint (an
+    # apples-to-apples fixed test set), independent of how far training has
+    # progressed -- unlike training episode seeds, which always increment.
+    config = load_config(REPO_ROOT / "examples" / "baseline.yaml")
+    policy = RecurrentPolicy(config.policy)
+
+    def make_adapter():
+        return NasimEmuAdapter(
+            scenario=SMALL_SCENARIO, max_episode_steps=6,
+            completion_reward=config.objective.completion_reward,
+            premature_finish_penalty=config.objective.premature_finish_penalty,
+        )
+
+    first = await run_evaluation_episodes(
+        policy=policy, adapter=make_adapter(), run_id="test-run", num_episodes=2, seed_start=EVAL_SEED_OFFSET,
+    )
+    second = await run_evaluation_episodes(
+        policy=policy, adapter=make_adapter(), run_id="test-run", num_episodes=2, seed_start=EVAL_SEED_OFFSET,
+    )
+    assert [s.seed for s in first] == [s.seed for s in second]

@@ -150,6 +150,68 @@ def test_write_run_artifacts_handles_none_result(tmp_path):
     assert _read_csv(run_dir / "episodes.csv") == []
 
 
+@pytest.fixture
+def written_run_dir_with_eval(tmp_path):
+    import asyncio
+
+    config = _tiny_config()
+    data = config.model_dump()
+    data["metrics"]["eval_episodes"] = 2
+    data["metrics"]["eval_every_rollouts"] = 1
+    from marla.config.loader import parse_config
+
+    config = parse_config(data)
+    result = asyncio.run(run_baseline_training(config, SMALL_SCENARIO, num_rollouts=2, seed=1))
+    resolved_device = resolve_device(config.device)
+    run_dir = tmp_path / "run"
+    start = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    end = datetime(2026, 1, 1, 0, 5, tzinfo=timezone.utc)
+    write_run_artifacts(run_dir, config, result, resolved_device, start, end, status="completed")
+    return run_dir, config, result
+
+
+def test_episodes_csv_includes_eval_rows_tagged_with_rollout_and_is_eval(written_run_dir_with_eval):
+    run_dir, _config, result = written_run_dir_with_eval
+    rows = _read_csv(run_dir / "episodes.csv")
+    assert len(rows) == len(result.episode_summaries) + len(result.eval_episode_summaries)
+
+    train_rows = [r for r in rows if r["is_eval"] == "False"]
+    eval_rows = [r for r in rows if r["is_eval"] == "True"]
+    assert len(eval_rows) == len(result.eval_episode_summaries)
+    assert len(train_rows) == len(result.episode_summaries)
+    assert eval_rows, "expected eval rows with eval_episodes=2"
+    for row in rows:
+        assert row["rollout"] != ""
+
+
+def test_summary_json_reports_eval_aggregates(written_run_dir_with_eval):
+    run_dir, _config, result = written_run_dir_with_eval
+    summary = json.loads((run_dir / "summary.json").read_text(encoding="utf-8"))
+    assert summary["eval_episode_count"] == len(result.eval_episode_summaries)
+    assert summary["mean_eval_return"] is not None
+    assert 0.0 <= summary["eval_goal_success_rate"] <= 1.0
+
+
+def test_summary_json_eval_fields_are_none_when_eval_disabled(written_run_dir):
+    run_dir, _config, _result = written_run_dir
+    summary = json.loads((run_dir / "summary.json").read_text(encoding="utf-8"))
+    assert summary["eval_episode_count"] == 0
+    assert summary["mean_eval_return"] is None
+    assert summary["eval_goal_success_rate"] is None
+
+
+@pytest.mark.integration
+def test_generate_plots_overlays_eval_series_when_present(written_run_dir_with_eval):
+    from marla.metrics.plots import generate_plots
+
+    run_dir, _config, _result = written_run_dir_with_eval
+    written = generate_plots(run_dir, run_dir / "plots")
+    names = {p.name for p in written}
+    assert "episode_returns.png" in names
+    assert "episode_efficiency.png" in names
+    assert "learning_rate.png" in names
+
+
 def test_config_yaml_is_a_valid_redacted_dump(written_run_dir):
     run_dir, config, _result = written_run_dir
     dumped = yaml.safe_load((run_dir / "config.yaml").read_text(encoding="utf-8"))

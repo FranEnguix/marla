@@ -113,3 +113,35 @@ async def test_run_training_loop_does_not_flag_stopped_by_user_on_normal_complet
     config = _tiny_config()
     result = await run_baseline_training(config, SMALL_SCENARIO, num_rollouts=1, seed=1)
     assert result.stopped_by_user is False
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_run_baseline_training_tags_every_episode_with_its_rollout():
+    config = _tiny_config()
+    result = await run_baseline_training(config, SMALL_SCENARIO, num_rollouts=3, seed=1)
+    assert all(s.rollout is not None for s in result.episode_summaries)
+    assert all(1 <= s.rollout <= 3 for s in result.episode_summaries)
+    assert result.eval_episode_summaries == []  # eval_episodes defaults to 0 (disabled)
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_run_baseline_training_runs_periodic_evaluation_when_enabled():
+    config = _tiny_config()
+    data = config.model_dump()
+    data["metrics"]["eval_episodes"] = 2
+    data["metrics"]["eval_every_rollouts"] = 1
+    config = parse_config(data)
+
+    result = await run_baseline_training(config, SMALL_SCENARIO, num_rollouts=2, seed=1)
+
+    # 2 eval episodes after each of 2 rollouts.
+    assert len(result.eval_episode_summaries) == 4
+    assert all(s.is_eval for s in result.eval_episode_summaries)
+    assert all(not s.is_eval for s in result.episode_summaries)
+    assert {s.rollout for s in result.eval_episode_summaries} == {1, 2}
+    # The same fixed eval seeds are reused at every checkpoint.
+    first_checkpoint_seeds = sorted(s.seed for s in result.eval_episode_summaries if s.rollout == 1)
+    second_checkpoint_seeds = sorted(s.seed for s in result.eval_episode_summaries if s.rollout == 2)
+    assert first_checkpoint_seeds == second_checkpoint_seeds
