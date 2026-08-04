@@ -1,11 +1,13 @@
-# MARLA
+# Multi-Agent Reinforcement Learning Architecture for offensive AI (MARLA)
 
-Multi-Agent Reinforcement Learning Architecture: a research platform for studying
-whether a reinforcement-learning cyber agent (recurrent PPO over NASimEmu) can
+MARLA is a research-oriented offensive AI platform for simulated environments. It is designed to operate in NASimEmu scenarios and to study how a centralized reinforcement learning attacker can be augmented by advisory agents with specialized reasoning roles.
+
+Concretely: a reinforcement-learning cyber agent (recurrent PPO over NASimEmu) that can
 improve its decisions by selectively consulting an external, frozen,
 language-model-based Plan Maker through a schema-validating Gatekeeper.
 
-See `MARLA_complete_implementation_specification.md` for the full design.
+See `MARLA_complete_implementation_specification.md` for the full design, and
+`architecture_design_documents/` for the original design documents.
 
 ## Install
 
