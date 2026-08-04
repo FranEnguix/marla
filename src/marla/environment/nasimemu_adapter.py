@@ -123,7 +123,10 @@ class NasimEmuAdapter:
             )
 
         target, action_list_index = resolve_action_target(self._env, action.action_id)
-        raw_observation, reward, done, info = self._env.step((target, action_list_index))
+        try:
+            raw_observation, reward, done, info = self._env.step((target, action_list_index))
+        except AssertionError:
+            return self._absorb_invalid_action(action, action_list_index)
 
         # NASimEmuEnv forces done=False for every non-terminal action when no
         # step_limit is configured (see nasimemu.env.NASimEmuEnv.step): the
@@ -140,6 +143,43 @@ class NasimEmuAdapter:
             terminated=False,
             truncated=truncated,
             info=info,
+        )
+
+    def _absorb_invalid_action(self, action: ActionDescriptor, action_list_index: int) -> TransitionResult:
+        """Treat a NASimEmu action-space precondition failure as a normal failed attempt.
+
+        MARLA's legal action set deliberately offers every scenario-wide
+        exploit/privesc against every visible host and lets the environment
+        charge a failure cost for an infeasible one (see
+        ``environment/actions.py``'s module docstring) -- that is
+        ``NASimEmuEnv.step()``'s normal behavior for e.g. a missing
+        required service. But even a ``.yaml`` *static* scenario file can
+        still assign each episode's hosts a randomized OS/service
+        arrangement under the hood (see ``reset()``'s docstring), so a
+        scenario-wide exploit/privesc can turn out not to be a member of
+        *this episode's* precomputed action space for a specific host.
+        NASimEmu enforces that as a hard precondition
+        (``assert a in self.env.action_space.actions`` in
+        ``nasimemu.env.NASimEmuEnv._translate_action``) rather than the
+        graceful "attempt failed, pay the cost" its own ``step()`` applies
+        to every other kind of infeasible attempt -- observed in practice
+        after ~11,000 episodes of a real training run. Absorbing it here
+        (same cost-only reward, no state change, no crash) keeps that one
+        rare, state-dependent combination from taking down an otherwise
+        healthy multi-hour run, consistent with the rest of the legal
+        action set's "attempt anything, pay for failure" design.
+        """
+        _, action_params = self._env.action_list[action_list_index]
+        cost = action_params.get("cost", 1.0)
+        self._env.step_idx += 1
+        new_state = self._make_state(self._env.s_raw)
+        truncated = new_state.step_idx >= self._max_episode_steps
+        return TransitionResult(
+            state=new_state,
+            nasimemu_reward=-cost / 10.0,  # matches NASimEmuEnv's own reward scaling (r /= 10)
+            terminated=False,
+            truncated=truncated,
+            info={"invalid_action": True, "action_id": action.action_id},
         )
 
     def _make_state(self, raw_observation: np.ndarray) -> EnvironmentState:

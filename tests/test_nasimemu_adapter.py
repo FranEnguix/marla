@@ -106,3 +106,44 @@ def test_objective_satisfied_is_boolean():
     adapter = make_adapter()
     adapter.reset(seed=1)
     assert isinstance(adapter.objective_satisfied(), bool)
+
+
+def test_step_absorbs_a_nasimemu_action_space_assertion_error(monkeypatch):
+    # Regression test: NASimEmu's own _translate_action() asserts that the
+    # constructed action is a member of this episode's precomputed action
+    # space -- a hard precondition, not the graceful "attempt failed, pay
+    # the cost" its own step() applies to every other infeasible attempt.
+    # A real 100k-step run crashed on exactly this after ~11,000 episodes
+    # (a scenario-wide exploit that wasn't valid for one specific episode's
+    # host arrangement); MARLA must absorb it like any other failed
+    # attempt instead of letting the whole run die.
+    adapter = make_adapter(max_episode_steps=20)
+    state = adapter.reset(seed=1)
+    actions = adapter.legal_actions(state)
+    non_finish = next(a for a in actions if not a.is_finish)
+
+    def _raise_assertion_error(*args, **kwargs):
+        raise AssertionError("Failed to execute <fake action>")
+
+    monkeypatch.setattr(adapter._env, "step", _raise_assertion_error)
+    result = adapter.step(non_finish)
+
+    assert result.terminated is False
+    assert result.state is not None
+    assert result.state.step_idx == state.step_idx + 1  # still advances, like a real step
+    assert result.state.host_addresses == state.host_addresses  # unchanged: nothing actually ran
+    assert result.nasimemu_reward < 0  # a real cost was still charged
+    assert result.info["invalid_action"] is True
+    assert result.info["action_id"] == non_finish.action_id
+
+
+def test_step_absorbed_invalid_action_can_still_truncate_the_episode(monkeypatch):
+    adapter = make_adapter(max_episode_steps=1)
+    state = adapter.reset(seed=1)
+    actions = adapter.legal_actions(state)
+    non_finish = next(a for a in actions if not a.is_finish)
+
+    monkeypatch.setattr(adapter._env, "step", lambda *a, **k: (_ for _ in ()).throw(AssertionError("x")))
+    result = adapter.step(non_finish)
+
+    assert result.truncated is True
