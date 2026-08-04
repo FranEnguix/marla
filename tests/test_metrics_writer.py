@@ -246,3 +246,7 @@ def test_generate_plots_includes_consultation_plots_for_assisted_runs(written_as
     assert "consultation_activity.png" in names
     assert "query_behavior.png" in names
     assert "policy_confidence.png" in names
+    assert "episode_efficiency.png" in names
+    assert "training_dynamics.png" in names
+    assert "gradient_and_clipping.png" in names
+    assert "advice_influence.png" in names  # assisted + forced consult_fn: has accepted advice
