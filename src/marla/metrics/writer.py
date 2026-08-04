@@ -1,5 +1,5 @@
 """Writes the run directory (spec section 21): metadata.json, episodes.csv,
-decisions.csv, updates.csv, summary.json, config.yaml.
+decisions.csv, updates.csv, summary.json, config.yaml, checkpoint.pt.
 
 The RL Orchestrator is the only central metrics writer (spec section 21);
 this module is called once, after a run ends (whether it completed,
@@ -14,8 +14,11 @@ success/failure signal separate from the reward value itself), and
 ``artifact_path`` (spec's ``artifacts/plan_maker/<request-id>.json`` full
 request/response dump isn't implemented -- ``marla run --debug`` writes
 comparable query/response text files to ``debug/<run_id>/`` instead).
-``updates.csv``'s ``checkpoint_id`` is likewise always empty: no
-checkpoint-per-update saving is wired into the training loop yet.
+``updates.csv``'s ``checkpoint_id`` is likewise always empty: this module
+saves exactly one checkpoint per run, at the very end (spec section 5's
+normal-shutdown step 1), not one per PPO update -- there is nothing to put
+in a per-update column. Load the final checkpoint with
+``marla.learning.checkpoint.load_checkpoint``.
 """
 
 from __future__ import annotations
@@ -30,6 +33,7 @@ import yaml
 
 from marla.config.loader import config_hash, redacted_config_dict
 from marla.config.models import Config
+from marla.learning.checkpoint import save_checkpoint
 from marla.learning.masking import masked_entropy
 from marla.learning.query_gate import compute_top_two_margin
 from marla.learning.rollout import EpisodeSummary, StepRecord
@@ -349,3 +353,19 @@ def write_run_artifacts(
     )
     if config.metrics.record_decisions:
         write_decisions_csv(run_dir, config, all_records)
+
+    if result is not None:
+        # Spec section 5's normal-shutdown step 1 ("save final checkpoint"):
+        # one checkpoint of the final policy/optimizer state, regardless of
+        # whether training ran to completion or was stopped early. This is
+        # distinct from (and does not populate) updates.csv's per-update
+        # checkpoint_id column -- no per-update checkpointing is wired into
+        # the training loop, only this single end-of-run save.
+        save_checkpoint(
+            run_dir / "checkpoint.pt",
+            result.policy,
+            result.optimizer,
+            update_count=len(result.update_metrics),
+            environment_steps=result.environment_steps,
+            config_hash=config_hash(config),
+        )

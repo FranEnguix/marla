@@ -92,7 +92,7 @@ def test_finish_terminates_without_advancing_nasim_step_idx():
 def test_finish_reward_matches_objective_satisfaction():
     adapter = make_adapter(scenario=UNI_SCENARIO)
     state = adapter.reset(seed=7)
-    assert adapter.objective_satisfied(state) is False  # uni.v2 is not solved at reset
+    assert adapter.objective_satisfied() is False  # uni.v2 is not solved at reset
 
     actions = adapter.legal_actions(state)
     finish = next(a for a in actions if a.is_finish)
@@ -104,5 +104,5 @@ def test_finish_reward_matches_objective_satisfaction():
 
 def test_objective_satisfied_is_boolean():
     adapter = make_adapter()
-    state = adapter.reset(seed=1)
-    assert isinstance(adapter.objective_satisfied(state), bool)
+    adapter.reset(seed=1)
+    assert isinstance(adapter.objective_satisfied(), bool)

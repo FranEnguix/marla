@@ -214,7 +214,11 @@ __marimo__/
 # Generated at runtime, not source (see `marla init` / `marla run`)
 experiment_templates/
 runs/
+runs_*/
 debug/
+
+# Built Sphinx output (see docs/, `sphinx-build -b html docs docs/_build/html`)
+docs/_build/
 
 # Local agent/session state, not project content
 .claude/

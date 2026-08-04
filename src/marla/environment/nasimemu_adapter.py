@@ -91,8 +91,13 @@ class NasimEmuAdapter:
     def to_pyg_data(self, state: EnvironmentState) -> GraphObservation:
         return build_graph_observation(state.host_rows, state.host_addresses, state.subnet_graph)
 
-    def objective_satisfied(self, state: EnvironmentState) -> bool:
-        """All sensitive/value hosts compromised (NASimEmu's native goal)."""
+    def objective_satisfied(self) -> bool:
+        """All sensitive/value hosts compromised (NASimEmu's native goal).
+
+        A direct query of the underlying environment's own current state,
+        not derived from any particular :class:`EnvironmentState` snapshot
+        -- there is nothing to pass in.
+        """
         return bool(self._env.env.goal_reached())
 
     def step(self, action: ActionDescriptor) -> TransitionResult:
@@ -105,8 +110,7 @@ class NasimEmuAdapter:
         if action.is_finish:
             # Reward reflects whether the goal was met *before* finishing;
             # FINISH performs no NASimEmu action, so there is no new state.
-            current_state = self._make_state(None)
-            satisfied = self.objective_satisfied(current_state)
+            satisfied = self.objective_satisfied()
             reward = compute_finish_reward(
                 satisfied, self._completion_reward, self._premature_finish_penalty
             )
@@ -138,9 +142,7 @@ class NasimEmuAdapter:
             info=info,
         )
 
-    def _make_state(self, raw_observation: np.ndarray | None) -> EnvironmentState:
-        if raw_observation is None:
-            raw_observation = self._env.s_raw
+    def _make_state(self, raw_observation: np.ndarray) -> EnvironmentState:
         host_rows = raw_observation[:-1]
         host_addresses = [tuple(int(v) for v in HostVector(row).address) for row in host_rows]
         return EnvironmentState(

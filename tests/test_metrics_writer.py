@@ -7,10 +7,12 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
+import torch
 import yaml
 
-from marla.config.loader import load_config
-from marla.learning.trainer import run_baseline_training
+from marla.config.loader import config_hash, load_config
+from marla.learning.checkpoint import load_checkpoint
+from marla.learning.trainer import build_policy_and_optimizer, run_baseline_training
 from marla.metrics.writer import write_run_artifacts
 from marla.runtime.device import resolve_device
 
@@ -52,8 +54,23 @@ def written_run_dir(tmp_path):
 
 def test_write_run_artifacts_creates_every_expected_file(written_run_dir):
     run_dir, _config, _result = written_run_dir
-    for name in ("config.yaml", "metadata.json", "episodes.csv", "decisions.csv", "updates.csv", "summary.json"):
+    for name in (
+        "config.yaml", "metadata.json", "episodes.csv", "decisions.csv",
+        "updates.csv", "summary.json", "checkpoint.pt",
+    ):
         assert (run_dir / name).is_file(), name
+
+
+def test_written_checkpoint_is_loadable_and_matches_the_trained_policy(written_run_dir):
+    run_dir, config, result = written_run_dir
+    loaded_policy, _optimizer = build_policy_and_optimizer(config, torch.device("cpu"))
+    metadata = load_checkpoint(run_dir / "checkpoint.pt", loaded_policy)
+
+    assert metadata.environment_steps == result.environment_steps
+    assert metadata.update_count == len(result.update_metrics)
+    assert metadata.config_hash == config_hash(config)
+    for key, value in result.policy.state_dict().items():
+        assert torch.equal(value, loaded_policy.state_dict()[key])
 
 
 def test_metadata_json_has_required_fields(written_run_dir):
@@ -148,6 +165,7 @@ def test_write_run_artifacts_handles_none_result(tmp_path):
     metadata = json.loads((run_dir / "metadata.json").read_text(encoding="utf-8"))
     assert metadata["status"] == "failed"
     assert _read_csv(run_dir / "episodes.csv") == []
+    assert not (run_dir / "checkpoint.pt").exists()  # nothing trained yet -- nothing to checkpoint
 
 
 @pytest.fixture

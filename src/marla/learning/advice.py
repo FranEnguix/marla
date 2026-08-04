@@ -71,8 +71,16 @@ def compute_agreement_features(base_logits: Tensor, advice_log_odds: Tensor) -> 
 
     Correlation is 0 when undefined (zero variance in either vector) --
     spec section 15: "If correlation is undefined, use zero."
+
+    Fixed, non-differentiable features for the trust head: the Plan Maker's
+    output is external data, not a trainable parameter, so there is no
+    gradient PPO could usefully take through this comparison -- ``base_logits``
+    keeps its own graph connection for the *outer* residual sum in
+    :meth:`RecurrentPolicy.apply_advice`, this is a separate detached copy.
     """
     device = base_logits.device
+    base_logits = base_logits.detach()
+    advice_log_odds = advice_log_odds.detach()
     agree = float(torch.argmax(base_logits) == torch.argmax(advice_log_odds))
 
     if base_logits.numel() < 2:

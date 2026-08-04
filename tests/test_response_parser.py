@@ -33,6 +33,19 @@ def test_extract_returns_none_for_json_array_not_object():
     assert extract_json_object("[1, 2, 3]") is None
 
 
+def test_extract_json_ignores_unrelated_braces_in_trailing_prose():
+    # Regression test: a naive first-"{"-to-last-"}" pairing would sweep the
+    # unrelated trailing "{ignored}" into the slice, making the combined
+    # text invalid JSON and losing an otherwise perfectly parseable response.
+    text = '{"finish": 0.3} extra thought: {ignored}'
+    assert extract_json_object(text) == {"finish": 0.3}
+
+
+def test_extract_json_ignores_braces_inside_string_values():
+    text = '{"finish": 0.3, "note": "use the {placeholder} token"}'
+    assert extract_json_object(text) == {"finish": 0.3, "note": "use the {placeholder} token"}
+
+
 def test_coerce_scores_passes_through_valid_floats():
     assert coerce_scores({"a": 0.5, "b": 1}) == {"a": 0.5, "b": 1.0}
 

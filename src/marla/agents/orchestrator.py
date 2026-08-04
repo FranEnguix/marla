@@ -11,6 +11,7 @@ loop (see ``learning/trainer.py`` and ``agents/advisory_client.py``).
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 
 import torch
@@ -72,7 +73,7 @@ class OrchestratorLifecycleBehaviour(OneShotBehaviour):
             # per-step consultation is a real await on the Gatekeeper
             # round-trip, which requires staying on this loop rather than
             # running in a background thread (spec section 4.1).
-            agent.training_result = await run_training_loop(
+            training_call = run_training_loop(
                 agent.policy,
                 agent.optimizer,
                 agent.adapter,
@@ -89,7 +90,11 @@ class OrchestratorLifecycleBehaviour(OneShotBehaviour):
                 eval_episodes=agent.config.metrics.eval_episodes,
                 eval_every_rollouts=agent.config.metrics.eval_every_rollouts,
             )
-        except Exception as exc:  # unrecoverable environment/model error
+            if agent.required_participants:
+                agent.training_result = await self._run_training_watching_for_failure(agent, training_call)
+            else:
+                agent.training_result = await training_call
+        except Exception as exc:  # unrecoverable environment/model error, or a required participant's disconnect
             logger.exception("Training failed for run %s", agent.run_id)
             agent.failure = exc
             await self._stop_experiment(agent, conversation_id)
@@ -98,6 +103,46 @@ class OrchestratorLifecycleBehaviour(OneShotBehaviour):
 
         await self._stop_experiment(agent, conversation_id)
         await agent.stop()
+
+    async def _run_training_watching_for_failure(self, agent: "RLOrchestratorAgent", training_call) -> TrainingResult:
+        """Races ``training_call`` against a required participant's disconnect.
+
+        ``wait_for_all_ready`` only drains ``agent.events`` during the
+        pre-training handshake (see ``_wait_for_ready_with_retries``); once
+        training starts, nothing else reads that queue. Without this, a
+        Gatekeeper or Plan Maker that disconnects mid-training -- e.g. while
+        an advisory request is in flight -- is still detected via presence
+        (``_handle_unavailable`` enqueues a ``FailureSignal``), but the
+        signal is never acted on: the run either hangs forever awaiting a
+        response that will never arrive, or trains on obliviously until the
+        next consultation hangs. This turns that detected-but-ignored
+        disconnect into an actual failed run, consistent with how the same
+        disconnect is already handled if it happens before training starts.
+        """
+        training_task = asyncio.ensure_future(training_call)
+        failure_task = asyncio.ensure_future(self._next_failure(agent.events))
+        try:
+            done, _pending = await asyncio.wait({training_task, failure_task}, return_when=asyncio.FIRST_COMPLETED)
+            if training_task in done:
+                return training_task.result()
+
+            event = failure_task.result()
+            training_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await training_task
+            raise LifecycleFailedError(event.alias, event.reason)
+        finally:
+            if not failure_task.done():
+                failure_task.cancel()
+
+    @staticmethod
+    async def _next_failure(events: "asyncio.Queue") -> FailureSignal:
+        while True:
+            event = await events.get()
+            if isinstance(event, FailureSignal):
+                return event
+            # A stray ReadySignal duplicate arriving after training has
+            # already started is not a failure; keep waiting for one.
 
     async def _stop_experiment(self, agent: "RLOrchestratorAgent", conversation_id: str) -> None:
         # From here on, participants disconnecting is the run ending as

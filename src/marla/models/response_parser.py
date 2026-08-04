@@ -13,6 +13,45 @@ import re
 _FENCE_RE = re.compile(r"```(?:json)?\s*(.*?)```", re.DOTALL)
 
 
+def _find_first_balanced_object_span(text: str) -> tuple[int, int] | None:
+    """(start, end) indices of the first top-level ``{...}`` span in ``text``.
+
+    Tracks brace depth and JSON-string state (so a ``{``/``}`` inside a
+    quoted string value, or trailing prose after the object, doesn't throw
+    off the match) rather than naively pairing the first ``{`` with the
+    *last* ``}`` in the whole text -- a small model's response commonly
+    continues with unrelated prose (or its own stray braces) after a
+    complete JSON object, and the last-``}`` approach would sweep that in
+    and fail to parse a response that was otherwise perfectly fine.
+    """
+    start = text.find("{")
+    if start == -1:
+        return None
+
+    depth = 0
+    in_string = False
+    escaped = False
+    for i in range(start, len(text)):
+        char = text[i]
+        if in_string:
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == '"':
+                in_string = False
+            continue
+        if char == '"':
+            in_string = True
+        elif char == "{":
+            depth += 1
+        elif char == "}":
+            depth -= 1
+            if depth == 0:
+                return start, i
+    return None
+
+
 def extract_json_object(raw_text: str) -> dict | None:
     """Extract the first top-level JSON object found in ``raw_text``, if any."""
     text = raw_text.strip()
@@ -21,10 +60,10 @@ def extract_json_object(raw_text: str) -> dict | None:
     if fence_match:
         text = fence_match.group(1).strip()
 
-    start = text.find("{")
-    end = text.rfind("}")
-    if start == -1 or end == -1 or end < start:
+    span = _find_first_balanced_object_span(text)
+    if span is None:
         return None
+    start, end = span
 
     try:
         parsed = json.loads(text[start : end + 1])
