@@ -32,6 +32,11 @@ dev = [
   "pytest>=7.0",
   "pytest-asyncio>=0.23",
 ]
+docs = [
+  "sphinx>=7.0",
+  "sphinx-rtd-theme>=2.0",
+  "myst-parser>=2.0",
+]
 
 [project.scripts]
 marla = "marla.cli:app"
