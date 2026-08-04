@@ -28,6 +28,11 @@ def _tiny_config():
     data["policy"]["ppo"]["minibatch_sequences"] = 2
     data["policy"]["recurrent"]["sequence_length"] = 4
     data["device"] = "cpu"
+    # examples/baseline.yaml enables periodic evaluation by default; tests
+    # that want it explicitly override these two fields themselves (see
+    # written_run_dir_with_eval), so the shared tiny config stays eval-off
+    # regardless of that file's defaults.
+    data["metrics"]["eval_episodes"] = 0
     from marla.config.loader import parse_config
 
     return parse_config(data)

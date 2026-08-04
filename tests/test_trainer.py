@@ -20,6 +20,10 @@ def _tiny_config():
     data["policy"]["ppo"]["epochs"] = 1
     data["policy"]["ppo"]["minibatch_sequences"] = 2
     data["policy"]["recurrent"]["sequence_length"] = 4
+    # examples/baseline.yaml enables periodic evaluation by default; tests
+    # that want it explicitly override these two fields themselves, so the
+    # shared tiny config stays eval-off regardless of that file's defaults.
+    data["metrics"]["eval_episodes"] = 0
     return parse_config(data)
 
 
