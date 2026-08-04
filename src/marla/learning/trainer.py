@@ -1,0 +1,188 @@
+"""Recurrent PPO training loop, shared by the baseline and assisted variants.
+
+Ties together :class:`RolloutCollector`, :func:`compute_gae`, and
+:func:`optimize` into repeated rollout-collect/PPO-update cycles. Native
+``async def`` throughout: the assisted variant's per-step consultation is a
+real ``await`` on the Gatekeeper round-trip, and running natively on the
+event loop (rather than in a background thread) is what lets other
+local-mode agents' behaviours keep being serviced during training. The
+SPADE RL Orchestrator (Milestone 5) awaits this directly; this module is
+also directly usable standalone for the baseline variant and for tests.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import logging
+import random
+import time
+from dataclasses import dataclass, field
+
+import torch
+
+from marla.config.models import Config
+from marla.environment.nasimemu_adapter import NasimEmuAdapter
+from marla.learning.gae import compute_gae
+from marla.learning.ppo import optimize
+from marla.learning.recurrent_policy import RecurrentPolicy
+from marla.learning.rollout import ConsultFn, EpisodeSummary, RolloutCollector, StepRecord
+
+logger = logging.getLogger(__name__)
+
+
+@dataclass
+class TrainingResult:
+    policy: RecurrentPolicy
+    optimizer: torch.optim.Optimizer
+    episode_summaries: list[EpisodeSummary] = field(default_factory=list)
+    update_metrics: list[dict[str, float]] = field(default_factory=list)
+    environment_steps: int = 0
+    all_records: list[StepRecord] = field(default_factory=list)
+    stopped_by_user: bool = False
+
+
+def build_policy_and_optimizer(
+    config: Config, device: torch.device, consultation_enabled: bool = False
+) -> tuple[RecurrentPolicy, torch.optim.Optimizer]:
+    policy = RecurrentPolicy(config.policy, consultation_enabled=consultation_enabled).to(device)
+    optimizer = torch.optim.Adam(policy.parameters(), lr=config.policy.ppo.learning_rate)
+    return policy, optimizer
+
+
+async def run_training_loop(
+    policy: RecurrentPolicy,
+    optimizer: torch.optim.Optimizer,
+    adapter: NasimEmuAdapter,
+    run_id: str,
+    ppo_config,
+    sequence_length: int,
+    num_rollouts: int,
+    device: torch.device,
+    seed: int,
+    consultation_enabled: bool = False,
+    consultation_cost: float = 0.0,
+    consult_fn: ConsultFn | None = None,
+    stop_event: asyncio.Event | None = None,
+) -> TrainingResult:
+    """Repeated rollout-collect/PPO-update cycles over pre-built components.
+
+    Used both by :func:`run_baseline_training` (which builds everything
+    itself, for standalone use and tests) and by the SPADE RL Orchestrator,
+    which resolves the device and constructs the policy *before* connecting
+    to XMPP -- a local-model failure must prevent the agent from ever
+    reporting itself ready (spec section 18).
+    """
+    collector = RolloutCollector(
+        adapter=adapter,
+        policy=policy,
+        run_id=run_id,
+        base_seed=seed,
+        consultation_enabled=consultation_enabled,
+        consultation_cost=consultation_cost,
+        consult_fn=consult_fn,
+        stop_event=stop_event,
+    )
+    rng = random.Random(seed)
+
+    result = TrainingResult(policy=policy, optimizer=optimizer)
+    training_start = time.monotonic()
+
+    for rollout_index in range(1, num_rollouts + 1):
+        logger.info("Rollout %d/%d: collecting %d environment steps...", rollout_index, num_rollouts, ppo_config.rollout_steps)
+        records, summaries = await collector.collect(ppo_config.rollout_steps)
+        result.episode_summaries.extend(summaries)
+        result.environment_steps += len(records)
+        result.all_records.extend(records)
+        logger.info(
+            "Rollout %d/%d collected: %d steps this rollout, %d total, %d episode(s) finished so far",
+            rollout_index, num_rollouts, len(records), result.environment_steps, len(result.episode_summaries),
+        )
+
+        if records:
+            rewards = [r.training_reward for r in records]
+            values = [r.critic_value for r in records]
+            terminated = [r.terminated for r in records]
+            truncated = [r.truncated for r in records]
+            bootstrap_values = [r.bootstrap_value for r in records]
+
+            advantages, returns = compute_gae(
+                rewards, values, terminated, truncated, bootstrap_values, ppo_config.gamma, ppo_config.gae_lambda
+            )
+
+            logger.info("Rollout %d/%d: running %d PPO epoch(s)...", rollout_index, num_rollouts, ppo_config.epochs)
+            metrics = optimize(
+                policy=policy,
+                optimizer=optimizer,
+                records=records,
+                advantages=advantages,
+                returns=returns,
+                ppo_config=ppo_config,
+                sequence_length=sequence_length,
+                minibatch_sequences=ppo_config.minibatch_sequences,
+                device=device,
+                rng=rng,
+                consultation_cost=consultation_cost,
+            )
+            logger.info("Rollout %d/%d: PPO update complete", rollout_index, num_rollouts)
+
+            # Per-rollout aggregates (spec section 21's updates.csv): the
+            # same values for every ppo_update() call within this rollout,
+            # since they all trained on the same collected batch.
+            betas = [r.beta for r in records if r.beta is not None]
+            query_probabilities = [r.old_query_probability for r in records if r.old_query_probability is not None]
+            elapsed = time.monotonic() - training_start
+            for update_index, update_metrics in enumerate(metrics, start=1):
+                update_metrics["update"] = len(result.update_metrics) + update_index
+                update_metrics["environment_steps"] = result.environment_steps
+                update_metrics["learning_rate"] = optimizer.param_groups[0]["lr"]
+                update_metrics["mean_beta"] = sum(betas) / len(betas) if betas else None
+                update_metrics["mean_query_probability"] = (
+                    sum(query_probabilities) / len(query_probabilities) if query_probabilities else None
+                )
+                update_metrics["actual_query_rate"] = sum(r.sampled_query for r in records) / len(records)
+                update_metrics["elapsed_training_seconds"] = elapsed
+                update_metrics["checkpoint_id"] = None  # no checkpointing wired into this run loop yet
+            result.update_metrics.extend(metrics)
+
+        if stop_event is not None and stop_event.is_set():
+            logger.info("Stop requested; ending training after %d environment step(s)", result.environment_steps)
+            result.stopped_by_user = True
+            break
+
+    return result
+
+
+async def run_baseline_training(
+    config: Config,
+    scenario_path: str,
+    num_rollouts: int,
+    device: torch.device | None = None,
+    seed: int | None = None,
+) -> TrainingResult:
+    """Run ``num_rollouts`` collect/optimize cycles of baseline recurrent PPO."""
+    if config.consultation.mode != "disabled":
+        raise ValueError("run_baseline_training requires consultation.mode == 'disabled'")
+
+    resolved_device = device or torch.device("cpu")
+    resolved_seed = seed if seed is not None else config.experiment.seed
+    torch.manual_seed(resolved_seed)
+
+    policy, optimizer = build_policy_and_optimizer(config, resolved_device, consultation_enabled=False)
+    adapter = NasimEmuAdapter(
+        scenario=scenario_path,
+        max_episode_steps=config.environment.max_episode_steps,
+        completion_reward=config.objective.completion_reward,
+        premature_finish_penalty=config.objective.premature_finish_penalty,
+    )
+
+    return await run_training_loop(
+        policy=policy,
+        optimizer=optimizer,
+        adapter=adapter,
+        run_id=config.experiment.run_id or config.experiment.name,
+        ppo_config=config.policy.ppo,
+        sequence_length=config.policy.recurrent.sequence_length,
+        num_rollouts=num_rollouts,
+        device=resolved_device,
+        seed=resolved_seed,
+    )

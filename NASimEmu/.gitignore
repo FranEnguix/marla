@@ -1,0 +1,8 @@
+__pycache__
+*.egg-info
+_*/
+vagrant/Vagrantfile
+vagrant/firewall.rsc
+scenarios/*.pdf
+scenarios/*.rsc
+scenarios/*.vagrant

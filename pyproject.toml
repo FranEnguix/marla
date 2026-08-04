@@ -1,0 +1,49 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "marla"
+version = "0.1.0"
+description = "MARLA: Multi-Agent Reinforcement Learning Architecture for NASimEmu"
+readme = "README.md"
+requires-python = ">=3.10,<3.11"
+dependencies = [
+  "typer>=0.12",
+  "pydantic>=2.0",
+  "PyYAML>=6.0",
+  "spade>=4.0",
+  "numpy",
+  "pandas",
+  "matplotlib",
+  "torch",
+  "torch-geometric",
+]
+
+[project.optional-dependencies]
+# Real local-model Plan Maker backend (Milestone 9). Not required for the
+# baseline variant, the assisted variant with a mock Plan Maker, or a
+# remote-API Plan Maker backend.
+local-lm = [
+  "transformers>=4.40",
+  "accelerate>=0.30",
+]
+dev = [
+  "pytest>=7.0",
+  "pytest-asyncio>=0.23",
+]
+
+[project.scripts]
+marla = "marla.cli:app"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/marla"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
+markers = [
+  "integration: slower integration tests",
+  "distributed: requires multiple processes / a reachable XMPP server",
+  "gpu: requires a CUDA-capable device",
+]

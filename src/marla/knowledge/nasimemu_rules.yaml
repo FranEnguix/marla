@@ -1,0 +1,64 @@
+version: nasimemu-rules-v1
+rules:
+  - id: scan-before-exploit
+    triggers:
+      observation_flags: [services_unknown]
+      legal_action_types: [service_scan, exploit]
+    text: >
+      When services on a reachable host are unknown, prioritize service
+      scanning before selecting a service-dependent exploit on that host.
+
+  - id: process-scan-before-privesc
+    triggers:
+      observation_flags: []
+      legal_action_types: [process_scan, privilege_escalation]
+    text: >
+      A process scan is often a prerequisite for privilege escalation:
+      knowing which processes are running on a host tells you which
+      privilege-escalation techniques are applicable there.
+
+  - id: exploit-needs-visible-prerequisites
+    triggers:
+      observation_flags: []
+      legal_action_types: [exploit]
+    text: >
+      An exploit's applicability depends on the target's visible service
+      and OS information. Give low confidence to exploits whose required
+      service or OS has not been observed on the target host.
+
+  - id: user-to-root
+    triggers:
+      observation_flags: [user_access_present, root_access_missing]
+      legal_action_types: [process_scan, privilege_escalation]
+    text: >
+      When user access already exists on a host and root access is still
+      useful for the objective, prioritize the process scan or privilege
+      escalation actions required to reach root on that host.
+
+  - id: root-more-valuable-than-user
+    triggers:
+      observation_flags: [root_access_missing]
+      legal_action_types: [privilege_escalation]
+    text: >
+      Root access can be more valuable than user access when the
+      objective benefits from it; weigh privilege-escalation actions
+      accordingly rather than treating user-level access as sufficient.
+
+  - id: balance-cost-and-prerequisites
+    triggers:
+      observation_flags: []
+      legal_action_types: []
+    text: >
+      Balance action success probability, cost, visible prerequisites,
+      and expected resulting access level when assigning confidence.
+      Give low confidence to actions whose visible prerequisites are not
+      yet satisfied.
+
+  - id: finish-only-when-satisfied-or-poor-value
+    triggers:
+      observation_flags: []
+      legal_action_types: [finish]
+    text: >
+      Give the finish action high confidence only when the objective is
+      already satisfied, or when continuing the episode has poor expected
+      value relative to its cost. Otherwise give finish low confidence.

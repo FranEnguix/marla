@@ -1,0 +1,28 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+
+# Virtual environment
+.venv/
+venv/
+
+# Test / tooling caches
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Generated at runtime, not source (see marla init / marla run)
+examples/
+experiment_templates/
+runs/
+debug/
+
+# OS / editor cruft
+.DS_Store
+
+# Local agent/session state, not project content
+.claude/
