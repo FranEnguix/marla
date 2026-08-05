@@ -136,12 +136,22 @@ def _plot_losses(updates: pd.DataFrame, plots_dir: Path) -> list[Path]:
     ax1.legend()
     ax1.grid(alpha=0.3)
 
-    ax2.plot(updates["update"], updates["approximate_kl"], label="approximate_kl", color="tab:purple")
-    ax2.plot(updates["update"], updates["explained_variance"], label="explained_variance", color="tab:green")
+    # Separate axes: explained_variance is unbounded below (an occasional
+    # badly-fit update can send it to -1000s) and would otherwise dwarf
+    # approximate_kl's much smaller-scale variation into an invisible flat
+    # line on a shared axis.
+    ax2.plot(updates["update"], updates["approximate_kl"], color="tab:purple", label="approximate_kl")
     ax2.set_xlabel("PPO update")
-    ax2.set_title("PPO diagnostics")
-    ax2.legend()
+    ax2.set_ylabel("Approximate KL", color="tab:purple")
+    ax2.tick_params(axis="y", labelcolor="tab:purple")
     ax2.grid(alpha=0.3)
+
+    ax3 = ax2.twinx()
+    ax3.plot(updates["update"], updates["explained_variance"], color="tab:green", label="explained_variance")
+    ax3.set_ylabel("Explained variance", color="tab:green")
+    ax3.tick_params(axis="y", labelcolor="tab:green")
+
+    ax2.set_title("PPO diagnostics")
     return [_save(fig, plots_dir / "ppo_losses.png")]
 
 
@@ -199,13 +209,17 @@ def _plot_episode_efficiency(episodes: pd.DataFrame, plots_dir: Path) -> list[Pa
     ax1.legend()
     ax1.grid(alpha=0.3)
 
+    # Episode length can't be negative; clip the band's lower edge so a
+    # locally large std (small scenarios can regularly finish in 1-2 steps,
+    # so std can exceed the mean) doesn't draw a misleadingly negative
+    # shaded region for an inherently non-negative quantity.
     x, mean, band = _grouped_mean_and_band(train, x_col, "environment_steps")
     ax2.plot(x, mean, label="train (stochastic policy)", color="tab:blue")
-    ax2.fill_between(x, mean - band, mean + band, color="tab:blue", alpha=0.2)
+    ax2.fill_between(x, (mean - band).clip(min=0), mean + band, color="tab:blue", alpha=0.2)
     if not eval_.empty:
         x, mean, band = _grouped_mean_and_band(eval_, x_col, "environment_steps")
         ax2.plot(x, mean, label="eval (greedy policy)", color="tab:orange", linestyle="--", marker=".")
-        ax2.fill_between(x, mean - band, mean + band, color="tab:orange", alpha=0.2)
+        ax2.fill_between(x, (mean - band).clip(min=0), mean + band, color="tab:orange", alpha=0.2)
     ax2.set_xlabel(x_label)
     ax2.set_ylabel("Episode length (environment steps)")
     ax2.set_title("Episode length over training")
