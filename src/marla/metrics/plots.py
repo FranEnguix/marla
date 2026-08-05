@@ -45,6 +45,7 @@ def generate_plots(run_dir: Path, plots_dir: Path) -> list[Path]:
             written += _plot_training_dynamics(updates, plots_dir)
             written += _plot_optimization_diagnostics(updates, plots_dir)
             written += _plot_learning_rate(updates, plots_dir)
+            written += _plot_reward(updates, plots_dir)
 
     decisions_path = run_dir / "decisions.csv"
     if decisions_path.exists() and decisions_path.stat().st_size > 0:
@@ -259,6 +260,31 @@ def _plot_learning_rate(updates: pd.DataFrame, plots_dir: Path) -> list[Path]:
     ax.set_title(title)
     ax.grid(alpha=0.3)
     return [_save(fig, plots_dir / "learning_rate.png")]
+
+
+def _plot_reward(updates: pd.DataFrame, plots_dir: Path) -> list[Path]:
+    # Absent in updates.csv files written before this field existed --
+    # fields are additive, never backfilled into old runs (see the module
+    # docstring's note on permanently-empty columns for the same pattern).
+    if "mean_nasimemu_reward" not in updates.columns:
+        return []
+
+    # The raw per-step reward signal actually driving PPO, over training --
+    # distinct from episode_returns.png's per-episode *return* (the sum of
+    # this over a whole episode). The two lines only diverge for the
+    # assisted variant, where mean_training_reward additionally reflects
+    # consultation-cost deductions that mean_nasimemu_reward does not.
+    fig, ax = plt.subplots(figsize=(8, 4.5))
+    ax.plot(updates["update"], updates["mean_nasimemu_reward"], label="mean nasimemu reward")
+    if not updates["mean_training_reward"].equals(updates["mean_nasimemu_reward"]):
+        ax.plot(updates["update"], updates["mean_training_reward"], label="mean training reward", alpha=0.7)
+    ax.axhline(0, color="black", linewidth=0.8, alpha=0.4)
+    ax.set_xlabel("PPO update")
+    ax.set_ylabel("Mean reward per step")
+    ax.set_title("Reward over training")
+    ax.legend()
+    ax.grid(alpha=0.3)
+    return [_save(fig, plots_dir / "reward_over_training.png")]
 
 
 def _plot_optimization_diagnostics(updates: pd.DataFrame, plots_dir: Path) -> list[Path]:

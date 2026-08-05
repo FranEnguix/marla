@@ -184,6 +184,7 @@ def test_summarize_prints_stats_and_generates_plots(tmp_path):
     assert "episode_efficiency.png" in written_files
     assert "training_dynamics.png" in written_files
     assert "gradient_and_clipping.png" in written_files
+    assert "reward_over_training.png" in written_files
     # Baseline: no consultations, so consultation/query/advice plots are skipped.
     assert "consultation_activity.png" not in written_files
     assert "query_behavior.png" not in written_files

@@ -104,6 +104,17 @@ rather than failing the whole command over one missing file
     when there's no accepted advice to show (baseline, or a run where every
     consultation was rejected).
 
+``reward_over_training.png``
+    Mean *reward* per step over PPO updates -- the raw per-step signal PPO
+    actually trained on, distinct from ``episode_returns.png``'s per-episode
+    *return* (the sum of this over a whole episode). Plots
+    ``mean_nasimemu_reward`` (the unmodified benchmark reward); also plots
+    ``mean_training_reward`` (additionally reflecting consultation-cost
+    deductions) whenever it differs, which only happens for the assisted
+    variant. Skipped for ``updates.csv`` files written before this field
+    existed -- columns are additive across MARLA versions, never
+    backfilled into old runs.
+
 ``ppo_losses.png``
     Policy/value loss, approximate KL, and explained variance over PPO
     updates.

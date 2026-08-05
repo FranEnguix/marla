@@ -142,6 +142,8 @@ async def run_training_loop(
             # since they all trained on the same collected batch.
             betas = [r.beta for r in records if r.beta is not None]
             query_probabilities = [r.old_query_probability for r in records if r.old_query_probability is not None]
+            mean_nasimemu_reward = sum(r.nasimemu_reward for r in records) / len(records)
+            mean_training_reward = sum(r.training_reward for r in records) / len(records)
             elapsed = time.monotonic() - training_start
             for update_index, update_metrics in enumerate(metrics, start=1):
                 update_metrics["update"] = len(result.update_metrics) + update_index
@@ -152,6 +154,14 @@ async def run_training_loop(
                     sum(query_probabilities) / len(query_probabilities) if query_probabilities else None
                 )
                 update_metrics["actual_query_rate"] = sum(r.sampled_query for r in records) / len(records)
+                # The raw per-step reward signal this rollout actually trained
+                # on -- distinct from episodes.csv's per-episode *return*
+                # (the sum of these over a whole episode). mean_nasimemu_reward
+                # is the unmodified NASimEmu reward (comparable across variants);
+                # mean_training_reward additionally reflects consultation-cost
+                # deductions, so the two only diverge for the assisted variant.
+                update_metrics["mean_nasimemu_reward"] = mean_nasimemu_reward
+                update_metrics["mean_training_reward"] = mean_training_reward
                 update_metrics["elapsed_training_seconds"] = elapsed
                 update_metrics["checkpoint_id"] = None  # no checkpointing wired into this run loop yet
             result.update_metrics.extend(metrics)

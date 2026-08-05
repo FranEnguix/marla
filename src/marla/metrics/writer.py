@@ -60,7 +60,8 @@ _DECISIONS_FIELDS = [
 _UPDATES_FIELDS = [
     "run_id", "update", "environment_steps", "policy_loss", "value_loss", "query_entropy", "action_entropy",
     "approximate_kl", "clip_fraction", "explained_variance", "gradient_norm", "learning_rate", "mean_beta",
-    "mean_query_probability", "actual_query_rate", "elapsed_training_seconds", "checkpoint_id",
+    "mean_query_probability", "actual_query_rate", "mean_nasimemu_reward", "mean_training_reward",
+    "elapsed_training_seconds", "checkpoint_id",
 ]
 
 

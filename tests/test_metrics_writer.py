@@ -146,6 +146,9 @@ def test_updates_csv_has_run_id_and_expected_columns(written_run_dir):
         assert row["run_id"] == config.experiment.run_id
         float(row["policy_loss"])  # must parse as a number
         assert row["mean_beta"] == ""  # baseline never queries
+        # No consultation cost in baseline, so the raw reward signal and
+        # what PPO actually trained on are identical.
+        assert row["mean_nasimemu_reward"] == row["mean_training_reward"]
 
 
 def test_summary_json_has_required_aggregate_fields(written_run_dir):
@@ -233,6 +236,7 @@ def test_generate_plots_overlays_eval_series_when_present(written_run_dir_with_e
     assert "episode_returns.png" in names
     assert "episode_efficiency.png" in names
     assert "learning_rate.png" in names
+    assert "reward_over_training.png" in names
 
 
 def test_config_yaml_is_a_valid_redacted_dump(written_run_dir):
@@ -319,6 +323,10 @@ def test_updates_csv_populates_query_fields_for_assisted_runs(written_assisted_r
     rows = _read_csv(run_dir / "updates.csv")
     assert all(row["mean_query_probability"] != "" for row in rows)
     assert all(0.0 <= float(row["actual_query_rate"]) <= 1.0 for row in rows)
+    # Real consultations happened (forced consult_fn) with a non-zero cost,
+    # so the reward PPO actually trained on must differ from the raw
+    # NASimEmu reward for at least one rollout's aggregate.
+    assert any(row["mean_nasimemu_reward"] != row["mean_training_reward"] for row in rows)
 
 
 @pytest.mark.integration
@@ -335,3 +343,22 @@ def test_generate_plots_includes_consultation_plots_for_assisted_runs(written_as
     assert "training_dynamics.png" in names
     assert "gradient_and_clipping.png" in names
     assert "advice_influence.png" in names  # assisted + forced consult_fn: has accepted advice
+    assert "reward_over_training.png" in names
+
+
+def test_plot_reward_skips_cleanly_for_updates_csv_written_before_the_field_existed(tmp_path):
+    from marla.metrics.plots import generate_plots
+    from marla.metrics.writer import _UPDATES_FIELDS
+
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    old_fields = [f for f in _UPDATES_FIELDS if f not in ("mean_nasimemu_reward", "mean_training_reward")]
+    with (run_dir / "updates.csv").open("w", newline="", encoding="utf-8") as fh:
+        writer = csv.DictWriter(fh, fieldnames=old_fields)
+        writer.writeheader()
+        writer.writerow({field: "" for field in old_fields} | {"run_id": "x", "update": 1, "policy_loss": 0.1})
+
+    written = generate_plots(run_dir, run_dir / "plots")
+    names = {p.name for p in written}
+    assert "reward_over_training.png" not in names
+    assert "learning_rate.png" in names  # every other updates.csv plot still renders
