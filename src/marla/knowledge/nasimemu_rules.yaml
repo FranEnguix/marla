@@ -62,3 +62,14 @@ rules:
       Give the finish action high confidence only when the objective is
       already satisfied, or when continuing the episode has poor expected
       value relative to its cost. Otherwise give finish low confidence.
+
+  - id: finish-when-all-sensitive-hosts-captured
+    triggers:
+      observation_flags: [all_sensitive_hosts_captured]
+      legal_action_types: [finish]
+    text: >
+      Every sensitive host already has root access (sensitive_hosts_total
+      == sensitive_hosts_with_root_access in the observation). The
+      objective is complete: give finish a high confidence score now,
+      since continuing only risks the episode's cost without further
+      benefit.

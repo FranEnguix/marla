@@ -18,6 +18,14 @@ PROMPT_VERSION = "nasimemu-plan-maker-v1"
 _TEMPLATE = """You are the MARLA Plan Maker. You provide advisory confidence scores for
 currently legal NASimEmu actions. You do not execute actions.
 
+GOAL (always true for this task): gain root access on every host in the
+observation with "is_sensitive_target": true. The observation's
+"sensitive_hosts_total" and "sensitive_hosts_with_root_access" tell you
+directly how much of that is already done. The special "finish" action
+ends the episode immediately with no further reward -- it is only a good
+choice once sensitive_hosts_with_root_access == sensitive_hosts_total;
+choosing it earlier ends the episode without completing the objective.
+
 NASIMEMU KNOWLEDGE
 {retrieved_rules}
 
@@ -25,14 +33,26 @@ EXPERIMENT OBJECTIVE
 {objective}
 
 CURRENT VISIBLE OBSERVATION
+Per-host state below lists only *confirmed* facts: a service, process, or
+OS name that is absent from a host's list has simply not been confirmed
+yet, never confirmed absent.
 {observation}
 
 LEGAL ACTIONS
+Each exploit/privilege-escalation action's "parameters" give the specific
+service/os/process it requires on its target -- cross-reference these
+against the target host's own known_services/known_os/known_processes
+above before scoring it.
 {legal_actions}
 
-Assign an independent confidence in the inclusive range [0,1] to every
-supplied action ID. Scores are not required to sum to one. Do not add or
-omit action IDs. Return strict JSON mapping each action ID to its
+Score every action by how much it helps reach the goal from the current
+observation: prefer scanning a reachable host whose services, processes,
+or OS are not yet confirmed; prefer an exploit or privilege-escalation
+action whose required service/os/process is already confirmed present on
+its target over one that isn't; and score "finish" according to the rule
+above. Assign an independent confidence in the inclusive range [0,1] to
+every supplied action ID. Scores are not required to sum to one. Do not
+add or omit action IDs. Return strict JSON mapping each action ID to its
 confidence score, and no explanatory text."""
 
 

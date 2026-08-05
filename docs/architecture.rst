@@ -33,6 +33,20 @@ Plan Maker (:mod:`marla.agents.plan_maker`)
     (:mod:`marla.knowledge.retriever`) -- and returns per-action confidence
     scores in ``[0, 1]``.
 
+    The observation it receives (:func:`marla.environment.observation_summary.build_observation_summary`)
+    lists *specific* confirmed facts per host -- which services, processes,
+    and OS are actually known to be present, not just how many -- plus the
+    scenario-wide ``sensitive_hosts_total``/``sensitive_hosts_with_root_access``
+    capture-target progress. This is what lets the prompt ask it to
+    cross-reference a given exploit/privesc action's own required
+    service/OS/process (carried in that action's ``parameters``) against
+    the specific target host's confirmed facts, rather than scoring
+    actions from vague aggregate counts alone. NASimEmu's own partial-
+    observability model only ever reveals *positive* facts and never
+    reverts one to unknown, so an absent name always means "not yet
+    confirmed," never "confirmed absent" -- the prompt says this
+    explicitly, and nothing in the observation claims otherwise.
+
 NASimEmu Adapter (:mod:`marla.environment.nasimemu_adapter`)
     The single point of contact between MARLA and NASimEmu. Nothing
     outside :mod:`marla.environment` imports ``nasimemu`` directly.

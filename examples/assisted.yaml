@@ -65,7 +65,14 @@ environment:
   max_episode_steps: 100
 
 objective:
-  type: capture_target
+  type: capture_target  # only supported value: gain root access on every sensitive host
+  # Free-text context sent to the Plan Maker alongside the observation --
+  # supplementary color, not the sole source of goal information: the
+  # Plan Maker's prompt already states the capture_target goal explicitly
+  # and precisely (gain root access on every host the observation marks
+  # is_sensitive_target, using the observation's own
+  # sensitive_hosts_total/sensitive_hosts_with_root_access progress
+  # counts), so this can stay short.
   description: Obtain the configured target access
 
 policy:

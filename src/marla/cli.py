@@ -321,12 +321,25 @@ def summarize(
         return "n/a" if value is None else f"{value:.{digits}f}" if isinstance(value, float) else str(value)
 
     typer.echo(f"  episodes: {summary['episode_count']}")
-    typer.echo(f"  goal success rate: {_fmt(summary['goal_success_rate'])}")
+    ci_low, ci_high = summary.get("goal_success_rate_ci_low"), summary.get("goal_success_rate_ci_high")
+    ci_suffix = f" (95% CI {_fmt(ci_low)}-{_fmt(ci_high)})" if ci_low is not None else ""
+    typer.echo(f"  goal success rate: {_fmt(summary['goal_success_rate'])}{ci_suffix}")
+    if summary.get("premature_finish_rate") is not None:
+        typer.echo(
+            f"  premature finish rate: {_fmt(summary['premature_finish_rate'])}  "
+            f"timeout rate: {_fmt(summary.get('timeout_rate'))}"
+        )
     typer.echo(f"  mean benchmark return: {_fmt(summary['mean_benchmark_return'])}")
     typer.echo(f"  mean episode duration: {_fmt(summary['mean_episode_duration_seconds'])}s")
     typer.echo(f"  total consultations: {summary['total_consultations']}")
+    if summary.get("queries_per_successful_episode") is not None:
+        typer.echo(f"  queries per successful episode: {_fmt(summary['queries_per_successful_episode'])}")
     typer.echo(f"  mean Plan Maker latency: {_fmt(summary['mean_plan_maker_latency_ms'])}ms")
+    if summary.get("p95_plan_maker_latency_ms") is not None:
+        typer.echo(f"  p95 Plan Maker latency: {_fmt(summary['p95_plan_maker_latency_ms'])}ms")
     typer.echo(f"  schema rejection rate: {_fmt(summary['schema_rejection_rate'])}")
+    if summary.get("advice_acceptance_rate") is not None:
+        typer.echo(f"  advice acceptance rate: {_fmt(summary['advice_acceptance_rate'])}")
     typer.echo(f"  advice changed top action rate: {_fmt(summary['advice_changed_top_action_rate'])}")
     if summary.get("eval_episode_count"):  # absent in summary.json written before eval episodes existed
         typer.echo(f"  eval episodes: {summary['eval_episode_count']}")

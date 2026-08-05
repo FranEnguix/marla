@@ -29,6 +29,13 @@ def test_load_shipped_knowledge_base():
     assert len(ids) == len(set(ids))  # unique rule IDs
 
 
+def test_shipped_knowledge_base_tells_finish_to_score_high_once_objective_complete():
+    kb = load_knowledge_base("package://marla/knowledge/nasimemu_rules.yaml")
+    obs = {"hosts": [], "sensitive_hosts_total": 1, "sensitive_hosts_with_root_access": 1}
+    matched = retrieve_rules(kb, obs, {"finish"})
+    assert "finish-when-all-sensitive-hosts-captured" in [r.id for r in matched]
+
+
 def _host(access="none", reachable=True, known_services=0, known_processes=0, is_objective_target=False):
     return {
         "target": "host-1-0",
@@ -62,6 +69,25 @@ def test_root_access_missing_flag():
 def test_empty_observation_has_no_positive_flags_but_root_missing_is_vacuously_true():
     flags = compute_observation_flags({"hosts": []})
     assert flags == {"root_access_missing"}
+
+
+def test_all_sensitive_hosts_captured_flag():
+    obs = {"hosts": [], "sensitive_hosts_total": 2, "sensitive_hosts_with_root_access": 2}
+    assert "all_sensitive_hosts_captured" in compute_observation_flags(obs)
+
+    obs_incomplete = {"hosts": [], "sensitive_hosts_total": 2, "sensitive_hosts_with_root_access": 1}
+    assert "all_sensitive_hosts_captured" not in compute_observation_flags(obs_incomplete)
+
+    obs_none_sensitive = {"hosts": [], "sensitive_hosts_total": 0, "sensitive_hosts_with_root_access": 0}
+    assert "all_sensitive_hosts_captured" not in compute_observation_flags(obs_none_sensitive)
+
+
+def test_services_unknown_flag_treats_empty_list_the_same_as_zero_count():
+    # build_observation_summary now reports known_services as a list of
+    # confirmed names, not a count -- an empty list must trigger this flag
+    # exactly like the old count-of-zero did.
+    obs = {"hosts": [{"target": "host-1-0", "access": "none", "reachable": True, "known_services": []}]}
+    assert "services_unknown" in compute_observation_flags(obs)
 
 
 def _kb(*rules: KnowledgeRule) -> KnowledgeBase:

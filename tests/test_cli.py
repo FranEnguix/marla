@@ -185,10 +185,14 @@ def test_summarize_prints_stats_and_generates_plots(tmp_path):
     assert "training_dynamics.png" in written_files
     assert "gradient_and_clipping.png" in written_files
     assert "reward_over_training.png" in written_files
+    assert "episode_outcomes.png" in written_files
     # Baseline: no consultations, so consultation/query/advice plots are skipped.
     assert "consultation_activity.png" not in written_files
     assert "query_behavior.png" not in written_files
     assert "advice_influence.png" not in written_files
+    assert "gatekeeper_reliability.png" not in written_files
+    assert "plan_maker_latency.png" not in written_files
+    assert "query_decision_analysis.png" not in written_files
 
 
 def test_init_creates_valid_baseline_and_assisted_templates(tmp_path, monkeypatch):

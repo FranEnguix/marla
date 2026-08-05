@@ -200,13 +200,35 @@ def write_summary_json(
         return sum(values) / len(values) if values else None
 
     def _median(values: list[float]) -> float | None:
+        return _percentile(values, 0.5)
+
+    def _percentile(values: list[float], p: float) -> float | None:
+        """Linear-interpolation percentile (0 <= p <= 1); ``None`` if empty."""
         if not values:
             return None
         ordered = sorted(values)
-        mid = len(ordered) // 2
-        if len(ordered) % 2:
-            return ordered[mid]
-        return (ordered[mid - 1] + ordered[mid]) / 2
+        if len(ordered) == 1:
+            return ordered[0]
+        rank = p * (len(ordered) - 1)
+        low, high = int(rank), min(int(rank) + 1, len(ordered) - 1)
+        weight = rank - low
+        return ordered[low] * (1 - weight) + ordered[high] * weight
+
+    def _wilson_interval(successes: int, n: int, z: float = 1.96) -> tuple[float, float] | tuple[None, None]:
+        """95%-by-default Wilson score interval for a binomial proportion.
+
+        More reliable than a normal approximation for small ``n`` or a
+        proportion near 0 or 1 (goal_success_rate is exactly one or the
+        other for a short run), which is exactly the regime a MARLA run's
+        episode count often falls into.
+        """
+        if n == 0:
+            return None, None
+        p_hat = successes / n
+        denom = 1 + z**2 / n
+        center = (p_hat + z**2 / (2 * n)) / denom
+        margin = (z / denom) * ((p_hat * (1 - p_hat) / n + z**2 / (4 * n**2)) ** 0.5)
+        return max(0.0, center - margin), min(1.0, center + margin)
 
     # Derived from all_records (every decision made), not episode_summaries
     # (only *completed* episodes) -- a short or interrupted run can have
@@ -228,9 +250,30 @@ def write_summary_json(
 
     total_training_seconds = update_metrics[-1]["elapsed_training_seconds"] if update_metrics else 0.0
 
+    latencies = [r.plan_maker_latency_ms for r in queried_records if r.plan_maker_latency_ms is not None]
+
+    # Episode outcome breakdown (spec's finish_reason plus goal_success):
+    # every completed episode is exactly one of these three, so the three
+    # rates always sum to 1 -- there is no fourth "environment/protocol
+    # failure" category to report because NASimEmu never internally
+    # terminates a non-FINISH action (see nasimemu_adapter.py's step()) and
+    # a NASimEmu action-space precondition failure is absorbed as a normal
+    # failed attempt, not an episode-ending error (see
+    # NasimEmuAdapter._absorb_invalid_action).
+    successful_episodes = [s for s in episode_summaries if s.goal_success]
+    is_premature_finish = lambda s: s.finish_reason == "finish" and not s.goal_success  # noqa: E731
+    is_timeout = lambda s: s.finish_reason == "truncated"  # noqa: E731
+    goal_success_ci_low, goal_success_ci_high = _wilson_interval(
+        len(successful_episodes), len(episode_summaries)
+    )
+
     summary_dict = {
         "episode_count": len(episode_summaries),
         "goal_success_rate": _mean([1.0 if s.goal_success else 0.0 for s in episode_summaries]),
+        "goal_success_rate_ci_low": goal_success_ci_low,
+        "goal_success_rate_ci_high": goal_success_ci_high,
+        "premature_finish_rate": _mean([1.0 if is_premature_finish(s) else 0.0 for s in episode_summaries]),
+        "timeout_rate": _mean([1.0 if is_timeout(s) else 0.0 for s in episode_summaries]),
         "mean_benchmark_return": _mean([s.nasimemu_return for s in episode_summaries]),
         "median_benchmark_return": _median([s.nasimemu_return for s in episode_summaries]),
         "mean_environment_steps": _mean([float(s.environment_steps) for s in episode_summaries]),
@@ -238,16 +281,25 @@ def write_summary_json(
         "mean_episode_duration_seconds": _mean([s.episode_seconds for s in episode_summaries]),
         "total_consultations": consultations_total,
         "mean_consultations_per_episode": _mean([float(s.consultation_count) for s in episode_summaries]),
-        "mean_consultation_cost": _mean([s.consultation_cost for s in episode_summaries if s.consultation_count > 0]),
-        "mean_plan_maker_latency_ms": _mean(
-            [r.plan_maker_latency_ms for r in queried_records if r.plan_maker_latency_ms is not None]
+        "queries_per_successful_episode": (
+            consultations_total / len(successful_episodes)
+            if successful_episodes and consultations_total > 0
+            else None
         ),
+        "mean_consultation_cost": _mean([s.consultation_cost for s in episode_summaries if s.consultation_count > 0]),
+        "mean_plan_maker_latency_ms": _mean(latencies),
+        "median_plan_maker_latency_ms": _median(latencies),
+        "p95_plan_maker_latency_ms": _percentile(latencies, 0.95),
+        "max_plan_maker_latency_ms": max(latencies) if latencies else None,
         "mean_beta": _mean([r.beta for r in accepted_records if r.beta is not None]),
         "advice_changed_top_action_rate": (
             advice_changed_count / len(accepted_records) if accepted_records else None
         ),
         "schema_rejection_rate": (
             schema_rejections_total / consultations_total if consultations_total > 0 else None
+        ),
+        "advice_acceptance_rate": (
+            len(accepted_records) / consultations_total if consultations_total > 0 else None
         ),
         "total_training_environment_steps": environment_steps,
         "total_training_seconds": total_training_seconds,

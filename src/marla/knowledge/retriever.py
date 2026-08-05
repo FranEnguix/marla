@@ -66,18 +66,25 @@ def compute_observation_flags(observation: dict[str, Any]) -> set[str]:
 
     ``observation`` is the JSON summary built by
     ``environment.observation_summary.build_observation_summary``: a dict
-    with a ``hosts`` list, each host carrying ``access``, ``reachable``, and
-    ``known_services``/``known_processes`` counts -- all visible-only.
+    with a ``hosts`` list (each host carrying ``access``, ``reachable``, and
+    the ``known_services``/``known_processes``/``known_os`` name lists --
+    all visible-only) plus the scenario-wide ``sensitive_hosts_total``/
+    ``sensitive_hosts_with_root_access`` capture-target progress counts.
     """
     hosts = observation.get("hosts", [])
     flags: set[str] = set()
 
-    if any(host.get("reachable") and host.get("known_services", 0) == 0 for host in hosts):
+    if any(host.get("reachable") and not host.get("known_services") for host in hosts):
         flags.add("services_unknown")
     if any(host.get("access") in ("user", "root") for host in hosts):
         flags.add("user_access_present")
     if not any(host.get("access") == "root" for host in hosts):
         flags.add("root_access_missing")
+
+    sensitive_total = observation.get("sensitive_hosts_total", 0)
+    sensitive_captured = observation.get("sensitive_hosts_with_root_access", 0)
+    if sensitive_total > 0 and sensitive_captured >= sensitive_total:
+        flags.add("all_sensitive_hosts_captured")
 
     return flags
 

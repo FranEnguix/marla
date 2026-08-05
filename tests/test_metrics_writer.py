@@ -159,6 +159,37 @@ def test_summary_json_has_required_aggregate_fields(written_run_dir):
     assert 0.0 <= summary["goal_success_rate"] <= 1.0
     assert summary["mean_plan_maker_latency_ms"] is None  # baseline never consults
     assert summary["schema_rejection_rate"] is None
+    assert summary["advice_acceptance_rate"] is None
+    assert summary["queries_per_successful_episode"] is None
+
+
+def test_summary_json_goal_success_rate_confidence_interval_brackets_the_point_estimate(written_run_dir):
+    run_dir, _config, _result = written_run_dir
+    summary = json.loads((run_dir / "summary.json").read_text(encoding="utf-8"))
+    low, point, high = (
+        summary["goal_success_rate_ci_low"], summary["goal_success_rate"], summary["goal_success_rate_ci_high"]
+    )
+    assert 0.0 <= low <= point <= high <= 1.0
+
+
+def test_summary_json_episode_outcome_rates_sum_to_one(written_run_dir):
+    run_dir, _config, _result = written_run_dir
+    summary = json.loads((run_dir / "summary.json").read_text(encoding="utf-8"))
+    total = summary["goal_success_rate"] + summary["premature_finish_rate"] + summary["timeout_rate"]
+    assert total == pytest.approx(1.0)
+
+
+def test_summary_json_goal_success_rate_ci_is_none_with_zero_episodes(tmp_path):
+    config = _tiny_config()
+    resolved_device = resolve_device(config.device)
+    run_dir = tmp_path / "run"
+    now = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    write_run_artifacts(run_dir, config, None, resolved_device, now, now, status="failed")
+    summary = json.loads((run_dir / "summary.json").read_text(encoding="utf-8"))
+    assert summary["goal_success_rate_ci_low"] is None
+    assert summary["goal_success_rate_ci_high"] is None
+    assert summary["premature_finish_rate"] is None
+    assert summary["timeout_rate"] is None
 
 
 def test_write_run_artifacts_handles_none_result(tmp_path):
@@ -237,6 +268,7 @@ def test_generate_plots_overlays_eval_series_when_present(written_run_dir_with_e
     assert "episode_efficiency.png" in names
     assert "learning_rate.png" in names
     assert "reward_over_training.png" in names
+    assert "episode_outcomes.png" in names
 
 
 def test_config_yaml_is_a_valid_redacted_dump(written_run_dir):
@@ -344,6 +376,10 @@ def test_generate_plots_includes_consultation_plots_for_assisted_runs(written_as
     assert "gradient_and_clipping.png" in names
     assert "advice_influence.png" in names  # assisted + forced consult_fn: has accepted advice
     assert "reward_over_training.png" in names
+    assert "episode_outcomes.png" in names
+    assert "gatekeeper_reliability.png" in names
+    assert "plan_maker_latency.png" in names
+    assert "query_decision_analysis.png" in names
 
 
 def test_plot_reward_skips_cleanly_for_updates_csv_written_before_the_field_existed(tmp_path):
