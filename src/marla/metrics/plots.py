@@ -10,6 +10,13 @@ matplotlib.use("Agg")  # headless: marla summarize is a CLI command, never a GUI
 import matplotlib.pyplot as plt
 import pandas as pd
 
+# A plain [0, 1] y-limit puts a perfectly flat "always 0" or "always 1"
+# line exactly on the axis border, where it's easy to mistake for no data
+# at all (observed in practice: ~135 consecutive accepted-advice decisions
+# that all changed the top action rendered as an empty-looking plot). This
+# small margin keeps such a line visibly distinct from the frame.
+_RATE_YLIM = (-0.05, 1.05)
+
 
 def generate_plots(run_dir: Path, plots_dir: Path) -> list[Path]:
     """Render whichever plots the available CSVs support; returns the files written.
@@ -163,7 +170,7 @@ def _plot_query_behavior(updates: pd.DataFrame, plots_dir: Path) -> list[Path]:
     ax.plot(updates["update"], updates["actual_query_rate"], label="actual query rate", alpha=0.7)
     ax.set_xlabel("PPO update")
     ax.set_ylabel("Rate")
-    ax.set_ylim(0, 1)
+    ax.set_ylim(*_RATE_YLIM)
     ax.set_title("Query gate behavior over training")
     ax.legend()
     ax.grid(alpha=0.3)
@@ -204,7 +211,7 @@ def _plot_episode_efficiency(episodes: pd.DataFrame, plots_dir: Path) -> list[Pa
         ax1.fill_between(x, (mean - band).clip(0, 1), (mean + band).clip(0, 1), color="tab:orange", alpha=0.2)
     ax1.set_xlabel(x_label)
     ax1.set_ylabel("Goal success rate")
-    ax1.set_ylim(0, 1)
+    ax1.set_ylim(*_RATE_YLIM)
     ax1.set_title("Goal success rate over training")
     ax1.legend()
     ax1.grid(alpha=0.3)
@@ -290,7 +297,7 @@ def _plot_advice_influence(decisions: pd.DataFrame, plots_dir: Path) -> list[Pat
         ax2.plot(range(len(changed)), changed.rolling(window, min_periods=1).mean(), color="tab:green")
     ax2.set_xlabel("Accepted-advice decision (in collection order)")
     ax2.set_ylabel(f"Top action changed (rolling, window={window})")
-    ax2.set_ylim(0, 1)
+    ax2.set_ylim(*_RATE_YLIM)
     ax2.set_title("How often advice changes the top action")
     ax2.grid(alpha=0.3)
     return [_save(fig, plots_dir / "advice_influence.png")]
