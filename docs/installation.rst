@@ -21,7 +21,13 @@ From PyPI:
 
 .. code-block:: bash
 
-   pip install marla
+   pip install marla-agents
+
+The PyPI *distribution* is named ``marla-agents`` (PyPI's anti-typosquat
+check blocks new names within edit-distance 1 of an existing project, and
+plain ``marla`` collides with two already-registered ones) -- but this
+only affects the ``pip install`` line above. Everything else keeps the
+short name: ``import marla`` and the ``marla`` CLI command are unaffected.
 
 This gets you the ``marla`` CLI (``marla version``, ``marla validate``,
 ``marla init``) and everything needed to *read* an experiment or a

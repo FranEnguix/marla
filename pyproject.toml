@@ -3,7 +3,14 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [project]
-name = "marla"
+# PyPI distribution name only -- the importable package stays `marla`
+# (see src/marla, [tool.hatch.build.targets.wheel] below, and the `marla`
+# console script), so `import marla` / `marla run ...` are unaffected by
+# this. Named "marla-agents" rather than "marla" because Warehouse's
+# anti-typosquatting check blocks new names within edit-distance 1 of an
+# existing project, and "marla" collides with the already-registered
+# "marl" and "marlo".
+name = "marla-agents"
 version = "0.1.0"
 description = "MARLA: Multi-Agent Reinforcement Learning Architecture for NASimEmu"
 readme = "README.md"
