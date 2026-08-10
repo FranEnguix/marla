@@ -17,7 +17,20 @@ Requirements
 Base install
 ------------
 
-From the repository root:
+From PyPI:
+
+.. code-block:: bash
+
+   pip install marla
+
+This gets you the ``marla`` CLI (``marla version``, ``marla validate``,
+``marla init``) and everything needed to *read* an experiment or a
+finished run's metrics. It does **not** get you NASimEmu -- see above --
+so ``marla run`` still needs the separate NASimEmu install before it can
+do anything.
+
+From a repository clone, for development (editable install, plus the test
+suite):
 
 .. code-block:: bash
 

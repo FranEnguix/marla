@@ -1,0 +1,29 @@
+# Read the Docs configuration for MARLA.
+# https://docs.readthedocs.io/en/stable/config-file/v2.html
+#
+# Docs live in docs/ and are built with Sphinx + sphinx-rtd-theme (see
+# docs/conf.py and pyproject.toml's `docs` extra). Heavy runtime
+# dependencies (torch, nasimemu, transformers, ...) are never imported by
+# the doc build itself -- see docs/conf.py's autodoc_mock_imports -- so RTD
+# only needs MARLA installed with its `docs` extra, not the full research
+# stack.
+version: 2
+
+build:
+  os: ubuntu-24.04
+  tools:
+    # Matches pyproject.toml's requires-python (MARLA supports 3.10.x only).
+    python: "3.10"
+
+sphinx:
+  configuration: docs/conf.py
+  fail_on_warning: false
+
+python:
+  install:
+    - method: pip
+      path: .
+      extra_requirements:
+        - docs
+
+formats: []

@@ -8,6 +8,28 @@ version = "0.1.0"
 description = "MARLA: Multi-Agent Reinforcement Learning Architecture for NASimEmu"
 readme = "README.md"
 requires-python = ">=3.10,<3.11"
+license = "MIT"
+license-files = ["LICENSE"]
+authors = [
+  {name = "Fran Enguix", email = "enguix.fco@gmail.com"},
+]
+keywords = [
+  "reinforcement-learning",
+  "multi-agent",
+  "offensive-security",
+  "nasimemu",
+  "ppo",
+  "large-language-models",
+]
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "Intended Audience :: Science/Research",
+  "Topic :: Security",
+  "Topic :: Scientific/Engineering :: Artificial Intelligence",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.10",
+  "Operating System :: OS Independent",
+]
 dependencies = [
   "typer>=0.12",
   "pydantic>=2.0",
@@ -38,11 +60,31 @@ docs = [
   "myst-parser>=2.0",
 ]
 
+[project.urls]
+Homepage = "https://github.com/FranEnguix/marla"
+Repository = "https://github.com/FranEnguix/marla"
+Issues = "https://github.com/FranEnguix/marla/issues"
+Documentation = "https://marla.readthedocs.io"
+
 [project.scripts]
 marla = "marla.cli:app"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/marla"]
+
+[tool.hatch.build.targets.sdist]
+# Without this, hatchling's default sdist walks the whole repo root --
+# picking up the vendored NASimEmu/ and NASimEmu-agents/ trees (including
+# a stray wandb run symlink that crashes the build outright) plus
+# runs/docs/_build artifacts. A PyPI sdist should only ever contain the
+# marla package itself, its metadata, and the top-level docs a PyPI
+# project page needs -- not the third-party research code it sits next to
+# in this repository.
+include = [
+  "/src",
+  "/README.md",
+  "/LICENSE",
+]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
