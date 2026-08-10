@@ -216,9 +216,24 @@ experiment_templates/
 runs/
 runs_*/
 debug/
+debug_*/
 
 # Built Sphinx output (see docs/, `sphinx-build -b html docs docs/_build/html`)
 docs/_build/
 
 # Local agent/session state, not project content
 .claude/
+
+# Planning/scratch documents kept locally for reference, not part of the
+# published repository (code, dependencies, and generated docs only):
+# pre-implementation design notes, vendored-dependency provenance
+# (exact upstream commit/patches applied), and ad hoc pip-freeze dumps
+# superseded by pyproject.toml.
+MARLA_complete_implementation_specification.md
+architecture_design_documents/
+NASimEmu-commit.txt
+NASimEmu-agents-commit.txt
+NASimEmu-agents-cuda-fix.patch
+NASimEmu-agents-local-changes.patch
+requirements-installed.txt
+requirements-with-agents.txt

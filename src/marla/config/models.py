@@ -1,10 +1,9 @@
 """Pydantic models for the MARLA experiment configuration schema.
 
 These models are the authoritative, validated representation of an
-experiment YAML file (see ``MARLA_complete_implementation_specification.md``,
-section 19). Every field name mirrors the YAML key exactly. Unknown keys are
-rejected (``extra="forbid"``) so typos fail fast instead of being silently
-ignored.
+experiment YAML file (see spec section 19). Every field name mirrors the
+YAML key exactly. Unknown keys are rejected (``extra="forbid"``) so typos
+fail fast instead of being silently ignored.
 """
 
 from __future__ import annotations

@@ -6,8 +6,9 @@ Concretely: a reinforcement-learning cyber agent (recurrent PPO over NASimEmu) t
 improve its decisions by selectively consulting an external, frozen,
 language-model-based Plan Maker through a schema-validating Gatekeeper.
 
-See `MARLA_complete_implementation_specification.md` for the full design, and
-`architecture_design_documents/` for the original design documents.
+See `docs/` for the full documentation (installation, configuration
+reference, architecture, CLI, and metrics/plots) -- build it locally with
+`pip install -e ".[docs]"` and `sphinx-build -b html docs docs/_build/html`.
 
 ## Install
 

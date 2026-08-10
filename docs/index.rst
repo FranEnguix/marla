@@ -19,10 +19,7 @@ a decision.
 
 .. note::
    This documentation describes the implementation as it exists in this
-   repository. For the full design rationale and the acceptance criteria
-   the implementation is checked against, see
-   ``MARLA_complete_implementation_specification.md`` at the repository
-   root and the ``architecture_design_documents/`` folder.
+   repository.
 
 Where to start
 --------------
