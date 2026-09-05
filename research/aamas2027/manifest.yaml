@@ -9,7 +9,7 @@
 # below corresponds to. Update it if any config file changes.
 
 schema_version: 1
-git_sha: 4e3c7ed411ee51890a7f857c9b0bb4b52c44aa3b  # HEAD as of writing this file; see README.md for the commit that actually ran each result
+git_sha: c145b1a75521e23868ee51b05a92a0a45ffaa005  # the commit that introduced this research program (implementation only -- no run has been launched against it yet, see VALIDATION.md)
 primary_training_scenario: NASimEmu/scenarios/sm_entry_dmz_two_subnets.v2.yaml
 scenario_manifest: scenario_manifest.csv
 
