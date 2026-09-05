@@ -218,6 +218,11 @@ runs_*/
 debug/
 debug_*/
 
+# Generated evaluation output, not source (see
+# research/aamas2027/scripts/evaluate_checkpoint.py and raw/README.md)
+research/aamas2027/raw/eval/
+research/aamas2027/raw/advisory_cache.jsonl
+
 # Built Sphinx output (see docs/, `sphinx-build -b html docs docs/_build/html`)
 docs/_build/
 
