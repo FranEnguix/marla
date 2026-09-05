@@ -110,6 +110,11 @@ class AdvisoryResponsePayload(BaseModel):
     knowledge_version: str
     inference_latency_ms: float
     retrieved_rule_ids: list[str] = Field(default_factory=list)
+    # Token accounting (research/aamas2027) -- None for a backend that
+    # can't report them (e.g. the not-yet-implemented remote backend).
+    input_tokens: int | None = None
+    output_tokens: int | None = None
+    total_tokens: int | None = None
 
     @field_validator("scores")
     @classmethod

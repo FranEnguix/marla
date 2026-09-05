@@ -16,6 +16,7 @@ import logging
 from pathlib import Path
 
 import spade
+import torch
 
 from marla.config.models import Config
 from marla.environment.nasimemu_adapter import NasimEmuAdapter
@@ -57,6 +58,10 @@ async def _build_and_run(
     if config.rl_orchestrator.alias in selected_aliases:
         resolved_device = resolve_device(config.device)
         scenario_path = resolve_scenario_path(config, config_dir)
+        # See runtime/local.py's identical call for why: without this,
+        # experiment.seed does not actually control policy init or
+        # stochastic action/query sampling on the real run path.
+        torch.manual_seed(config.experiment.seed)
         policy, optimizer = build_policy_and_optimizer(
             config, resolved_device.torch_device, consultation_enabled=config.consultation.mode == "learned"
         )

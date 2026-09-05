@@ -197,6 +197,21 @@ def test_redact_helper_hides_a_raw_secret_shaped_key():
     assert result["nested"]["api_key"] == "***REDACTED***"
 
 
+def test_redact_does_not_corrupt_keys_that_merely_contain_a_marker_substring():
+    # Regression test: "token" is a substring of "tokens", so a naive
+    # `marker in key` check redacted max_new_tokens (an int field) into the
+    # string "***REDACTED***" -- corrupting it, not protecting a secret.
+    # Discovered via research/aamas2027's checkpoint-evaluation harness,
+    # which reloads a run's saved config.yaml and failed Pydantic validation
+    # on exactly this field.
+    from marla.config.loader import _redact
+
+    result = _redact({"max_new_tokens": 512, "plan_maker_total_tokens": 123, "auth_token": "should-be-hidden"})
+    assert result["max_new_tokens"] == 512
+    assert result["plan_maker_total_tokens"] == 123
+    assert result["auth_token"] == "***REDACTED***"
+
+
 def test_metrics_eval_episodes_defaults_to_disabled():
     config = parse_config(minimal_config_dict("scenario-name-without-yaml-suffix"))
     assert config.metrics.eval_episodes == 0

@@ -1,0 +1,97 @@
+# research/aamas2027 -- PPO_ONLY condition, training seed 303.
+#
+# Every PPO/architecture hyperparameter below is copied verbatim from
+# examples/baseline.yaml (Phase 2's "keep the production PPO architecture
+# unless there is a demonstrated bug" instruction). The only deltas from
+# that file are:
+#   - environment.scenario: sm_entry_dmz_two_subnets.v2.yaml, not
+#     sm_entry_dmz_one_subnet.v2.yaml -- see AUDIT.md section 7.1 (the
+#     latter has a vacuous objective: 0.0 sensitive-host probability on
+#     both its subnets, so the goal is already satisfied at step 0).
+#   - ppo.total_environment_steps: 50000, not 100000 (compute-scoped pilot).
+#   - experiment.seed / run_id: this file's seed.
+#   - metrics.eval_episodes/eval_every_rollouts: tuned for ~10k-step
+#     learning-curve points (see manifest.yaml's periodic_evaluation section)
+#     rather than baseline.yaml's every-5-rollouts cadence.
+#   - Uses an ABSOLUTE environment.scenario path deliberately: the
+#     checkpoint-evaluation harness (src/marla/evaluation/checkpoint_eval.py)
+#     reloads this file's saved copy (run_dir/config.yaml) from inside the
+#     run directory, not from this configs/ directory -- a relative path
+#     would resolve against the wrong base directory at that point.
+#
+# Run it:
+#   export MARLA_RL_ORCHESTRATOR_PASSWORD=changeme
+#   marla run research/aamas2027/configs/ppo_only_seed303.yaml
+#   marla summarize runs/aamas2027_ppo_only/ppo-only-seed-303
+
+schema_version: "1.0"
+
+experiment:
+  name: aamas2027_ppo_only
+  run_id: ppo-only-seed-303
+  phase: training
+  seed: 303
+
+execution:
+  mode: local
+
+device: auto
+
+xmpp:
+  server: localhost
+
+environment:
+  mode: simulation
+  scenario: /home/ubuntu/work/marla/NASimEmu/scenarios/sm_entry_dmz_two_subnets.v2.yaml
+  max_episode_steps: 100
+
+objective:
+  type: capture_target
+  description: Obtain the configured target access
+
+policy:
+  algorithm: recurrent_ppo
+  graph_encoder:
+    type: graphsage
+    hidden_size: 128
+    layers: 2
+  action_encoder:
+    hidden_size: 128
+    action_type_embedding_size: 32
+  recurrent:
+    hidden_size: 128
+    sequence_length: 32
+  ppo:
+    total_environment_steps: 50000  # ceil(50000/512) = 98 rollouts
+    rollout_steps: 512
+    epochs: 4
+    minibatch_sequences: 8
+    gamma: 0.99
+    gae_lambda: 0.95
+    clip_epsilon: 0.2
+    value_coefficient: 0.5
+    query_entropy_coefficient: 0.01
+    action_entropy_coefficient: 0.01
+    max_grad_norm: 0.5
+    learning_rate: 0.0003
+
+consultation:
+  mode: disabled
+
+rl_orchestrator:
+  alias: rl_orchestrator
+  jid: rl-orchestrator@localhost
+  password_env: MARLA_RL_ORCHESTRATOR_PASSWORD
+
+metrics:
+  output_directory: runs
+  record_decisions: true
+  # eval_every_rollouts=20 -> periodic points at rollout 20/40/60/80
+  # (environment steps 10240/20480/30720/40960), using the existing
+  # between-rollout callback's fixed EVAL_SEED_OFFSET seed sequence
+  # (identical across every run in this program -- see manifest.yaml).
+  eval_episodes: 3
+  eval_every_rollouts: 20
+
+reproducibility:
+  deterministic_torch: true

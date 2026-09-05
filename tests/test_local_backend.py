@@ -24,6 +24,20 @@ async def test_local_backend_generates_text_for_non_chat_model():
 
 @pytest.mark.integration
 @pytest.mark.asyncio
+async def test_local_backend_reports_token_counts_matching_the_tokenizer():
+    backend = LocalTransformersBackend(model_name="sshleifer/tiny-gpt2", device="cpu", max_new_tokens=8)
+    prompt = "hello world, please respond with json"
+    response = await backend.generate(prompt, legal_action_ids=[])
+
+    expected_input_tokens = len(backend._tokenizer(prompt)["input_ids"])
+    assert response.input_tokens == expected_input_tokens
+    assert response.output_tokens is not None and response.output_tokens > 0
+    assert response.output_tokens <= 8  # bounded by max_new_tokens
+    assert response.total_tokens == response.input_tokens + response.output_tokens
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
 async def test_local_backend_is_deterministic_with_greedy_decoding():
     backend = LocalTransformersBackend(model_name="sshleifer/tiny-gpt2", device="cpu", max_new_tokens=8)
     first = await backend.generate("the quick brown fox", legal_action_ids=[])

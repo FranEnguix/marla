@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import random
 import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
@@ -23,7 +24,13 @@ from torch_geometric.data import Data
 from marla.environment.actions import ActionDescriptor
 from marla.environment.nasimemu_adapter import EnvironmentState, NasimEmuAdapter
 from marla.environment.observation_summary import build_observation_summary
-from marla.learning.decision import compute_final_decision, compute_joint_log_probability, compute_query_probability
+from marla.evaluation.overrides import EvaluationOverrides
+from marla.learning.decision import (
+    FinalDecision,
+    compute_final_decision,
+    compute_joint_log_probability,
+    compute_query_probability,
+)
 from marla.learning.recurrent_policy import RecurrentPolicy, RecurrentState
 
 logger = logging.getLogger(__name__)
@@ -43,6 +50,9 @@ class ConsultationResult:
     scores: dict[str, float] | None
     request_id: str
     latency_ms: float | None = None
+    input_tokens: int | None = None
+    output_tokens: int | None = None
+    total_tokens: int | None = None
 
 
 ConsultFn = Callable[[list[ActionDescriptor], int, int, str, dict], Awaitable[ConsultationResult]]
@@ -95,6 +105,9 @@ class StepRecord:
     plan_maker_request_id: str | None = None
     plan_maker_latency_ms: float | None = None
     plan_maker_artifact_path: str | None = None
+    plan_maker_input_tokens: int | None = None
+    plan_maker_output_tokens: int | None = None
+    plan_maker_total_tokens: int | None = None
     normalized_advice: list[float] | None = None
     beta: float | None = None
     alpha: float | None = None
@@ -145,6 +158,7 @@ class RolloutCollector:
         consult_fn: ConsultFn | None = None,
         stop_event: asyncio.Event | None = None,
         deterministic: bool = False,
+        overrides: EvaluationOverrides | None = None,
     ) -> None:
         if consultation_enabled and consult_fn is None:
             raise ValueError("consult_fn is required when consultation_enabled=True")
@@ -161,6 +175,11 @@ class RolloutCollector:
         # deterministic evaluation pass (see run_evaluation_episodes) -- not
         # used by ordinary training rollout collection.
         self._deterministic = deterministic
+        # Evaluation-only ablation hooks (research/aamas2027). None on every
+        # real `marla run` training/eval path (trainer.py never passes this)
+        # -- see marla.evaluation.overrides for what each field does.
+        self._overrides = overrides
+        self._fallback_rng = random.Random(overrides.fallback_rng_seed) if overrides is not None else None
 
         self._episode_id = 0
         self._state: EnvironmentState | None = None
@@ -266,6 +285,9 @@ class RolloutCollector:
                 plan_maker_response_status=decision["plan_maker_response_status"],
                 plan_maker_request_id=decision["plan_maker_request_id"],
                 plan_maker_latency_ms=decision["plan_maker_latency_ms"],
+                plan_maker_input_tokens=decision["plan_maker_input_tokens"],
+                plan_maker_output_tokens=decision["plan_maker_output_tokens"],
+                plan_maker_total_tokens=decision["plan_maker_total_tokens"],
                 normalized_advice=decision["normalized_advice"],
                 beta=decision["beta"],
                 alpha=decision["alpha"],
@@ -338,6 +360,9 @@ class RolloutCollector:
                 "plan_maker_response_status": None,
                 "plan_maker_request_id": None,
                 "plan_maker_latency_ms": None,
+                "plan_maker_input_tokens": None,
+                "plan_maker_output_tokens": None,
+                "plan_maker_total_tokens": None,
                 "normalized_advice": None,
                 "beta": None,
                 "alpha": None,
@@ -346,7 +371,14 @@ class RolloutCollector:
         query_probability = compute_query_probability(
             self._policy, step_out, len(legal_actions), self._consultation_cost
         )
-        if self._deterministic:
+        # query_probability is always computed and recorded (for comparison)
+        # regardless of query_mode -- only which of NO_QUERY/ALWAYS_QUERY/the
+        # gate's own decision actually gets *sampled* is overridden.
+        if self._overrides is not None and self._overrides.query_mode == "never":
+            sampled_query = False
+        elif self._overrides is not None and self._overrides.query_mode == "always":
+            sampled_query = True
+        elif self._deterministic:
             sampled_query = bool(query_probability.detach().item() >= 0.5)
         else:
             query_dist = torch.distributions.Bernoulli(probs=query_probability.detach())
@@ -359,6 +391,9 @@ class RolloutCollector:
         plan_maker_response_status: str | None = None
         plan_maker_validation_status: str | None = None
         plan_maker_latency_ms: float | None = None
+        plan_maker_input_tokens: int | None = None
+        plan_maker_output_tokens: int | None = None
+        plan_maker_total_tokens: int | None = None
 
         if sampled_query:
             assert self._consult_fn is not None
@@ -381,6 +416,9 @@ class RolloutCollector:
             plan_maker_request_id = result.request_id
             plan_maker_response_status = result.status
             plan_maker_latency_ms = result.latency_ms
+            plan_maker_input_tokens = result.input_tokens
+            plan_maker_output_tokens = result.output_tokens
+            plan_maker_total_tokens = result.total_tokens
             if result.status == "accepted":
                 assert result.scores is not None
                 plan_maker_validation_status = "accepted"
@@ -394,12 +432,42 @@ class RolloutCollector:
                 plan_maker_validation_status = "rejected"
 
         final_decision = compute_final_decision(self._policy, step_out, sampled_query, plan_maker_confidence)
-        final_probs = torch.softmax(final_decision.final_logits.detach(), dim=-1)
-        if self._deterministic:
-            action_index = int(final_probs.argmax().item())
+
+        # BETA_ZERO/BETA_ONE: only meaningful when advice was actually
+        # obtained -- compute_final_decision already leaves normalized_advice
+        # None for "not queried" and "queried but rejected", so this is a
+        # deliberate no-op in both of those cases, not a gap. Never touches
+        # decision.py/advice.py: it only recombines fields FinalDecision
+        # already exposes.
+        if (
+            self._overrides is not None
+            and self._overrides.beta_override is not None
+            and final_decision.normalized_advice is not None
+        ):
+            beta_value = step_out.base_logits.new_tensor(self._overrides.beta_override)
+            final_decision = FinalDecision(
+                final_logits=step_out.base_logits + beta_value * final_decision.alpha * final_decision.normalized_advice,
+                beta=beta_value,
+                alpha=final_decision.alpha,
+                normalized_advice=final_decision.normalized_advice,
+            )
+
+        if self._overrides is not None and self._overrides.action_selection == "plan_maker_argmax":
+            # PLAN_MAKER_ONLY: ignore the policy's distribution entirely.
+            # Fixed, seeded fallback on schema_rejected -- a documented
+            # fallback rule, never a re-use of any learned policy output.
+            if plan_maker_confidence is not None:
+                action_index = int(torch.argmax(plan_maker_confidence).item())
+            else:
+                assert self._fallback_rng is not None
+                action_index = self._fallback_rng.randrange(len(legal_actions))
         else:
-            action_dist = torch.distributions.Categorical(probs=final_probs)
-            action_index = int(action_dist.sample().item())
+            final_probs = torch.softmax(final_decision.final_logits.detach(), dim=-1)
+            if self._deterministic:
+                action_index = int(final_probs.argmax().item())
+            else:
+                action_dist = torch.distributions.Categorical(probs=final_probs)
+                action_index = int(action_dist.sample().item())
 
         joint = compute_joint_log_probability(
             query_probability.detach(), sampled_query, final_decision.final_logits.detach(), action_index
@@ -419,6 +487,9 @@ class RolloutCollector:
             "plan_maker_response_status": plan_maker_response_status,
             "plan_maker_request_id": plan_maker_request_id,
             "plan_maker_latency_ms": plan_maker_latency_ms,
+            "plan_maker_input_tokens": plan_maker_input_tokens,
+            "plan_maker_output_tokens": plan_maker_output_tokens,
+            "plan_maker_total_tokens": plan_maker_total_tokens,
             "normalized_advice": final_decision.normalized_advice.detach().tolist()
             if final_decision.normalized_advice is not None
             else None,

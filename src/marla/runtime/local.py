@@ -15,6 +15,7 @@ import os
 from pathlib import Path
 
 import spade
+import torch
 
 from marla.config.models import Config
 from marla.environment.nasimemu_adapter import NasimEmuAdapter
@@ -80,6 +81,13 @@ async def _build_and_run(config: Config, config_dir: Path, num_rollouts: int, de
     stop_event = asyncio.Event()
     register_sigint_handler(stop_event)
 
+    # Without this, policy weight initialization and every stochastic
+    # action/query draw (torch.distributions.Categorical/Bernoulli, used
+    # throughout learning/rollout.py) are governed by process-startup
+    # entropy, not experiment.seed -- two runs with the "same" seed would
+    # not actually be reproducible or comparable. Mirrors what the
+    # test-only run_baseline_training() already does (learning/trainer.py).
+    torch.manual_seed(config.experiment.seed)
     policy, optimizer = build_policy_and_optimizer(
         config, resolved_device.torch_device, consultation_enabled=config.consultation.mode == "learned"
     )

@@ -1,0 +1,138 @@
+# Machine-readable experiment manifest (Phase 2). Every aggregate figure/
+# table in this program is produced by analyze.py joining a run's own
+# episodes.csv/decisions.csv/updates.csv (untouched MARLA schema) against
+# this file plus scenario_manifest.csv -- never by mutating MARLA's core
+# per-run CSV schema with research-specific columns (see AUDIT.md section 3
+# of the implementation plan for why).
+#
+# git_sha is the commit this manifest and every config/run/config_hash
+# below corresponds to. Update it if any config file changes.
+
+schema_version: 1
+git_sha: 4e3c7ed411ee51890a7f857c9b0bb4b52c44aa3b  # HEAD as of writing this file; see README.md for the commit that actually ran each result
+primary_training_scenario: NASimEmu/scenarios/sm_entry_dmz_two_subnets.v2.yaml
+scenario_manifest: scenario_manifest.csv
+
+# Fixed BEFORE any run exists; not selected based on results (Phase 2).
+training_seeds: [101, 202, 303]
+
+# Disjoint from training_seeds and from each other.
+evaluation_seed_sets:
+  final_id:
+    start: 5001
+    count: 20
+    scenario: NASimEmu/scenarios/sm_entry_dmz_two_subnets.v2.yaml
+    id_or_ood: ID
+  final_ood_dmz_three_subnets:
+    start: 6001
+    count: 10
+    scenario: NASimEmu/scenarios/sm_entry_dmz_three_subnets.v2.yaml
+    id_or_ood: OOD
+  final_ood_user_three_subnets:
+    start: 6001  # same numeric seeds reused across OOD scenarios on purpose --
+    count: 10    # a shared "seed identity" aids paired cross-scenario comparison;
+    scenario: NASimEmu/scenarios/sm_entry_user_three_subnets.v2.yaml
+    id_or_ood: OOD
+  periodic_learning_curve:
+    # Not a config choice -- EVAL_SEED_OFFSET is a source constant
+    # (learning/rollout.py) used by every run's between-rollout eval
+    # callback, so this seed set is identical across every condition by
+    # construction, not by convention.
+    start: 1000000000
+    count: 3
+    scenario: NASimEmu/scenarios/sm_entry_dmz_two_subnets.v2.yaml
+    id_or_ood: ID
+    note: >
+      eval_every_rollouts=20 with rollout_steps=512 lands periodic points at
+      environment_steps 10240/20480/30720/40960, not exact multiples of
+      10000 -- see AUDIT.md section 7.4 for why (rollout boundaries, not
+      step counts, are what the existing eval callback can land on).
+
+plan_maker:
+  model_name: Qwen/Qwen2.5-1.5B-Instruct
+  model_revision: "not pinned by MARLA -- AutoModelForCausalLM.from_pretrained is called with no revision= argument (see AUDIT.md section 5); model_name is the only identity MARLA itself records"
+  prompt_version: nasimemu-plan-maker-v1
+  knowledge_version: nasimemu-rules-v1
+  max_schema_revisions: 3
+  generation: "greedy (do_sample=False), no explicit LM RNG seed -- determinism rests on greedy decoding over fixed weights (AUDIT.md section 5)"
+
+conditions:
+  PPO_ONLY:
+    trainable: true
+    consultation_mode: disabled
+    query_mode: n/a
+    trust_mode: n/a
+    advice_transformation: n/a
+    training_step_budget: 50000
+    runs:
+      101: {config: configs/ppo_only_seed101.yaml, run_dir: runs/aamas2027_ppo_only/ppo-only-seed-101}
+      202: {config: configs/ppo_only_seed202.yaml, run_dir: runs/aamas2027_ppo_only/ppo-only-seed-202}
+      303: {config: configs/ppo_only_seed303.yaml, run_dir: runs/aamas2027_ppo_only/ppo-only-seed-303}
+
+  MARLA_FULL:
+    trainable: true
+    consultation_mode: learned
+    consultation_cost: 0.10
+    query_mode: learned
+    trust_mode: learned
+    advice_transformation: identity
+    training_step_budget: 50000
+    runs:
+      101: {config: configs/marla_full_seed101.yaml, run_dir: runs/aamas2027_marla_full/marla-full-seed-101}
+      202: {config: configs/marla_full_seed202.yaml, run_dir: runs/aamas2027_marla_full/marla-full-seed-202}
+      303: {config: configs/marla_full_seed303.yaml, run_dir: runs/aamas2027_marla_full/marla-full-seed-303}
+
+  # Everything below is an EVALUATION-TIME ablation on a frozen MARLA_FULL
+  # checkpoint (src/marla/evaluation) -- not an independently trained
+  # condition. Labeled explicitly per the user's own instruction that this
+  # distinction must never be blurred.
+  MARLA_FULL_NORMAL:
+    trainable: false
+    evaluation_only: true
+    base_condition: MARLA_FULL
+    overrides: {query_mode: learned, beta_override: null, action_selection: policy}
+    description: The trained checkpoint's own learned behavior, re-run deterministically -- the control condition for the other four ablations below.
+
+  MARLA_FULL_NO_QUERY:
+    trainable: false
+    evaluation_only: true
+    base_condition: MARLA_FULL
+    overrides: {query_mode: never, beta_override: null, action_selection: policy}
+
+  MARLA_FULL_ALWAYS_QUERY:
+    trainable: false
+    evaluation_only: true
+    base_condition: MARLA_FULL
+    overrides: {query_mode: always, beta_override: null, action_selection: policy}
+
+  MARLA_FULL_BETA_ZERO:
+    trainable: false
+    evaluation_only: true
+    base_condition: MARLA_FULL
+    overrides: {query_mode: learned, beta_override: 0.0, action_selection: policy}
+
+  MARLA_FULL_BETA_ONE:
+    trainable: false
+    evaluation_only: true
+    base_condition: MARLA_FULL
+    overrides: {query_mode: learned, beta_override: 1.0, action_selection: policy}
+
+  PLAN_MAKER_ONLY:
+    trainable: false
+    evaluation_only: true
+    base_condition: null  # a freshly-initialized, never-trained scaffold policy -- see src/marla/evaluation/checkpoint_eval.py's build_policy(); action selection never consults it
+    overrides: {query_mode: always, beta_override: null, action_selection: plan_maker_argmax}
+    fallback_on_schema_rejected: "fixed seeded uniform-random legal-action choice (fallback_rng_seed), never a learned policy output"
+    replicates: [101, 202, 303]  # scaffold policy seeded identically to the corresponding training seed, for symmetry -- never trained regardless
+
+postponed:
+  - ALWAYS_CONSULT (trained, as its own condition -- distinct from the MARLA_FULL_ALWAYS_QUERY evaluation-time ablation above)
+  - RANDOM_QUERY_MATCHED
+  - ENTROPY_QUERY_MATCHED
+  - SHUFFLED_ADVICE
+  - REVERSED_ADVICE
+  - consultation_cost_sweep (0.00 / 0.05 / 0.20)
+  - external_nasimemu_agents_baseline
+  - simulation_to_emulation
+  - training_seeds_5_to_10
+  - 100k_step_runs

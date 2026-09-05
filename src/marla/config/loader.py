@@ -13,7 +13,11 @@ from pydantic import ValidationError
 from marla.config.models import Config
 from marla.config.validation import validate_config_semantics
 
-_REDACTED_KEY_MARKERS = ("password", "secret", "token", "api_key", "apikey")
+# Each marker as its underscore-separated segment sequence, e.g.
+# "api_key" -> ("api", "key").
+_REDACTED_KEY_MARKERS = tuple(
+    tuple(marker.split("_")) for marker in ("password", "secret", "token", "api_key", "apikey")
+)
 _REDACTED_PLACEHOLDER = "***REDACTED***"
 
 
@@ -81,7 +85,23 @@ def _is_secret_key(key: str) -> bool:
         # (e.g. password_env: "MARLA_GATEKEEPER_PASSWORD"), never the
         # secret value itself, so there is nothing to redact.
         return False
-    return any(marker in lowered for marker in _REDACTED_KEY_MARKERS)
+
+    # Matched as a contiguous run of whole underscore-separated segments,
+    # never as a raw substring -- a plain `marker in lowered` check redacts
+    # any key that merely *contains* the marker inside a longer word, e.g.
+    # "max_new_tokens" (a generation-length setting, not a secret) via
+    # "token" inside "tokens". That corrupts it into a string where an int
+    # is expected the moment such a config.yaml is reloaded (see
+    # research/aamas2027's checkpoint-evaluation harness, which does
+    # exactly that). Segment matching still catches "auth_token"
+    # (segment ("token",)) and "openai_api_key" (adjacent segment pair
+    # ("api", "key")) correctly.
+    segments = lowered.split("_")
+    for marker_segments in _REDACTED_KEY_MARKERS:
+        n = len(marker_segments)
+        if any(tuple(segments[i : i + n]) == marker_segments for i in range(len(segments) - n + 1)):
+            return True
+    return False
 
 
 def _redact(value: Any) -> Any:

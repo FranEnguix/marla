@@ -55,6 +55,7 @@ _DECISIONS_FIELDS = [
     "plan_maker_top_action_id", "final_top_action_id", "selected_action_id", "selected_action_base_rank",
     "selected_action_plan_maker_rank", "beta", "alpha", "advice_changed_top_action", "action_success",
     "nasimemu_reward", "training_reward", "terminated", "truncated", "artifact_path",
+    "plan_maker_input_tokens", "plan_maker_output_tokens", "plan_maker_total_tokens",
 ]
 
 _UPDATES_FIELDS = [
@@ -134,6 +135,9 @@ def _decision_row(config: Config, record: StepRecord) -> dict[str, Any]:
         "terminated": record.terminated,
         "truncated": record.truncated,
         "artifact_path": None,  # see module docstring
+        "plan_maker_input_tokens": record.plan_maker_input_tokens,
+        "plan_maker_output_tokens": record.plan_maker_output_tokens,
+        "plan_maker_total_tokens": record.plan_maker_total_tokens,
     }
 
 

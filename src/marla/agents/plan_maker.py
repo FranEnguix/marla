@@ -197,6 +197,9 @@ class PlanMakerAgent(Agent):
             "knowledge_version": self.knowledge_base.version,
             "inference_latency_ms": response.latency_ms,
             "retrieved_rule_ids": retrieved_rule_ids,
+            "input_tokens": response.input_tokens,
+            "output_tokens": response.output_tokens,
+            "total_tokens": response.total_tokens,
         }
         metadata = MessageMetadata(
             performative="inform",

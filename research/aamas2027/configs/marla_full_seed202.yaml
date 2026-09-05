@@ -1,0 +1,116 @@
+# research/aamas2027 -- MARLA_FULL condition, training seed 202.
+#
+# Every PPO/architecture hyperparameter and every Plan Maker setting below
+# is copied verbatim from examples/assisted.yaml. Deltas from that file:
+#   - environment.scenario: sm_entry_dmz_two_subnets.v2.yaml (absolute
+#     path), not sm_entry_dmz_one_subnet.v2.yaml -- see
+#     ppo_only_seed202.yaml's comment / AUDIT.md section 7.1.
+#   - ppo.total_environment_steps: 50000, not 100000.
+#   - experiment.seed / run_id: this file's seed -- the SAME seed as
+#     ppo_only_seed202.yaml, by design (Phase 2: paired training seeds
+#     across primary trainable conditions).
+#   - metrics.eval_episodes/eval_every_rollouts: turned ON here (0 in
+#     assisted.yaml) so a real train-vs-eval learning curve exists for this
+#     condition too -- accepting the extra Plan Maker inference cost this
+#     adds, unlike assisted.yaml's production default.
+#
+# consultation.cost stays at 0.10, matching Phase 3B's MARLA_FULL spec and
+# assisted.yaml's own default.
+#
+# Run it (needs the local-lm extra and a real ~3GB model download on first
+# use -- see examples/assisted.yaml's own comment):
+#   pip install -e ".[local-lm]"
+#   export MARLA_RL_ORCHESTRATOR_PASSWORD=changeme
+#   export MARLA_GATEKEEPER_PASSWORD=changeme
+#   export MARLA_PLAN_MAKER_1_PASSWORD=changeme
+#   marla run research/aamas2027/configs/marla_full_seed202.yaml
+#   marla summarize runs/aamas2027_marla_full/marla-full-seed-202
+
+schema_version: "1.0"
+
+experiment:
+  name: aamas2027_marla_full
+  run_id: marla-full-seed-202
+  phase: training
+  seed: 202
+
+execution:
+  mode: local
+
+device: auto
+
+xmpp:
+  server: localhost
+
+environment:
+  mode: simulation
+  scenario: /home/ubuntu/work/marla/NASimEmu/scenarios/sm_entry_dmz_two_subnets.v2.yaml
+  max_episode_steps: 100
+
+objective:
+  type: capture_target
+  description: Obtain the configured target access
+
+policy:
+  algorithm: recurrent_ppo
+  graph_encoder:
+    type: graphsage
+    hidden_size: 128
+    layers: 2
+  action_encoder:
+    hidden_size: 128
+    action_type_embedding_size: 32
+  recurrent:
+    hidden_size: 128
+    sequence_length: 32
+  ppo:
+    total_environment_steps: 50000
+    rollout_steps: 512
+    epochs: 4
+    minibatch_sequences: 8
+    gamma: 0.99
+    gae_lambda: 0.95
+    clip_epsilon: 0.2
+    value_coefficient: 0.5
+    query_entropy_coefficient: 0.01
+    action_entropy_coefficient: 0.01
+    max_grad_norm: 0.5
+    learning_rate: 0.0003
+
+consultation:
+  mode: learned
+  cost: 0.10
+  max_schema_revisions: 3
+
+rl_orchestrator:
+  alias: rl_orchestrator
+  jid: rl-orchestrator@localhost
+  password_env: MARLA_RL_ORCHESTRATOR_PASSWORD
+
+gatekeeper:
+  alias: gatekeeper
+  jid: gatekeeper@localhost
+  password_env: MARLA_GATEKEEPER_PASSWORD
+
+agents:
+  - alias: plan_maker_1
+    jid: plan-maker@localhost
+    password_env: MARLA_PLAN_MAKER_1_PASSWORD
+    role: plan_maker
+    model:
+      backend: local
+      name: Qwen/Qwen2.5-1.5B-Instruct
+      max_new_tokens: 256
+    prompt_version: nasimemu-plan-maker-v1
+    knowledge:
+      path: package://marla/knowledge/nasimemu_rules.yaml
+      version: nasimemu-rules-v1
+
+metrics:
+  output_directory: runs
+  record_decisions: true
+  eval_episodes: 3
+  eval_every_rollouts: 20
+
+reproducibility:
+  deterministic_torch: true

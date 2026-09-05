@@ -114,4 +114,12 @@ class LocalTransformersBackend:
         generated = output_ids[0][input_length:]
         text = self._tokenizer.decode(generated, skip_special_tokens=True)
         latency_ms = (time.monotonic() - start) * 1000
-        return BackendResponse(raw_text=text, latency_ms=latency_ms)
+        input_tokens = int(input_length)
+        output_tokens = int(generated.shape[-1])
+        return BackendResponse(
+            raw_text=text,
+            latency_ms=latency_ms,
+            input_tokens=input_tokens,
+            output_tokens=output_tokens,
+            total_tokens=input_tokens + output_tokens,
+        )

@@ -16,6 +16,12 @@ from typing import Protocol
 class BackendResponse:
     raw_text: str
     latency_ms: float
+    # Token counts for cost/efficiency accounting (research/aamas2027).
+    # None for a backend that can't report them (e.g. remote_backend.py,
+    # not implemented in this release) rather than a fabricated 0.
+    input_tokens: int | None = None
+    output_tokens: int | None = None
+    total_tokens: int | None = None
 
 
 class PlanMakerBackend(Protocol):

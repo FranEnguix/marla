@@ -222,6 +222,9 @@ class OrchestratorLifecycleBehaviour(OneShotBehaviour):
             scores=scores,
             request_id=outcome.request_id,
             latency_ms=outcome.latency_seconds * 1000,
+            input_tokens=outcome.payload.input_tokens if outcome.payload is not None else None,
+            output_tokens=outcome.payload.output_tokens if outcome.payload is not None else None,
+            total_tokens=outcome.payload.total_tokens if outcome.payload is not None else None,
         )
 
     async def _send_to_all(self, message_type: MessageType, conversation_id: str, performative: str) -> None:
