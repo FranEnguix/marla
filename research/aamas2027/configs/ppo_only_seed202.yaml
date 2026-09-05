@@ -8,10 +8,13 @@
 #     sm_entry_dmz_one_subnet.v2.yaml -- see AUDIT.md section 7.1 (the
 #     latter has a vacuous objective: 0.0 sensitive-host probability on
 #     both its subnets, so the goal is already satisfied at step 0).
-#   - ppo.total_environment_steps: 5000, not 100000 (compute-scoped pilot,
-#   reduced further from an initial 50000 after a real smoke test measured
-#   Plan Maker consultation latency at ~92s/call and a ~15-20% query rate
-#   for an untrained gate -- see VALIDATION.md).
+#   - ppo.total_environment_steps: 50000, not 100000 (Phase 2's compute-scoped
+#     pilot budget -- kept at the original target; NOT reduced further,
+#     despite a real pilot measurement (VALIDATION.md) showing MARLA_FULL
+#     would need ~9-13 days at this budget at the observed ~73s mean /
+#     ~32% pre-training query rate. See the final summary this config was
+#     delivered alongside for the feasibility recommendation -- this
+#     config is NOT launched until that is resolved.
 #   - experiment.seed / run_id: this file's seed.
 #   - metrics.eval_episodes/eval_every_rollouts: tuned for ~10k-step
 #     learning-curve points (see manifest.yaml's periodic_evaluation section)
@@ -65,7 +68,7 @@ policy:
     hidden_size: 128
     sequence_length: 32
   ppo:
-    total_environment_steps: 5000  # ceil(5000/512) = 10 rollouts (reduced from 50000 -- see below)
+    total_environment_steps: 50000  # ceil(50000/512) = 98 rollouts
     rollout_steps: 512
     epochs: 4
     minibatch_sequences: 8
@@ -89,12 +92,14 @@ rl_orchestrator:
 metrics:
   output_directory: runs
   record_decisions: true
-  # eval_every_rollouts=2 -> periodic points at rollout 2/4/6/8/10
-  # (environment steps 1024/2048/3072/4096/5120), using the existing
+  # eval_every_rollouts=20 -> periodic points at rollout 20/40/60/80
+  # (environment steps 10240/20480/30720/40960), using the existing
   # between-rollout callback's fixed EVAL_SEED_OFFSET seed sequence
   # (identical across every run in this program -- see manifest.yaml).
+  # Cheap for PPO_ONLY (no Plan Maker); the MARLA_FULL equivalent setting
+  # is a real cost driver -- see marla_full_seed101.yaml's comment.
   eval_episodes: 3
-  eval_every_rollouts: 2
+  eval_every_rollouts: 20
 
 reproducibility:
   deterministic_torch: true

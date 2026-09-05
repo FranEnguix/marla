@@ -212,63 +212,35 @@ def learning_curve_bands(out_dir: Path) -> None:
     print(f"[learning_curve_bands] wrote {len(band_rows)} row(s) to {out_path}")
 
 
-# --- Figure 2 data: final ID performance (trained + evaluation-only) ----
+# --- Figure 2 data: final ID + OOD performance ---------------------------
+# Restricted to the three REQUIRED conditions (manifest.yaml v3):
+# PPO_ONLY, MARLA_FULL_NORMAL (learned gate, no forced queries),
+# MARLA_FULL_NO_QUERY (the main inference ablation, zero Plan Maker calls).
+# ALWAYS_QUERY/BETA_ZERO/BETA_ONE/PLAN_MAKER_ONLY are postponed -- see
+# manifest.yaml's postponed_pending_feasibility.
+
+REQUIRED_EVAL_CONDITIONS = ("PPO_ONLY", "MARLA_FULL_NORMAL", "MARLA_FULL_NO_QUERY")
+SCENARIO_LABELS = ("ID", "OOD_dmz_three_subnets", "OOD_user_three_subnets")
 
 
-def final_id_eval(manifest: dict, out_dir: Path, eval_raw_dir: Path) -> None:
+def id_and_ood_eval(manifest: dict, out_dir: Path, eval_raw_dir: Path) -> None:
     rows_out = []
-    conditions = [
-        "PPO_ONLY", "MARLA_FULL_NORMAL", "MARLA_FULL_NO_QUERY", "MARLA_FULL_ALWAYS_QUERY",
-        "MARLA_FULL_BETA_ZERO", "MARLA_FULL_BETA_ONE", "PLAN_MAKER_ONLY",
-    ]
-    for condition in conditions:
-        found = 0
-        expected = len(manifest["conditions"]["MARLA_FULL"]["runs"])
-        for seed in manifest["training_seeds"]:
-            episodes_path = eval_raw_dir / condition / f"seed-{seed}" / "episodes.csv"
-            episodes = read_csv_rows(episodes_path)
-            if not episodes:
-                continue
-            found += 1
-            successes = [1.0 if _b(r, "goal_success") else 0.0 for r in episodes]
-            returns = [_f(r, "benchmark_return") for r in episodes]
-            steps_to_goal = [_f(r, "steps_to_goal") for r in episodes if r.get("steps_to_goal")]
-            consultations = [_f(r, "consultation_count") or 0.0 for r in episodes]
-            rows_out.append(
-                {
-                    "condition": condition,
-                    "training_seed": seed,
-                    "num_episodes": len(episodes),
-                    "goal_success_rate": sum(successes) / len(successes),
-                    "goal_success_wilson_low": wilson_interval(int(sum(successes)), len(successes))[0],
-                    "goal_success_wilson_high": wilson_interval(int(sum(successes)), len(successes))[1],
-                    "mean_benchmark_return": sum(returns) / len(returns),
-                    "mean_steps_to_goal": (sum(steps_to_goal) / len(steps_to_goal)) if steps_to_goal else None,
-                    "mean_consultations_per_episode": sum(consultations) / len(consultations),
-                }
-            )
-        print(f"[final_id_eval] {condition}: found {found}/{expected} training-seed replicate(s)")
-    out_path = out_dir / "final_id_eval.csv"
-    _write_csv(out_path, rows_out)
-    print(f"[final_id_eval] wrote {len(rows_out)} row(s) to {out_path}")
-
-
-# --- Figure 3 data: OOD generalization -----------------------------------
-
-
-def ood_eval(manifest: dict, out_dir: Path, eval_raw_dir: Path) -> None:
-    rows_out = []
-    scenarios = ["ID", "OOD_dmz_three_subnets", "OOD_user_three_subnets"]
-    for condition in ("PPO_ONLY", "MARLA_FULL_NORMAL"):
-        for scenario_label in scenarios:
+    for condition in REQUIRED_EVAL_CONDITIONS:
+        for scenario_label in SCENARIO_LABELS:
             found = 0
+            # ID eval is written to <condition>/seed-<seed>/ (no scenario
+            # suffix, see README.md); OOD eval to <condition>__<label>/seed-<seed>/.
+            subdir_name = condition if scenario_label == "ID" else f"{condition}__{scenario_label}"
             for seed in manifest["training_seeds"]:
-                episodes_path = eval_raw_dir / f"{condition}__{scenario_label}" / f"seed-{seed}" / "episodes.csv"
+                episodes_path = eval_raw_dir / subdir_name / f"seed-{seed}" / "episodes.csv"
                 episodes = read_csv_rows(episodes_path)
                 if not episodes:
                     continue
                 found += 1
                 successes = [1.0 if _b(r, "goal_success") else 0.0 for r in episodes]
+                returns = [_f(r, "benchmark_return") for r in episodes]
+                steps_to_goal = [_f(r, "steps_to_goal") for r in episodes if r.get("steps_to_goal")]
+                consultations = [_f(r, "consultation_count") or 0.0 for r in episodes]
                 rows_out.append(
                     {
                         "condition": condition,
@@ -276,18 +248,51 @@ def ood_eval(manifest: dict, out_dir: Path, eval_raw_dir: Path) -> None:
                         "training_seed": seed,
                         "num_episodes": len(episodes),
                         "goal_success_rate": sum(successes) / len(successes),
+                        "goal_success_wilson_low": wilson_interval(int(sum(successes)), len(successes))[0],
+                        "goal_success_wilson_high": wilson_interval(int(sum(successes)), len(successes))[1],
+                        "mean_benchmark_return": sum(returns) / len(returns),
+                        "mean_steps_to_goal": (sum(steps_to_goal) / len(steps_to_goal)) if steps_to_goal else None,
+                        "mean_consultations_per_episode": sum(consultations) / len(consultations),
                     }
                 )
-            print(f"[ood_eval] {condition} / {scenario_label}: found {found}/{len(manifest['training_seeds'])} seed(s)")
-    out_path = out_dir / "ood_eval.csv"
+            print(f"[id_and_ood_eval] {condition} / {scenario_label}: found {found}/{len(manifest['training_seeds'])} seed(s)")
+    out_path = out_dir / "id_and_ood_eval.csv"
     _write_csv(out_path, rows_out)
-    print(f"[ood_eval] wrote {len(rows_out)} row(s) to {out_path}")
+    print(f"[id_and_ood_eval] wrote {len(rows_out)} row(s) to {out_path}")
 
 
-# --- Figure 4 data: consultation / query-gate behavior --------------------
+# --- Figure 3 data: consultation / query-gate behavior --------------------
+
+
+def query_rate_over_training(manifest: dict, out_dir: Path) -> None:
+    """Per-rollout actual_query_rate already computed by trainer.py --
+    zero new computation needed, just reading an existing updates.csv
+    column across MARLA_FULL's training seeds."""
+    rows_out = []
+    for seed, run_info in manifest["conditions"]["MARLA_FULL"]["runs"].items():
+        run_dir = REPO_ROOT / run_info["run_dir"]
+        updates = read_csv_rows(run_dir / "updates.csv")
+        if not updates:
+            print(f"[query_rate_over_training] seed {seed}: no updates.csv found, skipped")
+            continue
+        seen_steps = set()
+        for u in updates:
+            steps = int(u["environment_steps"])
+            if steps in seen_steps or not u.get("actual_query_rate"):
+                continue  # several PPO updates share one rollout's aggregates; one point per rollout
+            seen_steps.add(steps)
+            rows_out.append(
+                {"training_seed": seed, "environment_steps": steps, "actual_query_rate": u["actual_query_rate"]}
+            )
+    out_path = out_dir / "query_rate_over_training.csv"
+    _write_csv(out_path, rows_out)
+    print(f"[query_rate_over_training] wrote {len(rows_out)} row(s) to {out_path}")
 
 
 def consultation_behavior(manifest: dict, out_dir: Path) -> None:
+    """Per-decision data for Figure 3 (entropy/query-probability) -- every
+    field here is a direct read or one-line derivation from an existing
+    decisions.csv column; no new Plan Maker calls, no new instrumentation."""
     rows_out = []
     for seed, run_info in manifest["conditions"]["MARLA_FULL"]["runs"].items():
         run_dir = REPO_ROOT / run_info["run_dir"]
@@ -298,10 +303,7 @@ def consultation_behavior(manifest: dict, out_dir: Path) -> None:
         for r in decisions:
             legal_count = int(r["legal_action_count"])
             entropy = _f(r, "base_policy_entropy")
-            if entropy is None or legal_count <= 1:
-                normalized_entropy = None
-            else:
-                normalized_entropy = entropy / math.log(legal_count)
+            normalized_entropy = None if entropy is None or legal_count <= 1 else entropy / math.log(legal_count)
             rows_out.append(
                 {
                     "training_seed": seed,
@@ -309,11 +311,114 @@ def consultation_behavior(manifest: dict, out_dir: Path) -> None:
                     "queried": r["queried"],
                     "query_probability": r["query_probability"],
                     "normalized_base_policy_entropy": normalized_entropy,
+                    "base_top_two_margin": r.get("base_top_two_margin"),
+                    "reward_this_step": r.get("training_reward"),
                 }
             )
     out_path = out_dir / "consultation_behavior.csv"
     _write_csv(out_path, rows_out)
     print(f"[consultation_behavior] wrote {len(rows_out)} row(s) to {out_path}")
+
+
+# --- Figure 4 data: advice / trust behavior -------------------------------
+
+
+def beta_over_training(manifest: dict, out_dir: Path) -> None:
+    """updates.csv's mean_beta is already a per-rollout aggregate -- read,
+    not recomputed."""
+    rows_out = []
+    for seed, run_info in manifest["conditions"]["MARLA_FULL"]["runs"].items():
+        run_dir = REPO_ROOT / run_info["run_dir"]
+        updates = read_csv_rows(run_dir / "updates.csv")
+        if not updates:
+            continue
+        seen_steps = set()
+        for u in updates:
+            steps = int(u["environment_steps"])
+            if steps in seen_steps or not u.get("mean_beta"):
+                continue
+            seen_steps.add(steps)
+            rows_out.append({"training_seed": seed, "environment_steps": steps, "mean_beta": u["mean_beta"]})
+    _write_csv(out_dir / "beta_over_training.csv", rows_out)
+    print(f"[beta_over_training] wrote {len(rows_out)} row(s)")
+
+
+def advice_trust_behavior(manifest: dict, out_dir: Path) -> None:
+    """Per-decision beta distribution, PPO/Plan-Maker top-1 agreement,
+    advice_changed_top_action fraction -- all direct decisions.csv reads.
+    Per-episode consultations-per-successful-episode from episodes.csv."""
+    decision_rows_out = []
+    episode_summary_rows = []
+    for seed, run_info in manifest["conditions"]["MARLA_FULL"]["runs"].items():
+        run_dir = REPO_ROOT / run_info["run_dir"]
+        decisions = read_csv_rows(run_dir / "decisions.csv")
+        episodes = read_csv_rows(run_dir / "episodes.csv")
+        if not decisions:
+            continue
+        for r in decisions:
+            if not r.get("queried") == "True":
+                continue
+            agreement = None
+            if r.get("base_top_action_id") and r.get("plan_maker_top_action_id"):
+                agreement = 1.0 if r["base_top_action_id"] == r["plan_maker_top_action_id"] else 0.0
+            decision_rows_out.append(
+                {
+                    "training_seed": seed,
+                    "beta": r.get("beta"),
+                    "alpha": r.get("alpha"),
+                    "base_plan_maker_top1_agreement": agreement,
+                    "advice_changed_top_action": r.get("advice_changed_top_action"),
+                    "selected_action_base_rank": r.get("selected_action_base_rank"),
+                    "selected_action_plan_maker_rank": r.get("selected_action_plan_maker_rank"),
+                }
+            )
+        successful_episodes = [e for e in episodes if _b(e, "goal_success") and not _b(e, "is_eval")]
+        if successful_episodes:
+            consultations = [_f(e, "consultation_count") or 0.0 for e in successful_episodes]
+            episode_summary_rows.append(
+                {
+                    "training_seed": seed,
+                    "num_successful_episodes": len(successful_episodes),
+                    "mean_consultations_per_successful_episode": sum(consultations) / len(consultations),
+                }
+            )
+    _write_csv(out_dir / "advice_trust_decisions.csv", decision_rows_out)
+    _write_csv(out_dir / "consultations_per_successful_episode.csv", episode_summary_rows)
+    print(f"[advice_trust_behavior] wrote {len(decision_rows_out)} decision row(s), {len(episode_summary_rows)} episode-summary row(s)")
+
+
+def beta_stratified_advice_influence(manifest: dict, out_dir: Path) -> None:
+    """Observational, NOT a beta=0/1 counterfactual: decisions.csv does not
+    persist the raw per-action base-logit/advice vectors needed to
+    recompute what a forced beta would have selected (only summary fields
+    -- top-action IDs, ranks, the actual beta/alpha that occurred). This
+    instead buckets already-recorded decisions by the beta value that
+    actually occurred and reports advice_changed_top_action rate per
+    bucket -- zero new Plan Maker calls, but explicitly an observed
+    correlation across MARLA_FULL's own natural beta distribution, not a
+    causal forced-beta comparison. See manifest.yaml's
+    postponed_pending_feasibility entry for MARLA_FULL_BETA_ZERO/ONE."""
+    buckets = {"low_beta_[0,0.33)": [], "mid_beta_[0.33,0.67)": [], "high_beta_[0.67,1]": []}
+    for seed, run_info in manifest["conditions"]["MARLA_FULL"]["runs"].items():
+        run_dir = REPO_ROOT / run_info["run_dir"]
+        decisions = read_csv_rows(run_dir / "decisions.csv")
+        for r in decisions:
+            beta = _f(r, "beta")
+            changed = _b(r, "advice_changed_top_action")
+            if beta is None or changed is None:
+                continue
+            key = "low_beta_[0,0.33)" if beta < 0.33 else "mid_beta_[0.33,0.67)" if beta < 0.67 else "high_beta_[0.67,1]"
+            buckets[key].append(1.0 if changed else 0.0)
+    rows_out = [
+        {
+            "beta_bucket": bucket,
+            "num_decisions": len(values),
+            "advice_changed_top_action_rate": (sum(values) / len(values)) if values else None,
+        }
+        for bucket, values in buckets.items()
+    ]
+    _write_csv(out_dir / "beta_stratified_advice_influence.csv", rows_out)
+    print(f"[beta_stratified_advice_influence] wrote {len(rows_out)} row(s)")
 
 
 def _write_csv(path: Path, rows: list[dict]) -> None:
@@ -338,9 +443,12 @@ def main() -> None:
 
     learning_curve(manifest, args.out_dir)
     learning_curve_bands(args.out_dir)
-    final_id_eval(manifest, args.out_dir, args.eval_raw_dir)
-    ood_eval(manifest, args.out_dir, args.eval_raw_dir)
+    id_and_ood_eval(manifest, args.out_dir, args.eval_raw_dir)
+    query_rate_over_training(manifest, args.out_dir)
     consultation_behavior(manifest, args.out_dir)
+    beta_over_training(manifest, args.out_dir)
+    advice_trust_behavior(manifest, args.out_dir)
+    beta_stratified_advice_influence(manifest, args.out_dir)
 
 
 if __name__ == "__main__":

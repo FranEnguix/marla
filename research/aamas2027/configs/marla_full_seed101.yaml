@@ -5,10 +5,13 @@
 #   - environment.scenario: sm_entry_dmz_two_subnets.v2.yaml (absolute
 #     path), not sm_entry_dmz_one_subnet.v2.yaml -- see
 #     ppo_only_seed101.yaml's comment / AUDIT.md section 7.1.
-#   - ppo.total_environment_steps: 5000, not 100000 (compute-scoped pilot,
-#   reduced further from an initial 50000 after a real smoke test measured
-#   Plan Maker consultation latency at ~92s/call and a ~15-20% query rate
-#   for an untrained gate -- see VALIDATION.md).
+#   - ppo.total_environment_steps: 50000, not 100000 (Phase 2's compute-scoped
+#     pilot budget -- kept at the original target; NOT reduced further,
+#     despite a real pilot measurement (VALIDATION.md) showing MARLA_FULL
+#     would need ~9-13 days at this budget at the observed ~73s mean /
+#     ~32% pre-training query rate. See the final summary this config was
+#     delivered alongside for the feasibility recommendation -- this
+#     config is NOT launched until that is resolved.
 #   - experiment.seed / run_id: this file's seed -- the SAME seed as
 #     ppo_only_seed101.yaml, by design (Phase 2: paired training seeds
 #     across primary trainable conditions).
@@ -67,7 +70,7 @@ policy:
     hidden_size: 128
     sequence_length: 32
   ppo:
-    total_environment_steps: 5000  # reduced from 50000 -- see comment above
+    total_environment_steps: 50000
     rollout_steps: 512
     epochs: 4
     minibatch_sequences: 8
@@ -112,8 +115,15 @@ agents:
 metrics:
   output_directory: runs
   record_decisions: true
+  # Unlike PPO_ONLY, each periodic eval pass here uses the LEARNED query
+  # gate normally (not forced) -- so it is not free: real Plan Maker calls
+  # at real measured latency (VALIDATION.md: ~73s mean). eval_every_rollouts
+  # is provisional pending a confirmed feasible training path; reduce this
+  # frequency (not eval_episodes below it) first if periodic eval cost
+  # turns out to dominate, per explicit instruction to protect the
+  # experiment budget over learning-curve resolution.
   eval_episodes: 3
-  eval_every_rollouts: 2
+  eval_every_rollouts: 20
 
 reproducibility:
   deterministic_torch: true

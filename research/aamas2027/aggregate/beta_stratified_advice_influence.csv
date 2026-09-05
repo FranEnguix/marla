@@ -1,0 +1,4 @@
+beta_bucket,num_decisions,advice_changed_top_action_rate
+"low_beta_[0,0.33)",0,
+"mid_beta_[0.33,0.67)",0,
+"high_beta_[0.67,1]",0,

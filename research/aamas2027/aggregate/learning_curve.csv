@@ -1,1 +1,6 @@
-
+condition,training_seed,checkpoint_environment_steps,num_eval_episodes,mean_goal_success,mean_benchmark_return
+PPO_ONLY,101,1024,3,0.0,-1.0
+PPO_ONLY,101,2048,3,0.0,-1.0
+PPO_ONLY,101,3072,3,0.0,-1.0
+PPO_ONLY,101,4096,3,0.0,-1.0
+PPO_ONLY,101,5120,3,0.0,-1.0

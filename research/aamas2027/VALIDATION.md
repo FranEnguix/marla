@@ -183,9 +183,44 @@ policy, real `NasimEmuAdapter`+`RolloutCollector`, no errors):
 cleanly, confirming the architecture-invariance argument in AUDIT.md
 section 3/6 empirically rather than by inspection alone.
 
+## Pilot run outcome (v2 -> v3 revision)
+
+The 5,000-step pilot pair was actually launched: **PPO_ONLY seed 101
+completed** (5000 steps, 197s wall-clock, 1510 episodes, 3.6% goal success
+rate -- non-trivial and non-saturated, confirming the ID-scenario fix
+works). **MARLA_FULL seed 101 was deliberately interrupted** after ~151 of
+its planned 5000 steps, once it had produced a reliable latency/query-rate
+sample (waiting for full completion at the observed rate would itself have
+taken ~32 hours for just 5000 steps). Measured over 48 real consultations:
+
+| | value |
+|---|---|
+| mean latency | 73.3s |
+| p50 latency | 91.5s |
+| p95 latency | 108.7s |
+| min / max | 7.7s / 109.2s (bimodal: ~8s for ~11-action observations, ~90-109s for ~81-91-action observations) |
+| query rate (untrained gate) | 31.8% (48/151 steps) |
+| fraction of wall-clock on Plan Maker | 99.5% |
+
+Extrapolated: a full 50,000-step MARLA_FULL run at this rate would need
+roughly 217 hours (~9 days) of sequential wall-clock on this single-GPU
+sandbox. **This is the basis for the PILOT FIRST checklist verdict**:
+task non-trivial (yes), initial success not saturated (yes, 3.6%), PPO
+numerically stable (no NaN/divergence observed in the partial run), MARLA
+actually queries (yes, 31.8%), **query rate low enough for the full
+50k-step experiment to be feasible in this session (no)**.
+
+Per this finding, the required evaluation/ablation suite was cut down
+(manifest.yaml v3) to remove every experiment that calls the Plan Maker on
+every or nearly every step (`MARLA_FULL_ALWAYS_QUERY`, `PLAN_MAKER_ONLY`)
+and to descope `MARLA_FULL_BETA_ZERO`/`BETA_ONE` for this phase (kept
+implemented, not launched). The required suite is now exactly `PPO_ONLY`,
+`MARLA_FULL`, and the zero-Plan-Maker-call `MARLA_FULL_NO_QUERY` ablation.
+Full reasoning, options, and recommendation: see the final summary
+delivered alongside this revision.
+
 ## Status of this document
 
-This file reflects validation performed **before** launching any of the
-50k-step pilot training runs. It will be updated once the pilot itself
-(seed 101, PPO_ONLY + MARLA_FULL) completes, with its own measured
-throughput and any findings from inspecting its real learning curve.
+This file reflects validation and a real (deliberately interrupted) pilot
+measurement performed **before** launching any full-scale (50k-step)
+training run. No 50k-step run has completed as of this revision.

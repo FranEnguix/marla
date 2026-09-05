@@ -2,64 +2,91 @@
 # table in this program is produced by analyze.py joining a run's own
 # episodes.csv/decisions.csv/updates.csv (untouched MARLA schema) against
 # this file plus scenario_manifest.csv -- never by mutating MARLA's core
-# per-run CSV schema with research-specific columns (see AUDIT.md section 3
-# of the implementation plan for why).
+# per-run CSV schema with research-specific columns.
 #
-# git_sha is the commit this manifest and every config/run/config_hash
-# below corresponds to. Update it if any config file changes.
+# REVISION HISTORY (kept, not overwritten, so every past decision stays
+# traceable):
+#   v1 -- 50k-step primary training, full ablation set including
+#         ALWAYS_QUERY/PLAN_MAKER_ONLY/BETA_ZERO/BETA_ONE.
+#   v2 -- reduced primary training to 5k steps after a first smoke test
+#         measured ~92s/consultation; still too expensive to complete as a
+#         "smoke test" (killed partway, see pilot_measurements below).
+#   v3 (current) -- primary training restored to 50k steps (the actual
+#         target), but the REQUIRED evaluation/ablation suite is cut down
+#         to remove every experiment that calls the Plan Maker on
+#         (near-)every step, per real measured latency. See
+#         `postponed_pending_feasibility` below for what that removes and
+#         why, and `pilot_measurements` for the real numbers driving this.
 
 schema_version: 1
-git_sha: c145b1a75521e23868ee51b05a92a0a45ffaa005  # the commit that introduced this research program (implementation only -- no run has been launched against it yet, see VALIDATION.md)
+git_sha: c145b1a75521e23868ee51b05a92a0a45ffaa005  # commit that introduced this program; update once the v3-revision commit lands
 primary_training_scenario: NASimEmu/scenarios/sm_entry_dmz_two_subnets.v2.yaml
 scenario_manifest: scenario_manifest.csv
 
 # Fixed BEFORE any run exists; not selected based on results (Phase 2).
 training_seeds: [101, 202, 303]
 
-# Disjoint from training_seeds and from each other.
+# Real measurements from the v2 pilot (MARLA_FULL seed 101, killed partway
+# through rollout 1/10 of a 5000-step run once enough data had accumulated
+# -- not a completed run, a deliberately-interrupted measurement pass).
+# These numbers are the basis for every wall-clock estimate in this file
+# and in the final summary; nothing here is extrapolated from code
+# inspection alone.
+pilot_measurements:
+  source_run: runs/aamas2027_marla_full/marla-full-seed-101  # NOTE: this checkpoint is NOT a valid trained result -- interrupted at ~151/5000 steps
+  environment_steps_observed: 151
+  wall_clock_seconds_observed: 3538
+  consultations_completed: 48
+  consultation_latency_seconds: {mean: 73.3, p50: 91.5, p95: 108.7, min: 7.7, max: 109.2}
+  query_rate_observed: 0.318  # 48/151 -- an UNTRAINED gate; expected to fall as training suppresses low-value queries, but not guaranteed to fall fast
+  latency_is_bimodal: true  # ~8s for small (~11) legal-action-count observations (early episode), ~90-109s for large (~81-91) legal-action-count observations (mid/late episode, most hosts discovered)
+  fraction_of_wall_clock_spent_on_plan_maker: 0.995  # 3520.7s / 3538s -- PPO/environment compute is negligible next to Plan Maker latency
+  extrapolated_50000_step_marla_full_runtime_hours: {low_estimate: 217, basis: "50000/151 * 3538s, i.e. holding the observed rate constant for the whole run"}
+  feasibility_verdict: "NOT feasible as a background job in this session at the observed rate (~9 days for one seed) -- see the final summary for the recommendation and options."
+
+# Disjoint from training_seeds and from each other. Sizes reduced from an
+# earlier draft (50/10 seeds) pending confirmation that MARLA evaluation
+# (which itself invokes the Plan Maker under its own learned gate) is
+# actually affordable at any scale -- see pilot_measurements.
 evaluation_seed_sets:
   final_id:
     start: 5001
-    count: 20
+    count: 15  # was 20; "10-20 depending on measured consultation cost" -- 15 is a placeholder pending the real pilot's query rate, not a final answer
     scenario: NASimEmu/scenarios/sm_entry_dmz_two_subnets.v2.yaml
     id_or_ood: ID
   final_ood_dmz_three_subnets:
     start: 6001
-    count: 10
+    count: 8  # was 10; "5-10 to start"
     scenario: NASimEmu/scenarios/sm_entry_dmz_three_subnets.v2.yaml
     id_or_ood: OOD
   final_ood_user_three_subnets:
-    start: 6001  # same numeric seeds reused across OOD scenarios on purpose --
-    count: 10    # a shared "seed identity" aids paired cross-scenario comparison;
+    start: 6001  # same numeric seeds reused across OOD scenarios on purpose
+    count: 8
     scenario: NASimEmu/scenarios/sm_entry_user_three_subnets.v2.yaml
     id_or_ood: OOD
   periodic_learning_curve:
-    # Not a config choice -- EVAL_SEED_OFFSET is a source constant
-    # (learning/rollout.py) used by every run's between-rollout eval
-    # callback, so this seed set is identical across every condition by
-    # construction, not by convention.
+    # EVAL_SEED_OFFSET is a source constant (learning/rollout.py), so this
+    # seed set is identical across every condition by construction.
     start: 1000000000
-    count: 3
+    count: 3  # "2-3 fixed evaluation seeds"
     scenario: NASimEmu/scenarios/sm_entry_dmz_two_subnets.v2.yaml
     id_or_ood: ID
     note: >
-      eval_every_rollouts=2 with rollout_steps=512 lands periodic points at
-      environment_steps 1024/2048/3072/4096/5120, not exact multiples of
-      1000 -- see AUDIT.md section 7.4 for why (rollout boundaries, not
-      step counts, are what the existing eval callback can land on).
-      training_step_budget was reduced from an initial 50000 to 5000 after
-      a real smoke test measured Plan Maker consultation latency at
-      ~92s/call and a ~15-20% query rate for an untrained gate -- a full
-      50000-step MARLA_FULL run could plausibly take 1-10 days on this
-      single-GPU sandbox (see VALIDATION.md).
+      For PPO_ONLY this is cheap regardless of frequency (no Plan Maker
+      calls). For MARLA_FULL, each periodic eval pass uses the learned
+      gate normally -- i.e. it is NOT free, and its frequency
+      (eval_every_rollouts) must be chosen from the pilot's measured query
+      rate, reducing frequency rather than consuming the experiment budget
+      if it would add excessive LLM runtime (explicit instruction). Not
+      finalized until a feasible primary-training path is confirmed.
 
 plan_maker:
   model_name: Qwen/Qwen2.5-1.5B-Instruct
-  model_revision: "not pinned by MARLA -- AutoModelForCausalLM.from_pretrained is called with no revision= argument (see AUDIT.md section 5); model_name is the only identity MARLA itself records"
+  model_revision: "not pinned by MARLA -- AutoModelForCausalLM.from_pretrained is called with no revision= argument; model_name is the only identity MARLA itself records"
   prompt_version: nasimemu-plan-maker-v1
   knowledge_version: nasimemu-rules-v1
   max_schema_revisions: 3
-  generation: "greedy (do_sample=False), no explicit LM RNG seed -- determinism rests on greedy decoding over fixed weights (AUDIT.md section 5)"
+  generation: "greedy (do_sample=False), no explicit LM RNG seed"
 
 conditions:
   PPO_ONLY:
@@ -68,70 +95,66 @@ conditions:
     query_mode: n/a
     trust_mode: n/a
     advice_transformation: n/a
-    training_step_budget: 5000
+    training_step_budget: 50000  # restored to the true target; cheap regardless (measured: 5000 steps in 197s, no Plan Maker calls)
     runs:
       101: {config: configs/ppo_only_seed101.yaml, run_dir: runs/aamas2027_ppo_only/ppo-only-seed-101}
       202: {config: configs/ppo_only_seed202.yaml, run_dir: runs/aamas2027_ppo_only/ppo-only-seed-202}
       303: {config: configs/ppo_only_seed303.yaml, run_dir: runs/aamas2027_ppo_only/ppo-only-seed-303}
+    note: "seed 101's run_dir currently holds the earlier 5000-step (v2) result, not yet re-run at 50000 steps -- see final summary"
 
   MARLA_FULL:
     trainable: true
     consultation_mode: learned
     consultation_cost: 0.10
-    query_mode: learned
+    query_mode: learned  # the gate's own decision; NEVER forced during training (was never forced -- ALWAYS_CONSULT-as-a-trained-condition was already postponed before this revision)
     trust_mode: learned
     advice_transformation: identity
-    training_step_budget: 5000
+    training_step_budget: 50000  # restored to the true target -- but see pilot_measurements.feasibility_verdict: NOT launched until confirmed feasible
     runs:
       101: {config: configs/marla_full_seed101.yaml, run_dir: runs/aamas2027_marla_full/marla-full-seed-101}
       202: {config: configs/marla_full_seed202.yaml, run_dir: runs/aamas2027_marla_full/marla-full-seed-202}
       303: {config: configs/marla_full_seed303.yaml, run_dir: runs/aamas2027_marla_full/marla-full-seed-303}
+    note: "seed 101's run_dir currently holds only the interrupted v2 pilot measurement pass (151/5000 steps) -- NOT a trained checkpoint, do not evaluate it as one"
 
-  # Everything below is an EVALUATION-TIME ablation on a frozen MARLA_FULL
-  # checkpoint (src/marla/evaluation) -- not an independently trained
-  # condition. Labeled explicitly per the user's own instruction that this
-  # distinction must never be blurred.
+  # Evaluation-time ablation on a frozen MARLA_FULL checkpoint -- never an
+  # independently trained baseline. This is now the ONLY required
+  # inference ablation (previous revisions also listed
+  # NORMAL/ALWAYS_QUERY/BETA_ZERO/BETA_ONE/PLAN_MAKER_ONLY as required;
+  # all but NORMAL and NO_QUERY are now postponed, see below).
   MARLA_FULL_NORMAL:
     trainable: false
     evaluation_only: true
     base_condition: MARLA_FULL
     overrides: {query_mode: learned, beta_override: null, action_selection: policy}
-    description: The trained checkpoint's own learned behavior, re-run deterministically -- the control condition for the other four ablations below.
+    description: The trained checkpoint's learned behavior, re-run deterministically -- uses the learned query gate normally, no forced extra queries. The control condition MARLA_FULL_NO_QUERY is compared against.
 
   MARLA_FULL_NO_QUERY:
     trainable: false
     evaluation_only: true
     base_condition: MARLA_FULL
     overrides: {query_mode: never, beta_override: null, action_selection: policy}
+    description: "The main required inference ablation: force q=0 for the whole episode (zero Plan Maker calls), otherwise the trained PPO policy unchanged. Free to run regardless of Plan Maker cost."
 
-  MARLA_FULL_ALWAYS_QUERY:
-    trainable: false
-    evaluation_only: true
-    base_condition: MARLA_FULL
-    overrides: {query_mode: always, beta_override: null, action_selection: policy}
-
-  MARLA_FULL_BETA_ZERO:
-    trainable: false
-    evaluation_only: true
-    base_condition: MARLA_FULL
-    overrides: {query_mode: learned, beta_override: 0.0, action_selection: policy}
-
-  MARLA_FULL_BETA_ONE:
-    trainable: false
-    evaluation_only: true
-    base_condition: MARLA_FULL
-    overrides: {query_mode: learned, beta_override: 1.0, action_selection: policy}
-
-  PLAN_MAKER_ONLY:
-    trainable: false
-    evaluation_only: true
-    base_condition: null  # a freshly-initialized, never-trained scaffold policy -- see src/marla/evaluation/checkpoint_eval.py's build_policy(); action selection never consults it
-    overrides: {query_mode: always, beta_override: null, action_selection: plan_maker_argmax}
-    fallback_on_schema_rejected: "fixed seeded uniform-random legal-action choice (fallback_rng_seed), never a learned policy output"
-    replicates: [101, 202, 303]  # scaffold policy seeded identically to the corresponding training seed, for symmetry -- never trained regardless
+postponed_pending_feasibility:
+  # Everything below calls the Plan Maker on every, or nearly every,
+  # environment step, or (BETA_ONE) was descoped alongside the rest of the
+  # corrupted-advice ablation set for this phase even though it does not
+  # itself force extra queries. Implemented in src/marla/evaluation
+  # already (overrides.py's ALWAYS_QUERY/PLAN_MAKER_ONLY/BETA_ZERO/
+  # BETA_ONE constants) -- NOT launched, per explicit instruction not to
+  # implement-or-launch further unless explicitly requested again.
+  - condition: MARLA_FULL_ALWAYS_QUERY
+    reason: "Forces a Plan Maker call on every environment step. At the measured 73.3s mean / 108.7s p95 latency, a single 20-episode ID eval pass (~100 steps/episode) could need up to ~2000 calls -- 40-60 hours for ONE checkpoint's ONE eval pass."
+  - condition: PLAN_MAKER_ONLY
+    reason: "Same as ALWAYS_QUERY (query_mode=always by construction) -- every step calls the Plan Maker."
+  - condition: MARLA_FULL_BETA_ZERO
+    reason: "Does not itself force extra queries (query_mode=learned, same rate as NORMAL) -- descoped for this phase to keep the required comparison set to exactly PPO_ONLY/MARLA_FULL/MARLA_FULL_NO_QUERY, not for a cost reason. decisions.csv does NOT persist the raw per-action base-logit/advice vectors (only summary fields: top-action IDs, ranks, beta, alpha), so an exact beta-forced recomputation is not actually possible from existing data without a schema change -- analyze.py's beta_stratified_advice_influence() instead produces the honest, weaker thing that IS possible: advice_changed_top_action rate stratified by the actual beta value each decision occurred with (zero new Plan Maker calls either way), explicitly labeled as observational, not a beta=0/1 counterfactual."
+  - condition: MARLA_FULL_BETA_ONE
+    reason: "Same as BETA_ZERO -- descoped for this phase, offline counterfactual still produced."
+  - condition: ALWAYS_CONSULT (trained)
+    reason: "Would train under query_mode=always for the entire 50k-step run -- infeasible by the same argument as MARLA_FULL_ALWAYS_QUERY, and already postponed in earlier revisions of this manifest for a different (probability-accounting) reason too."
 
 postponed:
-  - ALWAYS_CONSULT (trained, as its own condition -- distinct from the MARLA_FULL_ALWAYS_QUERY evaluation-time ablation above)
   - RANDOM_QUERY_MATCHED
   - ENTROPY_QUERY_MATCHED
   - SHUFFLED_ADVICE

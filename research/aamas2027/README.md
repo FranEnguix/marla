@@ -13,6 +13,15 @@ real compute), *completed* (finished, artifacts exist on disk). Never
 conflated -- see the final summary given alongside this deliverable set for
 which experiments are currently in which state.
 
+**Current status (manifest.yaml v3)**: primary training configs are at the
+true 50,000-step target, but no 50k-step run has been launched yet --
+`runs/aamas2027_ppo_only/ppo-only-seed-101` currently holds only an
+earlier 5,000-step result, and `runs/aamas2027_marla_full/marla-full-seed-101`
+holds only a deliberately-interrupted ~151-step measurement pass (real
+Plan Maker latency data, not a trained checkpoint). See `VALIDATION.md`
+and the final summary for the feasibility recommendation before either is
+re-run at full scale.
+
 ## Layout
 
 ```
@@ -52,13 +61,29 @@ marla run research/aamas2027/configs/marla_full_seed101.yaml
 marla summarize runs/aamas2027_marla_full/marla-full-seed-101
 ```
 
-## Reproduce: final checkpoint evaluation (NORMAL condition, 20 ID seeds)
+## Required evaluation suite (manifest.yaml v3)
+
+Restricted to exactly three conditions after a real pilot measured Plan
+Maker consultation latency (~73s mean, ~109s p95) -- see `VALIDATION.md`
+and `manifest.yaml`'s `postponed_pending_feasibility` section.
+`MARLA_FULL_ALWAYS_QUERY`/`PLAN_MAKER_ONLY`/`MARLA_FULL_BETA_ZERO`/
+`MARLA_FULL_BETA_ONE` are implemented in `src/marla/evaluation` and
+`scripts/evaluate_checkpoint.py --condition` accepts them, but they are
+**not** part of the required suite below and should not be launched
+without confirming their cost first (ALWAYS_QUERY/PLAN_MAKER_ONLY call the
+Plan Maker on every step -- infeasible at the measured latency for any
+non-trivial episode count).
+
+## Reproduce: final ID checkpoint evaluation (MARLA_FULL_NORMAL)
+
+`MARLA_FULL_NORMAL` uses the checkpoint's own learned query gate normally
+-- no forced extra queries:
 
 ```bash
 python research/aamas2027/scripts/evaluate_checkpoint.py \
   --run-dir runs/aamas2027_marla_full/marla-full-seed-101 \
   --condition MARLA_FULL_NORMAL \
-  --seed-start 5001 --num-episodes 20 \
+  --seed-start 5001 --num-episodes 15 \
   --training-seed 101 --id-or-ood ID \
   --cache research/aamas2027/raw/advisory_cache.jsonl \
   --out-dir research/aamas2027/raw/eval/MARLA_FULL_NORMAL/seed-101
@@ -69,60 +94,44 @@ For `PPO_ONLY` (no Plan Maker, `--condition PPO_ONLY` implies `overrides=None`):
 ```bash
 python research/aamas2027/scripts/evaluate_checkpoint.py \
   --run-dir runs/aamas2027_ppo_only/ppo-only-seed-101 \
-  --condition PPO_ONLY --seed-start 5001 --num-episodes 20 \
+  --condition PPO_ONLY --seed-start 5001 --num-episodes 15 \
   --training-seed 101 --id-or-ood ID \
   --out-dir research/aamas2027/raw/eval/PPO_ONLY/seed-101
 ```
 
-## Reproduce: OOD evaluation (10 seeds, harder-DMZ scenario)
+## Reproduce: OOD evaluation (harder-DMZ scenario)
 
 ```bash
 python research/aamas2027/scripts/evaluate_checkpoint.py \
   --run-dir runs/aamas2027_marla_full/marla-full-seed-101 \
   --condition MARLA_FULL_NORMAL \
   --scenario "$(pwd)/NASimEmu/scenarios/sm_entry_dmz_three_subnets.v2.yaml" \
-  --seed-start 6001 --num-episodes 10 \
+  --seed-start 6001 --num-episodes 8 \
   --training-seed 101 --id-or-ood OOD \
   --cache research/aamas2027/raw/advisory_cache.jsonl \
   --out-dir research/aamas2027/raw/eval/MARLA_FULL_NORMAL__OOD_dmz_three_subnets/seed-101
 ```
 
 Repeat with `sm_entry_user_three_subnets.v2.yaml` and output directory
-suffix `OOD_user_three_subnets` for the second OOD scenario.
+suffix `OOD_user_three_subnets` for the second OOD scenario, and with
+`--condition PPO_ONLY` (no `--cache` needed) for the PPO_ONLY baseline.
 
-## Reproduce: a trust/advice ablation (BETA_ZERO)
+## Reproduce: the main inference ablation (MARLA_FULL_NO_QUERY)
 
-```bash
-python research/aamas2027/scripts/evaluate_checkpoint.py \
-  --run-dir runs/aamas2027_marla_full/marla-full-seed-101 \
-  --condition MARLA_FULL_BETA_ZERO \
-  --seed-start 5001 --num-episodes 20 \
-  --training-seed 101 --id-or-ood ID \
-  --cache research/aamas2027/raw/advisory_cache.jsonl \
-  --out-dir research/aamas2027/raw/eval/MARLA_FULL_BETA_ZERO/seed-101
-```
-
-Pass the SAME `--cache` path across every ablation on the same checkpoint
-(NORMAL/NO_QUERY/ALWAYS_QUERY/BETA_ZERO/BETA_ONE) so paired ablations reuse
-identical Plan Maker responses wherever their trajectories haven't yet
-diverged (see AUDIT.md / `src/marla/evaluation/advisory_cache.py`).
-
-For `PLAN_MAKER_ONLY` (a freshly-initialized scaffold, no `checkpoint.pt`
-needed):
+Forces q=0 for the whole episode -- **zero Plan Maker calls**, the trained
+PPO policy otherwise unchanged. This is an evaluation-time ablation of a
+MARLA-trained checkpoint, not an independently trained baseline:
 
 ```bash
 python research/aamas2027/scripts/evaluate_checkpoint.py \
   --run-dir runs/aamas2027_marla_full/marla-full-seed-101 \
-  --condition PLAN_MAKER_ONLY --fresh-scaffold-seed 101 \
-  --seed-start 5001 --num-episodes 20 \
+  --condition MARLA_FULL_NO_QUERY \
+  --seed-start 5001 --num-episodes 15 \
   --training-seed 101 --id-or-ood ID \
-  --cache research/aamas2027/raw/advisory_cache.jsonl \
-  --out-dir research/aamas2027/raw/eval/PLAN_MAKER_ONLY/seed-101
+  --out-dir research/aamas2027/raw/eval/MARLA_FULL_NO_QUERY/seed-101
 ```
 
-(`--run-dir` here only supplies `config.yaml` for policy/scenario shape --
-`PLAN_MAKER_ONLY` never loads that run's `checkpoint.pt`; any MARLA_FULL
-run's config works.)
+(No `--cache` needed -- this condition never calls the Plan Maker.)
 
 ## Aggregation and figures
 
