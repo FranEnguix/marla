@@ -24,7 +24,7 @@
 #         current model/design, not a bug.
 
 schema_version: 1
-git_sha: c145b1a75521e23868ee51b05a92a0a45ffaa005  # commit that introduced this program; update to the v4-revision commit once committed
+git_sha: a82df30c4f2c8737b3f78f6f66c8d3d6ed63ca3f  # the v4-revision commit (checkpoint resume + Plan Maker profiling + staged training)
 primary_training_scenario: NASimEmu/scenarios/sm_entry_dmz_two_subnets.v2.yaml
 scenario_manifest: scenario_manifest.csv
 
