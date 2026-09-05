@@ -43,10 +43,15 @@ evaluation_seed_sets:
     scenario: NASimEmu/scenarios/sm_entry_dmz_two_subnets.v2.yaml
     id_or_ood: ID
     note: >
-      eval_every_rollouts=20 with rollout_steps=512 lands periodic points at
-      environment_steps 10240/20480/30720/40960, not exact multiples of
-      10000 -- see AUDIT.md section 7.4 for why (rollout boundaries, not
+      eval_every_rollouts=2 with rollout_steps=512 lands periodic points at
+      environment_steps 1024/2048/3072/4096/5120, not exact multiples of
+      1000 -- see AUDIT.md section 7.4 for why (rollout boundaries, not
       step counts, are what the existing eval callback can land on).
+      training_step_budget was reduced from an initial 50000 to 5000 after
+      a real smoke test measured Plan Maker consultation latency at
+      ~92s/call and a ~15-20% query rate for an untrained gate -- a full
+      50000-step MARLA_FULL run could plausibly take 1-10 days on this
+      single-GPU sandbox (see VALIDATION.md).
 
 plan_maker:
   model_name: Qwen/Qwen2.5-1.5B-Instruct
@@ -63,7 +68,7 @@ conditions:
     query_mode: n/a
     trust_mode: n/a
     advice_transformation: n/a
-    training_step_budget: 50000
+    training_step_budget: 5000
     runs:
       101: {config: configs/ppo_only_seed101.yaml, run_dir: runs/aamas2027_ppo_only/ppo-only-seed-101}
       202: {config: configs/ppo_only_seed202.yaml, run_dir: runs/aamas2027_ppo_only/ppo-only-seed-202}
@@ -76,7 +81,7 @@ conditions:
     query_mode: learned
     trust_mode: learned
     advice_transformation: identity
-    training_step_budget: 50000
+    training_step_budget: 5000
     runs:
       101: {config: configs/marla_full_seed101.yaml, run_dir: runs/aamas2027_marla_full/marla-full-seed-101}
       202: {config: configs/marla_full_seed202.yaml, run_dir: runs/aamas2027_marla_full/marla-full-seed-202}

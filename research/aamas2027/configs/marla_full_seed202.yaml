@@ -5,7 +5,10 @@
 #   - environment.scenario: sm_entry_dmz_two_subnets.v2.yaml (absolute
 #     path), not sm_entry_dmz_one_subnet.v2.yaml -- see
 #     ppo_only_seed202.yaml's comment / AUDIT.md section 7.1.
-#   - ppo.total_environment_steps: 50000, not 100000.
+#   - ppo.total_environment_steps: 5000, not 100000 (compute-scoped pilot,
+#   reduced further from an initial 50000 after a real smoke test measured
+#   Plan Maker consultation latency at ~92s/call and a ~15-20% query rate
+#   for an untrained gate -- see VALIDATION.md).
 #   - experiment.seed / run_id: this file's seed -- the SAME seed as
 #     ppo_only_seed202.yaml, by design (Phase 2: paired training seeds
 #     across primary trainable conditions).
@@ -64,7 +67,7 @@ policy:
     hidden_size: 128
     sequence_length: 32
   ppo:
-    total_environment_steps: 50000
+    total_environment_steps: 5000  # reduced from 50000 -- see comment above
     rollout_steps: 512
     epochs: 4
     minibatch_sequences: 8
@@ -110,7 +113,7 @@ metrics:
   output_directory: runs
   record_decisions: true
   eval_episodes: 3
-  eval_every_rollouts: 20
+  eval_every_rollouts: 2
 
 reproducibility:
   deterministic_torch: true
