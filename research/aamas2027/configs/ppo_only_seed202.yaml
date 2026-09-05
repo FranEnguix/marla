@@ -11,7 +11,7 @@
 #   - ppo.total_environment_steps: 50000, not 100000 (Phase 2's compute-scoped
 #     pilot budget -- kept at the original target; NOT reduced further,
 #     despite a real pilot measurement (VALIDATION.md) showing MARLA_FULL
-#     would need ~9-13 days at this budget at the observed ~73s mean /
+#     would need ~13-14 days at this budget at the observed ~73s mean /
 #     ~32% pre-training query rate. See the final summary this config was
 #     delivered alongside for the feasibility recommendation -- this
 #     config is NOT launched until that is resolved.

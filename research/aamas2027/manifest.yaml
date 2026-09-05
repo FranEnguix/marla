@@ -41,8 +41,8 @@ pilot_measurements:
   query_rate_observed: 0.318  # 48/151 -- an UNTRAINED gate; expected to fall as training suppresses low-value queries, but not guaranteed to fall fast
   latency_is_bimodal: true  # ~8s for small (~11) legal-action-count observations (early episode), ~90-109s for large (~81-91) legal-action-count observations (mid/late episode, most hosts discovered)
   fraction_of_wall_clock_spent_on_plan_maker: 0.995  # 3520.7s / 3538s -- PPO/environment compute is negligible next to Plan Maker latency
-  extrapolated_50000_step_marla_full_runtime_hours: {low_estimate: 217, basis: "50000/151 * 3538s, i.e. holding the observed rate constant for the whole run"}
-  feasibility_verdict: "NOT feasible as a background job in this session at the observed rate (~9 days for one seed) -- see the final summary for the recommendation and options."
+  extrapolated_50000_step_marla_full_runtime_hours: {estimate: 325, basis: "50000/151 * 3538s, i.e. holding the observed blended per-step wall-clock rate constant for the whole run; cross-checked via expected_calls(15894) * mean_latency(73.3s) = 324 hours -- the two methods agree to within 1%"}
+  feasibility_verdict: "NOT feasible as a background job in this session at the observed rate (~13.5 days for one seed) -- see the final summary for the recommendation and options."
 
 # Disjoint from training_seeds and from each other. Sizes reduced from an
 # earlier draft (50/10 seeds) pending confirmation that MARLA evaluation

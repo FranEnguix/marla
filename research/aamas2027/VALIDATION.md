@@ -203,8 +203,10 @@ taken ~32 hours for just 5000 steps). Measured over 48 real consultations:
 | fraction of wall-clock on Plan Maker | 99.5% |
 
 Extrapolated: a full 50,000-step MARLA_FULL run at this rate would need
-roughly 217 hours (~9 days) of sequential wall-clock on this single-GPU
-sandbox. **This is the basis for the PILOT FIRST checklist verdict**:
+roughly 325 hours (~13.5 days) of sequential wall-clock on this single-GPU
+sandbox (two independent methods -- scaling the observed blended per-step
+rate, and expected-calls x mean-latency -- agree to within 1%). **This is
+the basis for the PILOT FIRST checklist verdict**:
 task non-trivial (yes), initial success not saturated (yes, 3.6%), PPO
 numerically stable (no NaN/divergence observed in the partial run), MARLA
 actually queries (yes, 31.8%), **query rate low enough for the full
