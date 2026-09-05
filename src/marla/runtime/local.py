@@ -66,11 +66,14 @@ def resolve_debug_dir(config: Config, run_id: str) -> Path:
     return debug_dir
 
 
-async def _build_and_run(config: Config, config_dir: Path, num_rollouts: int, debug: bool = False) -> "object":
+async def _build_and_run(
+    config: Config, config_dir: Path, num_rollouts: int, debug: bool = False, resume_from: Path | None = None
+) -> "object":
     from marla.agents.gatekeeper import GatekeeperAgent
     from marla.agents.orchestrator import RLOrchestratorAgent
     from marla.agents.plan_maker import PlanMakerAgent
     from marla.knowledge.retriever import load_knowledge_base
+    from marla.learning.checkpoint import load_checkpoint
     from marla.models.backend_factory import build_backend
     from marla.runtime.device import resolve_device
     from marla.runtime.lifecycle import register_sigint_handler
@@ -87,10 +90,32 @@ async def _build_and_run(config: Config, config_dir: Path, num_rollouts: int, de
     # entropy, not experiment.seed -- two runs with the "same" seed would
     # not actually be reproducible or comparable. Mirrors what the
     # test-only run_baseline_training() already does (learning/trainer.py).
+    # Harmless when resuming: load_checkpoint's restore_rng_state below
+    # overwrites this immediately afterward with the checkpoint's own RNG
+    # state, and the weights this seeds are about to be overwritten too.
     torch.manual_seed(config.experiment.seed)
     policy, optimizer = build_policy_and_optimizer(
         config, resolved_device.torch_device, consultation_enabled=config.consultation.mode == "learned"
     )
+
+    initial_environment_steps = 0
+    initial_update_count = 0
+    resumed_seed = config.experiment.seed
+    if resume_from is not None:
+        metadata = load_checkpoint(
+            resume_from, policy, optimizer, map_location=resolved_device.torch_device, restore_rng_state=True
+        )
+        initial_environment_steps = metadata.environment_steps
+        initial_update_count = metadata.update_count
+        if metadata.next_episode_seed is not None:
+            resumed_seed = metadata.next_episode_seed
+        print(
+            f"Resumed from {resume_from}: {initial_environment_steps} environment step(s) / "
+            f"{initial_update_count} update(s) already done, continuing episode seeds from "
+            f"{resumed_seed}, RNG state restored: {metadata.rng_state_restored}",
+            flush=True,
+        )
+
     adapter = NasimEmuAdapter(
         scenario=scenario_path,
         max_episode_steps=config.environment.max_episode_steps,
@@ -159,8 +184,10 @@ async def _build_and_run(config: Config, config_dir: Path, num_rollouts: int, de
         optimizer=optimizer,
         adapter=adapter,
         device=resolved_device.torch_device,
-        seed=config.experiment.seed,
+        seed=resumed_seed,
         num_rollouts=num_rollouts,
+        initial_environment_steps=initial_environment_steps,
+        initial_update_count=initial_update_count,
         required_participants=required_participants,
         gatekeeper_alias=config.gatekeeper.alias if config.gatekeeper else None,
         gatekeeper_jid=config.gatekeeper.jid if config.gatekeeper else None,
@@ -175,13 +202,24 @@ async def _build_and_run(config: Config, config_dir: Path, num_rollouts: int, de
 
 
 def run_local(
-    config: Config, config_dir: Path, num_rollouts: int, embedded_xmpp_server: bool = True, debug: bool = False
+    config: Config,
+    config_dir: Path,
+    num_rollouts: int,
+    embedded_xmpp_server: bool = True,
+    debug: bool = False,
+    resume_from: Path | None = None,
 ):
     """Run a local-mode experiment; blocks until the RL Orchestrator finishes.
 
     Raises :class:`LocalRunError` if the run ended in failure. Returns the
     stopped :class:`RLOrchestratorAgent` (holding ``training_result``) on
     success.
+
+    ``resume_from``: a checkpoint.pt to load policy/optimizer/RNG state
+    from and continue training rather than starting fresh (research/
+    aamas2027's staged training) -- ``num_rollouts`` here must already be
+    computed as the *remaining* rollouts to the config's target step count,
+    not the full target (see cli.py's ``run`` command).
 
     SPADE's ``Container`` is a process-wide singleton, and its event loop is
     closed at the end of ``spade.run()`` -- calling ``run_local`` more than
@@ -196,7 +234,9 @@ def run_local(
 
     async def main() -> None:
         try:
-            result["orchestrator"] = await _build_and_run(config, config_dir, num_rollouts, debug=debug)
+            result["orchestrator"] = await _build_and_run(
+                config, config_dir, num_rollouts, debug=debug, resume_from=resume_from
+            )
         except Exception as exc:
             # SPADE's container.run() swallows exceptions raised in main()
             # (it only logs them) rather than propagating them to run_local's

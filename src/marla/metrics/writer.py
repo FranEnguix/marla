@@ -418,11 +418,17 @@ def write_run_artifacts(
         # distinct from (and does not populate) updates.csv's per-update
         # checkpoint_id column -- no per-update checkpointing is wired into
         # the training loop, only this single end-of-run save.
+        # update_count/environment_steps are cumulative (resume-aware) --
+        # result.environment_steps already starts from the resumed
+        # checkpoint's own value (learning/trainer.run_training_loop), and
+        # update_count_offset carries the equivalent for update numbering.
         save_checkpoint(
             run_dir / "checkpoint.pt",
             result.policy,
             result.optimizer,
-            update_count=len(result.update_metrics),
+            update_count=result.update_count_offset + len(result.update_metrics),
             environment_steps=result.environment_steps,
             config_hash=config_hash(config),
+            next_episode_seed=result.next_episode_seed,
+            rng_state=result.final_rng_state,
         )

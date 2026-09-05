@@ -13,14 +13,17 @@ real compute), *completed* (finished, artifacts exist on disk). Never
 conflated -- see the final summary given alongside this deliverable set for
 which experiments are currently in which state.
 
-**Current status (manifest.yaml v3)**: primary training configs are at the
-true 50,000-step target, but no 50k-step run has been launched yet --
-`runs/aamas2027_ppo_only/ppo-only-seed-101` currently holds only an
-earlier 5,000-step result, and `runs/aamas2027_marla_full/marla-full-seed-101`
-holds only a deliberately-interrupted ~151-step measurement pass (real
-Plan Maker latency data, not a trained checkpoint). See `VALIDATION.md`
-and the final summary for the feasibility recommendation before either is
-re-run at full scale.
+**Current status (manifest.yaml v4 -- staged training)**: 50k/20k/15k-step
+MARLA_FULL training is off the table for this paper's timeline (real pilot
+measurement: ~13.5 days/seed at 50k). Training now proceeds in stages --
+Stage A is 5,000 steps, extending to Stage B (10,000, via `marla run
+--resume`, never from scratch) only with explicit approval after Stage A's
+interim report. `runs/aamas2027_ppo_only/ppo-only-seed-101` already holds
+a real, verified-matching 5,000-step Stage A result (reused as-is).
+`runs/aamas2027_marla_full/marla-full-seed-101` holds nothing on disk (the
+pilot measurement pass was killed before writing anything) -- Stage A for
+MARLA_FULL has not been launched. See `VALIDATION.md` and the final
+summary for the launch decision.
 
 ## Layout
 
@@ -61,7 +64,24 @@ marla run research/aamas2027/configs/marla_full_seed101.yaml
 marla summarize runs/aamas2027_marla_full/marla-full-seed-101
 ```
 
-## Required evaluation suite (manifest.yaml v3)
+## Extending to Stage B (10,000 steps) -- requires explicit approval first
+
+Never restarts from scratch: `--resume` loads policy/optimizer/RNG state
+and continues episode-seed progression from the Stage A checkpoint (see
+`tests/test_checkpoint_resume.py` for the confirmed-working end-to-end
+test). Create a Stage B config that is identical to the Stage A one except
+`ppo.total_environment_steps: 10000` and a different `run_id`, then:
+
+```bash
+marla run --resume runs/aamas2027_marla_full/marla-full-seed-101/checkpoint.pt \
+  research/aamas2027/configs/marla_full_seed101_stage_b.yaml
+```
+
+`marla run --resume` computes the remaining rollouts itself (target minus
+the checkpoint's own `environment_steps`) and refuses to run if the
+checkpoint already meets or exceeds the target.
+
+## Required evaluation suite (manifest.yaml v4)
 
 Restricted to exactly three conditions after a real pilot measured Plan
 Maker consultation latency (~73s mean, ~109s p95) -- see `VALIDATION.md`
@@ -83,7 +103,7 @@ non-trivial episode count).
 python research/aamas2027/scripts/evaluate_checkpoint.py \
   --run-dir runs/aamas2027_marla_full/marla-full-seed-101 \
   --condition MARLA_FULL_NORMAL \
-  --seed-start 5001 --num-episodes 15 \
+  --seed-start 5001 --num-episodes 5 \
   --training-seed 101 --id-or-ood ID \
   --cache research/aamas2027/raw/advisory_cache.jsonl \
   --out-dir research/aamas2027/raw/eval/MARLA_FULL_NORMAL/seed-101
@@ -94,7 +114,7 @@ For `PPO_ONLY` (no Plan Maker, `--condition PPO_ONLY` implies `overrides=None`):
 ```bash
 python research/aamas2027/scripts/evaluate_checkpoint.py \
   --run-dir runs/aamas2027_ppo_only/ppo-only-seed-101 \
-  --condition PPO_ONLY --seed-start 5001 --num-episodes 15 \
+  --condition PPO_ONLY --seed-start 5001 --num-episodes 5 \
   --training-seed 101 --id-or-ood ID \
   --out-dir research/aamas2027/raw/eval/PPO_ONLY/seed-101
 ```
@@ -106,7 +126,7 @@ python research/aamas2027/scripts/evaluate_checkpoint.py \
   --run-dir runs/aamas2027_marla_full/marla-full-seed-101 \
   --condition MARLA_FULL_NORMAL \
   --scenario "$(pwd)/NASimEmu/scenarios/sm_entry_dmz_three_subnets.v2.yaml" \
-  --seed-start 6001 --num-episodes 8 \
+  --seed-start 6001 --num-episodes 3 \
   --training-seed 101 --id-or-ood OOD \
   --cache research/aamas2027/raw/advisory_cache.jsonl \
   --out-dir research/aamas2027/raw/eval/MARLA_FULL_NORMAL__OOD_dmz_three_subnets/seed-101
@@ -126,7 +146,7 @@ MARLA-trained checkpoint, not an independently trained baseline:
 python research/aamas2027/scripts/evaluate_checkpoint.py \
   --run-dir runs/aamas2027_marla_full/marla-full-seed-101 \
   --condition MARLA_FULL_NO_QUERY \
-  --seed-start 5001 --num-episodes 15 \
+  --seed-start 5001 --num-episodes 5 \
   --training-seed 101 --id-or-ood ID \
   --out-dir research/aamas2027/raw/eval/MARLA_FULL_NO_QUERY/seed-101
 ```

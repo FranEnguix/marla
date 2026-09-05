@@ -89,6 +89,8 @@ class OrchestratorLifecycleBehaviour(OneShotBehaviour):
                 stop_event=agent.stop_event,
                 eval_episodes=agent.config.metrics.eval_episodes,
                 eval_every_rollouts=agent.config.metrics.eval_every_rollouts,
+                initial_environment_steps=agent.initial_environment_steps,
+                initial_update_count=agent.initial_update_count,
             )
             if agent.required_participants:
                 agent.training_result = await self._run_training_watching_for_failure(agent, training_call)
@@ -264,6 +266,8 @@ class RLOrchestratorAgent(Agent):
         gatekeeper_alias: str | None = None,
         gatekeeper_jid: str | None = None,
         stop_event: asyncio.Event | None = None,
+        initial_environment_steps: int = 0,
+        initial_update_count: int = 0,
     ):
         super().__init__(jid, password)
         self.alias = alias
@@ -276,6 +280,11 @@ class RLOrchestratorAgent(Agent):
         self.seed = seed
         self.num_rollouts = num_rollouts
         self.required_participants = dict(required_participants or {})
+        # Nonzero only when resuming from a checkpoint (research/aamas2027);
+        # see learning/trainer.run_training_loop's docstring for what these
+        # change.
+        self.initial_environment_steps = initial_environment_steps
+        self.initial_update_count = initial_update_count
 
         self.consultation_enabled = config.consultation.mode == "learned"
         self.consultation_cost = config.consultation.cost

@@ -10,83 +10,104 @@
 #         ALWAYS_QUERY/PLAN_MAKER_ONLY/BETA_ZERO/BETA_ONE.
 #   v2 -- reduced primary training to 5k steps after a first smoke test
 #         measured ~92s/consultation; still too expensive to complete as a
-#         "smoke test" (killed partway, see pilot_measurements below).
-#   v3 (current) -- primary training restored to 50k steps (the actual
-#         target), but the REQUIRED evaluation/ablation suite is cut down
-#         to remove every experiment that calls the Plan Maker on
-#         (near-)every step, per real measured latency. See
-#         `postponed_pending_feasibility` below for what that removes and
-#         why, and `pilot_measurements` for the real numbers driving this.
+#         "smoke test" (killed partway, see pilot_measurements).
+#   v3 -- primary training restored to 50k steps; required suite cut to
+#         PPO_ONLY/MARLA_FULL/MARLA_FULL_NO_QUERY.
+#   v4 (current) -- staged training: 5,000-step Stage A now (the real
+#         target, not a placeholder), STOP and report, extend to 10,000 via
+#         `marla run --resume` only with explicit approval -- 50k is off
+#         the table entirely for this paper's timeline. Checkpoint resume
+#         (policy/optimizer/RNG-state/episode-seed continuation) is now
+#         implemented and tested (tests/test_checkpoint_resume.py). Plan
+#         Maker profiling (plan_maker_profiling below) found no fixable
+#         latency bottleneck -- the ~73s mean is a genuine cost of the
+#         current model/design, not a bug.
 
 schema_version: 1
-git_sha: c145b1a75521e23868ee51b05a92a0a45ffaa005  # commit that introduced this program; update once the v3-revision commit lands
+git_sha: c145b1a75521e23868ee51b05a92a0a45ffaa005  # commit that introduced this program; update to the v4-revision commit once committed
 primary_training_scenario: NASimEmu/scenarios/sm_entry_dmz_two_subnets.v2.yaml
 scenario_manifest: scenario_manifest.csv
 
 # Fixed BEFORE any run exists; not selected based on results (Phase 2).
+# "Prefer adding seeds 404/505 over increasing environment-step budget" if
+# 5,000 steps already gives a stable signal (explicit instruction) --
+# those two are NOT added yet, only listed here as the agreed next move.
 training_seeds: [101, 202, 303]
+reserve_training_seeds_if_5k_is_stable: [404, 505]
+
+staged_training:
+  stage_a: {target_environment_steps: 5000, status: "not yet launched -- awaiting confirmation after this report"}
+  stage_b: {target_environment_steps: 10000, status: "requires explicit approval AFTER stage_a's interim report, and only if both methods still look clearly undertrained", how: "marla run --resume <stage_a checkpoint.pt> <stage_b config with total_environment_steps: 10000>"}
+  resume_mechanism: "src/marla/learning/checkpoint.py (next_episode_seed, rng_state fields) + cli.py's --resume flag + learning/trainer.py's initial_environment_steps/initial_update_count -- confirmed working end to end via a real two-process marla run / marla run --resume pair (tests/test_checkpoint_resume.py::test_resume_continues_rather_than_restarts): policy/optimizer state, environment_steps/update numbering, and episode-seed progression all continue correctly rather than restarting."
 
 # Real measurements from the v2 pilot (MARLA_FULL seed 101, killed partway
 # through rollout 1/10 of a 5000-step run once enough data had accumulated
 # -- not a completed run, a deliberately-interrupted measurement pass).
-# These numbers are the basis for every wall-clock estimate in this file
-# and in the final summary; nothing here is extrapolated from code
-# inspection alone.
 pilot_measurements:
-  source_run: runs/aamas2027_marla_full/marla-full-seed-101  # NOTE: this checkpoint is NOT a valid trained result -- interrupted at ~151/5000 steps
+  source_run: runs/aamas2027_marla_full/marla-full-seed-101  # NOTE: this checkpoint is NOT a valid trained result -- interrupted at ~151/5000 steps; will be overwritten by the real Stage A run
   environment_steps_observed: 151
   wall_clock_seconds_observed: 3538
   consultations_completed: 48
   consultation_latency_seconds: {mean: 73.3, p50: 91.5, p95: 108.7, min: 7.7, max: 109.2}
-  query_rate_observed: 0.318  # 48/151 -- an UNTRAINED gate; expected to fall as training suppresses low-value queries, but not guaranteed to fall fast
-  latency_is_bimodal: true  # ~8s for small (~11) legal-action-count observations (early episode), ~90-109s for large (~81-91) legal-action-count observations (mid/late episode, most hosts discovered)
-  fraction_of_wall_clock_spent_on_plan_maker: 0.995  # 3520.7s / 3538s -- PPO/environment compute is negligible next to Plan Maker latency
-  extrapolated_50000_step_marla_full_runtime_hours: {estimate: 325, basis: "50000/151 * 3538s, i.e. holding the observed blended per-step wall-clock rate constant for the whole run; cross-checked via expected_calls(15894) * mean_latency(73.3s) = 324 hours -- the two methods agree to within 1%"}
-  feasibility_verdict: "NOT feasible as a background job in this session at the observed rate (~13.5 days for one seed) -- see the final summary for the recommendation and options."
+  query_rate_observed: 0.318  # 48/151 -- an UNTRAINED gate
+  extrapolated_50000_step_marla_full_runtime_hours: {estimate: 325, note: "off the table entirely as of v4 -- superseded by staged_training above"}
+  extrapolated_5000_step_marla_full_runtime_hours: {estimate: 32.5, basis: "5000/151 * 3538s -- Stage A's own real target, still substantial (dominated by Plan Maker latency), see the final summary for the launch decision"}
 
-# Disjoint from training_seeds and from each other. Sizes reduced from an
-# earlier draft (50/10 seeds) pending confirmation that MARLA evaluation
-# (which itself invokes the Plan Maker under its own learned gate) is
-# actually affordable at any scale -- see pilot_measurements.
+# Profiling BEFORE any long run (this revision's explicit requirement) --
+# see research/aamas2027/scripts/profile_plan_maker.py and its two real
+# runs (baseline, then a JSON-completion-aware early-stopping A/B test).
+plan_maker_profiling:
+  device: cuda  # torch.cuda.is_available()=True, model resolved to cuda -- no CPU fallback
+  dtype: bfloat16
+  model_loaded_once: true  # single LocalTransformersBackend instance, constructed once, reused for every consultation in a run -- verified by code inspection, not just assumption
+  use_cache: "model.generation_config.use_cache is None (library default = enabled); empirically consistent -- tokens/sec degrades mildly (25.7 -> 19.4 -> 15.4 across 203/1139/1513 output tokens), not the severe quadratic collapse a disabled KV cache would produce"
+  representative_consultations:
+    - {legal_action_count: 11, prompt_tokens: 1184, configured_max_new_tokens: 342, actual_output_tokens: 203, hit_token_cap: false, latency_s: 7.9, tokens_per_second: 25.7}
+    - {legal_action_count: 61, prompt_tokens: 3835, configured_max_new_tokens: 1819, actual_output_tokens: 1139, hit_token_cap: false, latency_s: 58.7, tokens_per_second: 19.4}
+    - {legal_action_count: 81, prompt_tokens: 4875, configured_max_new_tokens: 2410, actual_output_tokens: 1513, hit_token_cap: false, latency_s: 98.0, tokens_per_second: 15.4}
+  hit_token_cap_finding: "FALSE in every representative case -- the model stops via its own EOS well before max_new_tokens (e.g. 1513/2410 = 63% of budget for the largest case), so it is not 'rambling to the cap'."
+  early_stop_ab_test: "A JSON-completion-aware StoppingCriteria (stops the instant a complete, balanced top-level JSON object exists -- reusing response_parser._find_first_balanced_object_span, guaranteeing identical parsed output whenever both variants complete) was implemented and tested against the same 3 representative prompts. Result: +2.7%, -0.7%, -5.6% latency change -- noise, not a real improvement (in the largest case the model's own natural stop landed at token 1512 of 1513 actually generated, i.e. one token later than the earliest possible detection)."
+  gatekeeper_correction_count: "not separately measured in this profiling pass -- all 3 representative prompts were accepted on the first attempt (schema_revision_count=0); the pilot's 48 real consultations were likewise all 'accepted' per the training log, no correction retries observed"
+  verdict: "NO fixable performance bottleneck found (no CPU fallback, no repeated model loading, cache appears active, model already stops near-optimally via EOS, corrections are not occurring in practice). The ~73s mean latency is a genuine cost of Qwen2.5-1.5B-Instruct generating ~200-1500 tokens per consultation on a T4, not a bug. Per instruction, Qwen2.5-0.5B was NOT tried (previously found unable to reliably produce valid JSON). No production code was changed as a result of this investigation -- local_backend.py is unmodified."
+
+# Disjoint from training_seeds and from each other. Reduced again in v4
+# (was 15/8/8 in v3) per explicit instruction not to use those counts yet.
 evaluation_seed_sets:
   final_id:
     start: 5001
-    count: 15  # was 20; "10-20 depending on measured consultation cost" -- 15 is a placeholder pending the real pilot's query rate, not a final answer
+    count: 5
     scenario: NASimEmu/scenarios/sm_entry_dmz_two_subnets.v2.yaml
     id_or_ood: ID
   final_ood_dmz_three_subnets:
     start: 6001
-    count: 8  # was 10; "5-10 to start"
+    count: 3
     scenario: NASimEmu/scenarios/sm_entry_dmz_three_subnets.v2.yaml
     id_or_ood: OOD
   final_ood_user_three_subnets:
     start: 6001  # same numeric seeds reused across OOD scenarios on purpose
-    count: 8
+    count: 3
     scenario: NASimEmu/scenarios/sm_entry_user_three_subnets.v2.yaml
     id_or_ood: OOD
   periodic_learning_curve:
-    # EVAL_SEED_OFFSET is a source constant (learning/rollout.py), so this
-    # seed set is identical across every condition by construction.
-    start: 1000000000
-    count: 3  # "2-3 fixed evaluation seeds"
+    start: 1000000000  # EVAL_SEED_OFFSET, a source constant -- identical across every run by construction
+    count: 3
     scenario: NASimEmu/scenarios/sm_entry_dmz_two_subnets.v2.yaml
     id_or_ood: ID
     note: >
-      For PPO_ONLY this is cheap regardless of frequency (no Plan Maker
-      calls). For MARLA_FULL, each periodic eval pass uses the learned
-      gate normally -- i.e. it is NOT free, and its frequency
-      (eval_every_rollouts) must be chosen from the pilot's measured query
-      rate, reducing frequency rather than consuming the experiment budget
-      if it would add excessive LLM runtime (explicit instruction). Not
-      finalized until a feasible primary-training path is confirmed.
+      PPO_ONLY: eval_every_rollouts=2, eval_episodes=3 (free, 5 points
+      across Stage A's 10 rollouts). MARLA_FULL: eval_every_rollouts=5,
+      eval_episodes=2 (deliberately sparse -- 2 points only, per explicit
+      instruction not to run expensive periodic MARLA evaluation every few
+      rollouts). Report the actual query rate observed after Stage A
+      before deciding whether to expand this.
 
 plan_maker:
-  model_name: Qwen/Qwen2.5-1.5B-Instruct
+  model_name: Qwen/Qwen2.5-1.5B-Instruct  # kept -- Qwen2.5-0.5B previously found unable to reliably produce valid JSON, not retried
   model_revision: "not pinned by MARLA -- AutoModelForCausalLM.from_pretrained is called with no revision= argument; model_name is the only identity MARLA itself records"
   prompt_version: nasimemu-plan-maker-v1
   knowledge_version: nasimemu-rules-v1
   max_schema_revisions: 3
-  generation: "greedy (do_sample=False), no explicit LM RNG seed"
+  generation: "greedy (do_sample=False), no explicit LM RNG seed; use_cache library-default-enabled (see plan_maker_profiling)"
 
 conditions:
   PPO_ONLY:
@@ -95,64 +116,57 @@ conditions:
     query_mode: n/a
     trust_mode: n/a
     advice_transformation: n/a
-    training_step_budget: 50000  # restored to the true target; cheap regardless (measured: 5000 steps in 197s, no Plan Maker calls)
+    training_step_budget: 5000  # Stage A -- see staged_training
     runs:
       101: {config: configs/ppo_only_seed101.yaml, run_dir: runs/aamas2027_ppo_only/ppo-only-seed-101}
       202: {config: configs/ppo_only_seed202.yaml, run_dir: runs/aamas2027_ppo_only/ppo-only-seed-202}
       303: {config: configs/ppo_only_seed303.yaml, run_dir: runs/aamas2027_ppo_only/ppo-only-seed-303}
-    note: "seed 101's run_dir currently holds the earlier 5000-step (v2) result, not yet re-run at 50000 steps -- see final summary"
+    note: "seed 101 is COMPLETED: verified byte-identical config (environment/policy/experiment blocks) between the current Stage A config and runs/aamas2027_ppo_only/ppo-only-seed-101/config.yaml, 5000 real environment steps, 5 real periodic-eval points at rollouts 2/4/6/8/10 (15 eval episodes) already on disk -- reused as-is, not re-run."
 
   MARLA_FULL:
     trainable: true
     consultation_mode: learned
     consultation_cost: 0.10
-    query_mode: learned  # the gate's own decision; NEVER forced during training (was never forced -- ALWAYS_CONSULT-as-a-trained-condition was already postponed before this revision)
+    query_mode: learned  # the gate's own decision; NEVER forced during training
     trust_mode: learned
     advice_transformation: identity
-    training_step_budget: 50000  # restored to the true target -- but see pilot_measurements.feasibility_verdict: NOT launched until confirmed feasible
+    training_step_budget: 5000  # Stage A -- see staged_training
     runs:
       101: {config: configs/marla_full_seed101.yaml, run_dir: runs/aamas2027_marla_full/marla-full-seed-101}
       202: {config: configs/marla_full_seed202.yaml, run_dir: runs/aamas2027_marla_full/marla-full-seed-202}
       303: {config: configs/marla_full_seed303.yaml, run_dir: runs/aamas2027_marla_full/marla-full-seed-303}
-    note: "seed 101's run_dir currently holds only the interrupted v2 pilot measurement pass (151/5000 steps) -- NOT a trained checkpoint, do not evaluate it as one"
+    note: "seed 101's run_dir currently holds only the interrupted pilot measurement pass (151/5000 steps) -- NOT a trained checkpoint, must be re-run to completion"
 
-  # Evaluation-time ablation on a frozen MARLA_FULL checkpoint -- never an
-  # independently trained baseline. This is now the ONLY required
-  # inference ablation (previous revisions also listed
-  # NORMAL/ALWAYS_QUERY/BETA_ZERO/BETA_ONE/PLAN_MAKER_ONLY as required;
-  # all but NORMAL and NO_QUERY are now postponed, see below).
   MARLA_FULL_NORMAL:
     trainable: false
     evaluation_only: true
     base_condition: MARLA_FULL
     overrides: {query_mode: learned, beta_override: null, action_selection: policy}
-    description: The trained checkpoint's learned behavior, re-run deterministically -- uses the learned query gate normally, no forced extra queries. The control condition MARLA_FULL_NO_QUERY is compared against.
+    description: The trained checkpoint's learned behavior, re-run deterministically -- uses the learned query gate normally, no forced extra queries.
 
   MARLA_FULL_NO_QUERY:
     trainable: false
     evaluation_only: true
     base_condition: MARLA_FULL
     overrides: {query_mode: never, beta_override: null, action_selection: policy}
-    description: "The main required inference ablation: force q=0 for the whole episode (zero Plan Maker calls), otherwise the trained PPO policy unchanged. Free to run regardless of Plan Maker cost."
+    description: "The main required inference ablation (RQ2): force q=0 for the whole episode (zero Plan Maker calls), otherwise the trained PPO policy unchanged. Free regardless of Plan Maker cost."
+
+research_questions:
+  RQ1: "Does MARLA_FULL outperform PPO_ONLY at the same environment-step budget? Metrics: goal_success, benchmark_return, steps_to_goal. Source: aggregate/learning_curve_bands.csv (Figure 1), aggregate/id_and_ood_eval.csv restricted to condition in {PPO_ONLY, MARLA_FULL_NORMAL} (Figure 2)."
+  RQ2: "How much does a trained MARLA agent depend on consultation? Compare MARLA_FULL_NORMAL vs MARLA_FULL_NO_QUERY on the SAME checkpoints -- an evaluation-time ablation, never described as an independently trained baseline. Source: aggregate/id_and_ood_eval.csv."
+  RQ3: "When and how does MARLA consult? Offline analysis of already-collected decisions.csv only -- no new Plan Maker calls. Source: aggregate/consultation_behavior.csv, query_rate_over_training.csv, beta_over_training.csv, advice_trust_decisions.csv, consultations_per_successful_episode.csv, beta_stratified_advice_influence.csv (Figures 3-4)."
+  RQ4: "Does MARLA generalize better than PPO_ONLY? Compare final PPO_ONLY and MARLA_FULL_NORMAL checkpoints on the 2 OOD scenarios, no gradient updates. Source: aggregate/id_and_ood_eval.csv restricted to scenario != ID (part of Figure 2)."
 
 postponed_pending_feasibility:
-  # Everything below calls the Plan Maker on every, or nearly every,
-  # environment step, or (BETA_ONE) was descoped alongside the rest of the
-  # corrupted-advice ablation set for this phase even though it does not
-  # itself force extra queries. Implemented in src/marla/evaluation
-  # already (overrides.py's ALWAYS_QUERY/PLAN_MAKER_ONLY/BETA_ZERO/
-  # BETA_ONE constants) -- NOT launched, per explicit instruction not to
-  # implement-or-launch further unless explicitly requested again.
+  # Implemented in src/marla/evaluation already -- NOT launched.
   - condition: MARLA_FULL_ALWAYS_QUERY
-    reason: "Forces a Plan Maker call on every environment step. At the measured 73.3s mean / 108.7s p95 latency, a single 20-episode ID eval pass (~100 steps/episode) could need up to ~2000 calls -- 40-60 hours for ONE checkpoint's ONE eval pass."
+    reason: "Forces a Plan Maker call on every environment step -- infeasible at measured latency for any non-trivial episode count."
   - condition: PLAN_MAKER_ONLY
-    reason: "Same as ALWAYS_QUERY (query_mode=always by construction) -- every step calls the Plan Maker."
-  - condition: MARLA_FULL_BETA_ZERO
-    reason: "Does not itself force extra queries (query_mode=learned, same rate as NORMAL) -- descoped for this phase to keep the required comparison set to exactly PPO_ONLY/MARLA_FULL/MARLA_FULL_NO_QUERY, not for a cost reason. decisions.csv does NOT persist the raw per-action base-logit/advice vectors (only summary fields: top-action IDs, ranks, beta, alpha), so an exact beta-forced recomputation is not actually possible from existing data without a schema change -- analyze.py's beta_stratified_advice_influence() instead produces the honest, weaker thing that IS possible: advice_changed_top_action rate stratified by the actual beta value each decision occurred with (zero new Plan Maker calls either way), explicitly labeled as observational, not a beta=0/1 counterfactual."
-  - condition: MARLA_FULL_BETA_ONE
-    reason: "Same as BETA_ZERO -- descoped for this phase, offline counterfactual still produced."
+    reason: "Same as ALWAYS_QUERY (query_mode=always by construction)."
   - condition: ALWAYS_CONSULT (trained)
-    reason: "Would train under query_mode=always for the entire 50k-step run -- infeasible by the same argument as MARLA_FULL_ALWAYS_QUERY, and already postponed in earlier revisions of this manifest for a different (probability-accounting) reason too."
+    reason: "Would train under query_mode=always for the entire step budget -- infeasible by the same argument."
+  - condition: MARLA_FULL_BETA_ZERO / MARLA_FULL_BETA_ONE
+    reason: "Does not itself force extra queries, but descoped for this phase to keep the required comparison set to exactly PPO_ONLY/MARLA_FULL/MARLA_FULL_NO_QUERY. decisions.csv does not persist raw per-action logit/advice vectors, so an exact beta=0/1 forced counterfactual isn't reconstructable from existing data anyway -- analyze.py's beta_stratified_advice_influence() produces the honest, weaker, zero-new-call alternative: advice-influence rate stratified by the beta value that actually occurred, explicitly labeled observational."
 
 postponed:
   - RANDOM_QUERY_MATCHED
@@ -162,5 +176,5 @@ postponed:
   - consultation_cost_sweep (0.00 / 0.05 / 0.20)
   - external_nasimemu_agents_baseline
   - simulation_to_emulation
-  - training_seeds_5_to_10
-  - 100k_step_runs
+  - training_seeds_5_to_10 (404/505 reserved, see reserve_training_seeds_if_5k_is_stable)
+  - 100k_and_50k_and_20k_step_runs

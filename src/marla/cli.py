@@ -152,6 +152,17 @@ def run(
         "--debug",
         help="Write every Plan Maker query and generated response to debug/<run_id>/.",
     ),
+    resume: Path = typer.Option(
+        None,
+        "--resume",
+        help=(
+            "Path to a checkpoint.pt to resume from (local mode only): loads policy/optimizer/RNG "
+            "state and continues training toward this config's ppo.total_environment_steps, rather "
+            "than starting over. The config's own hyperparameters are used for the resumed portion; "
+            "only ppo.total_environment_steps is expected to differ from what originally produced "
+            "the checkpoint (research/aamas2027's staged-training design)."
+        ),
+    ),
 ) -> None:
     """Run an experiment (baseline or assisted, local or distributed)."""
     _configure_progress_logging()
@@ -193,19 +204,44 @@ def run(
     if selected_aliases is not None:
         typer.echo(f"Selected agents: {selected_aliases}")
 
+    if resume is not None and config.execution.mode != "local":
+        typer.secho("--resume is only supported in local mode", fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=1)
+
     if config.execution.mode == "local":
         import math
 
+        from marla.learning.checkpoint import peek_checkpoint_metadata
         from marla.metrics.writer import write_run_artifacts
         from marla.runtime.local import LocalRunError, resolve_run_dir, run_local
 
         run_dir = resolve_run_dir(config)
         ppo = config.policy.ppo
-        num_rollouts = math.ceil(ppo.total_environment_steps / ppo.rollout_steps)
-        typer.echo(f"Starting local {config.consultation.mode} run: {num_rollouts} rollout(s) of {ppo.rollout_steps} steps each.")
+        already_done = 0
+        if resume is not None:
+            if not resume.is_file():
+                typer.secho(f"--resume checkpoint not found: {resume}", fg=typer.colors.RED, err=True)
+                raise typer.Exit(code=1)
+            already_done = peek_checkpoint_metadata(resume).environment_steps
+            if already_done >= ppo.total_environment_steps:
+                typer.secho(
+                    f"--resume checkpoint already has {already_done} environment steps, "
+                    f">= this config's ppo.total_environment_steps ({ppo.total_environment_steps}); nothing to do.",
+                    fg=typer.colors.RED, err=True,
+                )
+                raise typer.Exit(code=1)
+        num_rollouts = math.ceil((ppo.total_environment_steps - already_done) / ppo.rollout_steps)
+        if resume is not None:
+            typer.echo(
+                f"Resuming from {resume} ({already_done} environment step(s) already done): "
+                f"{num_rollouts} more rollout(s) of {ppo.rollout_steps} steps each "
+                f"(target: {ppo.total_environment_steps})."
+            )
+        else:
+            typer.echo(f"Starting local {config.consultation.mode} run: {num_rollouts} rollout(s) of {ppo.rollout_steps} steps each.")
         start_time = datetime.now(timezone.utc)
         try:
-            orchestrator = run_local(config, config_path.parent, num_rollouts=num_rollouts, debug=debug)
+            orchestrator = run_local(config, config_path.parent, num_rollouts=num_rollouts, debug=debug, resume_from=resume)
         except LocalRunError as exc:
             write_run_artifacts(run_dir, config, None, resolved_device, start_time, datetime.now(timezone.utc), "failed")
             typer.secho(f"Run failed: {exc}", fg=typer.colors.RED, err=True)

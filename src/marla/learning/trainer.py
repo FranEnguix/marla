@@ -47,6 +47,16 @@ class TrainingResult:
     all_records: list[StepRecord] = field(default_factory=list)
     stopped_by_user: bool = False
     eval_episode_summaries: list[EpisodeSummary] = field(default_factory=list)
+    # Resume support (research/aamas2027's staged training): how many
+    # updates/environment steps this TrainingResult's own numbering starts
+    # counting from (0 for a fresh run), the seed the *next* rollout
+    # collector should continue from, and a snapshot of torch's global RNG
+    # state at the end of this run -- all threaded into the next
+    # save_checkpoint() call by write_run_artifacts, not used by ordinary
+    # (non-resumed) runs.
+    update_count_offset: int = 0
+    next_episode_seed: int | None = None
+    final_rng_state: torch.Tensor | None = None
 
 
 def build_policy_and_optimizer(
@@ -73,6 +83,8 @@ async def run_training_loop(
     stop_event: asyncio.Event | None = None,
     eval_episodes: int = 0,
     eval_every_rollouts: int = 1,
+    initial_environment_steps: int = 0,
+    initial_update_count: int = 0,
 ) -> TrainingResult:
     """Repeated rollout-collect/PPO-update cycles over pre-built components.
 
@@ -81,6 +93,14 @@ async def run_training_loop(
     which resolves the device and constructs the policy *before* connecting
     to XMPP -- a local-model failure must prevent the agent from ever
     reporting itself ready (spec section 18).
+
+    ``initial_environment_steps``/``initial_update_count`` are nonzero only
+    when resuming from a checkpoint (research/aamas2027): ``seed`` is then
+    the checkpoint's saved ``next_episode_seed`` (continuing the episode-seed
+    sequence, not repeating it), and every ``environment_steps`` value
+    reported in ``updates.csv`` reflects the true cumulative total across
+    both the original and resumed runs, not just this invocation's own new
+    steps -- so it stays a meaningful x-axis for a stitched learning curve.
     """
     collector = RolloutCollector(
         adapter=adapter,
@@ -94,7 +114,11 @@ async def run_training_loop(
     )
     rng = random.Random(seed)
 
-    result = TrainingResult(policy=policy, optimizer=optimizer)
+    result = TrainingResult(
+        policy=policy, optimizer=optimizer,
+        environment_steps=initial_environment_steps,
+        update_count_offset=initial_update_count,
+    )
     training_start = time.monotonic()
 
     for rollout_index in range(1, num_rollouts + 1):
@@ -146,7 +170,7 @@ async def run_training_loop(
             mean_training_reward = sum(r.training_reward for r in records) / len(records)
             elapsed = time.monotonic() - training_start
             for update_index, update_metrics in enumerate(metrics, start=1):
-                update_metrics["update"] = len(result.update_metrics) + update_index
+                update_metrics["update"] = result.update_count_offset + len(result.update_metrics) + update_index
                 update_metrics["environment_steps"] = result.environment_steps
                 update_metrics["learning_rate"] = optimizer.param_groups[0]["lr"]
                 update_metrics["mean_beta"] = sum(betas) / len(betas) if betas else None
@@ -197,6 +221,11 @@ async def run_training_loop(
             result.stopped_by_user = True
             break
 
+    # Captured regardless of how the loop ended (ran to completion or
+    # stopped early) so a checkpoint saved from either state can resume
+    # correctly -- see write_run_artifacts' save_checkpoint call.
+    result.next_episode_seed = collector.next_episode_seed
+    result.final_rng_state = torch.get_rng_state()
     return result
 
 

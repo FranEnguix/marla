@@ -25,7 +25,7 @@ overwrite existing files unless ``--force`` is given.
 
 .. code-block:: text
 
-   marla run CONFIG_PATH [--agent ALIAS_OR_JID ...] [--debug]
+   marla run CONFIG_PATH [--agent ALIAS_OR_JID ...] [--debug] [--resume CHECKPOINT_PATH]
 
 Runs an experiment.
 
@@ -38,6 +38,23 @@ Runs an experiment.
   response it generates to ``debug/<run-id>/<NNNN>_<request-id>_query.txt``
   / ``..._response.txt`` (sequence-numbered, since a correction retry
   reuses the same ``request_id``). Only meaningful for assisted-mode runs.
+- ``--resume``: local mode only. Loads policy/optimizer/RNG state from a
+  prior run's ``checkpoint.pt`` and continues training toward *this*
+  config's ``policy.ppo.total_environment_steps`` instead of starting
+  over -- only that field (and typically ``run_id``, for a distinct output
+  directory) is expected to differ from the config that produced the
+  checkpoint; every other hyperparameter should match. The number of
+  rollouts run is computed as the remainder to the new target (refuses to
+  run if the checkpoint already meets or exceeds it). Episode seeds
+  continue forward from where the checkpoint left off rather than
+  repeating the original run's sequence, and the resumed run's own
+  ``environment_steps``/``update`` numbering in ``updates.csv`` is
+  cumulative (includes the steps/updates already done before the resume),
+  so it stays a meaningful x-axis when stitched with the original run's
+  data. A checkpoint saved before this existed still loads (episode-seed
+  continuation and RNG-state restoration are both best-effort: absent for
+  an old checkpoint, in which case episode seeds restart from
+  ``experiment.seed`` and the RNG stream is unseeded from that point).
 
 Exit code ``1`` on: invalid configuration, an unresolvable device request
 (``device: gpu`` without working CUDA), a missing ``--agent``/local-mode

@@ -194,6 +194,18 @@ class RolloutCollector:
         self._episode_consultation_cost_total = 0.0
         self._episode_schema_rejection_count = 0
 
+    @property
+    def next_episode_seed(self) -> int:
+        """The seed the *next* episode this collector starts will use.
+
+        A resumed training run passes this (from the prior invocation's
+        final value, via ``CheckpointMetadata.next_episode_seed``) as the
+        new collector's ``base_seed``, so episode seeds keep progressing
+        forward instead of repeating the same sequence a fresh run with
+        ``base_seed=experiment.seed`` would collect.
+        """
+        return self._seed_counter
+
     def _start_new_episode(self) -> None:
         seed = self._seed_counter
         self._seed_counter += 1
