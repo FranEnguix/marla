@@ -13,6 +13,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
+from pathlib import Path
 
 import torch
 from spade.agent import Agent
@@ -91,6 +92,8 @@ class OrchestratorLifecycleBehaviour(OneShotBehaviour):
                 eval_every_rollouts=agent.config.metrics.eval_every_rollouts,
                 initial_environment_steps=agent.initial_environment_steps,
                 initial_update_count=agent.initial_update_count,
+                config=agent.config,
+                run_dir=agent.run_dir,
             )
             if agent.required_participants:
                 agent.training_result = await self._run_training_watching_for_failure(agent, training_call)
@@ -268,11 +271,17 @@ class RLOrchestratorAgent(Agent):
         stop_event: asyncio.Event | None = None,
         initial_environment_steps: int = 0,
         initial_update_count: int = 0,
+        run_dir: Path | None = None,
     ):
         super().__init__(jid, password)
         self.alias = alias
         self.run_id = run_id
         self.config = config
+        # When set (real `marla run`), the training loop flushes each
+        # rollout's results here incrementally (spec section 2) instead of
+        # only at the very end. None in most tests, which persist the
+        # returned TrainingResult themselves afterward.
+        self.run_dir = run_dir
         self.policy = policy
         self.optimizer = optimizer
         self.adapter = adapter

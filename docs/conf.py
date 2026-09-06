@@ -17,7 +17,7 @@ author = "Fran Enguix"
 try:
     from marla import __version__ as release
 except Exception:  # pragma: no cover - docs must still build if the import chain is broken
-    release = "0.1.0"
+    release = "0.2.0"
 version = release
 
 extensions = [

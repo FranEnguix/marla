@@ -150,6 +150,12 @@ def learning_curve(manifest: dict, out_dir: Path) -> None:
         cond_cfg = manifest["conditions"][condition]
         found = 0
         for seed, run_info in cond_cfg["runs"].items():
+            if run_info.get("status"):
+                # e.g. PILOT_INVALID_UNSOLVABLE_SCENARIO (manifest.yaml v7)
+                # -- never silently mix a pilot/invalid run into a
+                # final-comparison figure.
+                print(f"[learning_curve] {condition} seed {seed}: skipped (status={run_info['status']})")
+                continue
             run_dir = REPO_ROOT / run_info["run_dir"]
             episodes = read_csv_rows(run_dir / "episodes.csv")
             updates = read_csv_rows(run_dir / "updates.csv")
@@ -266,20 +272,29 @@ def id_and_ood_eval(manifest: dict, out_dir: Path, eval_raw_dir: Path) -> None:
 
 def query_rate_over_training(manifest: dict, out_dir: Path) -> None:
     """Per-rollout actual_query_rate already computed by trainer.py --
-    zero new computation needed, just reading an existing updates.csv
-    column across MARLA_FULL's training seeds."""
+    zero new computation needed, just reading an existing rollouts.csv
+    column across MARLA_FULL's training seeds.
+
+    Reads rollouts.csv, not updates.csv: actual_query_rate is a rollout-
+    level aggregate (one value per rollout, computed once from that
+    rollout's collected steps), and as of the metrics-schema revision that
+    introduced rollouts.csv it is no longer repeated onto every PPO
+    minibatch's updates.csv row (which used to make the seen_steps dedup
+    below necessary; rollouts.csv already has exactly one row per rollout,
+    but the guard is left in as a harmless no-op for defense in depth).
+    """
     rows_out = []
     for seed, run_info in manifest["conditions"]["MARLA_FULL"]["runs"].items():
         run_dir = REPO_ROOT / run_info["run_dir"]
-        updates = read_csv_rows(run_dir / "updates.csv")
-        if not updates:
-            print(f"[query_rate_over_training] seed {seed}: no updates.csv found, skipped")
+        rollouts = read_csv_rows(run_dir / "rollouts.csv")
+        if not rollouts:
+            print(f"[query_rate_over_training] seed {seed}: no rollouts.csv found, skipped")
             continue
         seen_steps = set()
-        for u in updates:
-            steps = int(u["environment_steps"])
+        for u in rollouts:
+            steps = int(u["environment_steps_total"])
             if steps in seen_steps or not u.get("actual_query_rate"):
-                continue  # several PPO updates share one rollout's aggregates; one point per rollout
+                continue
             seen_steps.add(steps)
             rows_out.append(
                 {"training_seed": seed, "environment_steps": steps, "actual_query_rate": u["actual_query_rate"]}
@@ -324,17 +339,18 @@ def consultation_behavior(manifest: dict, out_dir: Path) -> None:
 
 
 def beta_over_training(manifest: dict, out_dir: Path) -> None:
-    """updates.csv's mean_beta is already a per-rollout aggregate -- read,
-    not recomputed."""
+    """rollouts.csv's mean_beta is already a per-rollout aggregate -- read,
+    not recomputed. Reads rollouts.csv, not updates.csv -- see
+    query_rate_over_training's docstring for why."""
     rows_out = []
     for seed, run_info in manifest["conditions"]["MARLA_FULL"]["runs"].items():
         run_dir = REPO_ROOT / run_info["run_dir"]
-        updates = read_csv_rows(run_dir / "updates.csv")
-        if not updates:
+        rollouts = read_csv_rows(run_dir / "rollouts.csv")
+        if not rollouts:
             continue
         seen_steps = set()
-        for u in updates:
-            steps = int(u["environment_steps"])
+        for u in rollouts:
+            steps = int(u["environment_steps_total"])
             if steps in seen_steps or not u.get("mean_beta"):
                 continue
             seen_steps.add(steps)

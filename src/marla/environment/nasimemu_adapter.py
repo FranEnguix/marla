@@ -14,6 +14,7 @@ from dataclasses import dataclass, field
 import numpy as np
 from nasimemu.env import NASimEmuEnv
 from nasimemu.nasim.envs.host_vector import HostVector
+from nasimemu.nasim.envs.utils import AccessLevel
 
 from marla.environment.actions import ActionDescriptor, build_legal_actions, resolve_action_target
 from marla.environment.finish import compute_finish_reward
@@ -51,11 +52,13 @@ class NasimEmuAdapter:
         max_episode_steps: int,
         completion_reward: float,
         premature_finish_penalty: float,
+        premature_finish_penalty_per_remaining_target: float = 0.0,
     ) -> None:
         self._scenario = scenario
         self._max_episode_steps = max_episode_steps
         self._completion_reward = completion_reward
         self._premature_finish_penalty = premature_finish_penalty
+        self._premature_finish_penalty_per_remaining_target = premature_finish_penalty_per_remaining_target
         self._env = NASimEmuEnv(
             scenario_name=scenario,
             emulate=False,
@@ -69,6 +72,22 @@ class NasimEmuAdapter:
     @property
     def max_episode_steps(self) -> int:
         return self._max_episode_steps
+
+    @property
+    def scenario(self) -> str:
+        return self._scenario
+
+    @property
+    def completion_reward(self) -> float:
+        return self._completion_reward
+
+    @property
+    def premature_finish_penalty(self) -> float:
+        return self._premature_finish_penalty
+
+    @property
+    def premature_finish_penalty_per_remaining_target(self) -> float:
+        return self._premature_finish_penalty_per_remaining_target
 
     def reset(self, seed: int | None = None) -> EnvironmentState:
         """Start a new episode, generating a fresh scenario instance.
@@ -100,6 +119,24 @@ class NasimEmuAdapter:
         """
         return bool(self._env.env.goal_reached())
 
+    def sensitive_target_status(self) -> tuple[int, int]:
+        """``(total sensitive/value targets, targets still missing ROOT access)``.
+
+        A direct query of the underlying environment's current state (same
+        source as :meth:`objective_satisfied`/``goal_reached()``), not
+        derived from any stored :class:`EnvironmentState` snapshot. USER
+        access does not count as satisfying a target -- only ROOT does,
+        matching NASimEmu's own
+        ``Network.all_sensitive_hosts_compromised()`` semantics. Cheap
+        (iterates only the scenario's sensitive addresses, not the full
+        host set); nothing here retains or persists simulator state.
+        """
+        network = self._env.env.network
+        state = self._env.env.current_state
+        addresses = network.sensitive_addresses
+        remaining = sum(1 for addr in addresses if not state.host_has_access(addr, AccessLevel.ROOT))
+        return len(addresses), remaining
+
     def step(self, action: ActionDescriptor) -> TransitionResult:
         """Advance the simulation by exactly one compound decision.
 
@@ -111,15 +148,25 @@ class NasimEmuAdapter:
             # Reward reflects whether the goal was met *before* finishing;
             # FINISH performs no NASimEmu action, so there is no new state.
             satisfied = self.objective_satisfied()
+            total_targets, remaining_targets = self.sensitive_target_status()
             reward = compute_finish_reward(
-                satisfied, self._completion_reward, self._premature_finish_penalty
+                satisfied,
+                self._completion_reward,
+                self._premature_finish_penalty,
+                self._premature_finish_penalty_per_remaining_target,
+                remaining_targets,
             )
             return TransitionResult(
                 state=None,
                 nasimemu_reward=reward,
                 terminated=True,
                 truncated=False,
-                info={"finish": True, "objective_satisfied": satisfied},
+                info={
+                    "finish": True,
+                    "objective_satisfied": satisfied,
+                    "sensitive_targets_total": total_targets,
+                    "sensitive_targets_remaining": remaining_targets,
+                },
             )
 
         target, action_list_index = resolve_action_target(self._env, action.action_id)

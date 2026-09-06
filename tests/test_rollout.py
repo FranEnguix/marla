@@ -3,9 +3,12 @@ from pathlib import Path
 
 import pytest
 import torch
+import torch_geometric
 
 from marla.config.loader import load_config
-from marla.environment.nasimemu_adapter import NasimEmuAdapter
+from marla.environment.actions import ActionDescriptor
+from marla.environment.graph import GraphObservation
+from marla.environment.nasimemu_adapter import EnvironmentState, NasimEmuAdapter, TransitionResult
 from marla.evaluation.overrides import ALWAYS_QUERY, BETA_ONE, BETA_ZERO, NO_QUERY, PLAN_MAKER_ONLY, EvaluationOverrides
 from marla.learning.recurrent_policy import RecurrentPolicy
 from marla.learning.rollout import EVAL_SEED_OFFSET, ConsultationResult, RolloutCollector, run_evaluation_episodes
@@ -478,3 +481,201 @@ async def test_nasimemu_reward_is_unaffected_by_consultation_cost():
 
     assert [r.nasimemu_reward for r in low_records] == [r.nasimemu_reward for r in high_records]
     assert [r.training_reward for r in low_records] != [r.training_reward for r in high_records]
+
+
+# --- Objective/FINISH timing (spec section 5) -------------------------------
+# steps_to_goal (first step the objective becomes satisfied) and finish_step
+# (when FINISH is selected) are tracked independently -- these tests drive a
+# fully scripted fake adapter (not a real NASimEmu scenario, whose action
+# outcomes are not controllable step-by-step) to pin down exact off-by-one
+# behavior, not just plumbing/existence.
+
+
+class _ScriptedAdapter:
+    """A minimal NasimEmuAdapter substitute: scripted legal action and
+    objective_satisfied() per step index, everything else a fixed stub.
+    """
+
+    max_episode_steps = 50
+
+    def __init__(self, actions: list, objective_satisfied: list, max_steps: int = 50):
+        self._actions = actions
+        self._objective_satisfied = objective_satisfied
+        self._max_steps = max_steps
+        self._step_idx = 0
+        self._last_step_idx = 0
+        x = torch.zeros((1, 12))
+        edge_index = torch.zeros((2, 0), dtype=torch.long)
+        self._data = torch_geometric.data.Data(x=x, edge_index=edge_index)
+
+    def reset(self, seed=None):
+        self._step_idx = 0
+        # host_rows must be a real (if empty) array, matching
+        # EnvironmentState's actual contract -- compute_state_delta zips it
+        # against host_addresses eagerly, which raises on None regardless
+        # of host_addresses being empty (no host addresses are ever used in
+        # this fixture, so an empty array is otherwise inert).
+        return EnvironmentState(
+            raw_observation=None, host_rows=torch.empty(0), host_addresses=[], subnet_graph=set(), step_idx=0
+        )
+
+    def legal_actions(self, state):
+        return [self._actions[min(self._step_idx, len(self._actions) - 1)]]
+
+    def to_pyg_data(self, state):
+        return GraphObservation(data=self._data, node_key_to_index={"host-0-0": 0})
+
+    def objective_satisfied(self):
+        return self._objective_satisfied[min(self._last_step_idx, len(self._objective_satisfied) - 1)]
+
+    def sensitive_target_status(self):
+        # Not exercised by this fixture's assertions; a fixed stub is
+        # enough to satisfy RolloutCollector.collect()'s call.
+        return (0, 0)
+
+    def step(self, action):
+        idx = self._step_idx
+        self._last_step_idx = idx
+        self._step_idx += 1
+        if action.is_finish:
+            return TransitionResult(state=None, nasimemu_reward=1.0, terminated=True, truncated=False, info={})
+        truncated = self._step_idx >= self._max_steps
+        new_state = EnvironmentState(
+            raw_observation=None, host_rows=torch.empty(0), host_addresses=[], subnet_graph=set(), step_idx=idx + 1
+        )
+        return TransitionResult(state=new_state, nasimemu_reward=0.0, terminated=False, truncated=truncated, info={})
+
+
+def _scripted_policy():
+    from marla.config.models import ActionEncoderConfig, GraphEncoderConfig, PolicyConfig, PPOConfig, RecurrentConfig
+
+    policy_config = PolicyConfig(
+        graph_encoder=GraphEncoderConfig(hidden_size=8, layers=1),
+        action_encoder=ActionEncoderConfig(hidden_size=8, action_type_embedding_size=4),
+        recurrent=RecurrentConfig(hidden_size=8, sequence_length=4),
+        ppo=PPOConfig(
+            total_environment_steps=10, rollout_steps=2, epochs=1, minibatch_sequences=1,
+            gamma=0.99, gae_lambda=0.95, clip_epsilon=0.2, value_coefficient=0.5,
+            query_entropy_coefficient=0.01, action_entropy_coefficient=0.01, max_grad_norm=0.5,
+            learning_rate=0.0003,
+        ),
+    )
+    return RecurrentPolicy(policy_config)
+
+
+_SCAN = ActionDescriptor(action_id="scan", action_type="service_scan", target_key="host-0-0", parameters={})
+_FINISH_ACTION = ActionDescriptor(action_id="finish", action_type="finish", target_key=None, parameters={}, is_finish=True)
+
+
+@pytest.mark.asyncio
+async def test_steps_to_goal_and_finish_step_are_tracked_independently():
+    # scan, scan, scan (objective becomes satisfied on this 3rd action),
+    # scan, scan, FINISH (the 6th action) -- 3 extra actions after the goal.
+    objective_satisfied = [False, False, True, True, True, True]
+    actions = [_SCAN, _SCAN, _SCAN, _SCAN, _SCAN, _FINISH_ACTION]
+    adapter = _ScriptedAdapter(actions, objective_satisfied)
+    collector = RolloutCollector(adapter, _scripted_policy(), run_id="t", base_seed=1, deterministic=True)
+
+    records, summaries = await collector.collect(6)
+
+    became_satisfied_at = [r.environment_step for r in records if r.objective_became_satisfied]
+    assert became_satisfied_at == [2]  # fires exactly once, at the 0-indexed step where it flips
+    assert [r.objective_satisfied for r in records] == [False, False, True, True, True, True]
+
+    summary = summaries[0]
+    assert summary.goal_success is True
+    assert summary.objective_reached is True
+    assert summary.successful_finish is True
+    assert summary.episode_success is True
+    assert summary.steps_to_goal == 3
+    assert summary.finish_step == 6
+    assert summary.finish_delay_steps == 3
+    assert summary.environment_steps == 6
+    assert summary.finish_reason == "finish"
+
+
+@pytest.mark.asyncio
+async def test_premature_finish_has_no_steps_to_goal_or_finish_delay():
+    # Objective never satisfied; FINISH selected anyway on the 2nd action.
+    adapter = _ScriptedAdapter([_SCAN, _FINISH_ACTION], [False, False])
+    collector = RolloutCollector(adapter, _scripted_policy(), run_id="t", base_seed=1, deterministic=True)
+
+    _records, summaries = await collector.collect(2)
+    summary = summaries[0]
+
+    assert summary.goal_success is False
+    assert summary.objective_reached is False  # never satisfied at all -- not merely un-finished
+    assert summary.successful_finish is False
+    assert summary.episode_success is False
+    assert summary.steps_to_goal is None
+    assert summary.finish_step == 2  # FINISH was still selected -- tracked regardless of success
+    assert summary.finish_delay_steps is None
+    assert summary.finish_reason == "finish"
+
+
+@pytest.mark.asyncio
+async def test_goal_satisfied_on_first_action_then_immediate_finish_gives_minimal_delay():
+    adapter = _ScriptedAdapter([_SCAN, _FINISH_ACTION], [True, True])
+    collector = RolloutCollector(adapter, _scripted_policy(), run_id="t", base_seed=1, deterministic=True)
+
+    _records, summaries = await collector.collect(2)
+    summary = summaries[0]
+
+    assert summary.steps_to_goal == 1
+    assert summary.finish_step == 2
+    assert summary.finish_delay_steps == 1  # FINISH itself is the one delay step
+    assert summary.objective_reached is True
+    assert summary.successful_finish is True
+    assert summary.episode_success is True
+
+
+@pytest.mark.asyncio
+async def test_timeout_without_finish_leaves_steps_to_goal_and_finish_step_none():
+    adapter = _ScriptedAdapter([_SCAN, _SCAN, _SCAN], [False, False, False], max_steps=2)
+    collector = RolloutCollector(adapter, _scripted_policy(), run_id="t", base_seed=1, deterministic=True)
+
+    _records, summaries = await collector.collect(2)
+    summary = summaries[0]
+
+    assert summary.goal_success is False
+    assert summary.objective_reached is False  # never satisfied at all -- see the
+    # sibling test right below for the "reached, then timed out anyway" case
+    # this must NOT be confused with.
+    assert summary.successful_finish is False
+    assert summary.episode_success is False
+    assert summary.steps_to_goal is None
+    assert summary.finish_step is None
+    assert summary.finish_delay_steps is None
+    assert summary.finish_reason == "truncated"
+
+
+@pytest.mark.asyncio
+async def test_objective_reached_then_timeout_is_not_confused_with_never_reached():
+    """Regression test (spec section 26): the single most important
+    diagnostic case this whole objective_reached/successful_finish split
+    exists for. The objective becomes satisfied mid-episode (step 2) but
+    the policy never selects FINISH afterward and the episode times out --
+    this must be reported as "the objective WAS reached, just not
+    finished", not collapsed into the same bucket as an episode that never
+    got anywhere near the objective at all (the previous test). Under an
+    implementation that only tracked a FINISH-gated `goal_success` boolean
+    with no independent objective_reached field, these two genuinely
+    different episodes would have been indistinguishable in episodes.csv.
+    """
+    # scan (not yet satisfied), scan (becomes satisfied here, step 2),
+    # scan, scan (truncates at max_steps=4) -- no FINISH ever selected.
+    objective_satisfied = [False, True, True, True]
+    adapter = _ScriptedAdapter([_SCAN, _SCAN, _SCAN, _SCAN], objective_satisfied, max_steps=4)
+    collector = RolloutCollector(adapter, _scripted_policy(), run_id="t", base_seed=1, deterministic=True)
+
+    _records, summaries = await collector.collect(4)
+    summary = summaries[0]
+
+    assert summary.objective_reached is True  # the key assertion this test exists for
+    assert summary.successful_finish is False
+    assert summary.episode_success is False
+    assert summary.goal_success is False  # deprecated alias, same value as successful_finish
+    assert summary.steps_to_goal == 2
+    assert summary.finish_step is None  # FINISH was never selected
+    assert summary.finish_delay_steps is None
+    assert summary.finish_reason == "truncated"

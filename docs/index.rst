@@ -30,6 +30,8 @@ Where to start
   :doc:`architecture`.
 - Looking for a specific CLI flag? See :doc:`cli`.
 - Wondering what ``marla summarize`` plots mean? See :doc:`metrics`.
+- Wondering why ``marla run`` refused to start, or what
+  ``marla scenario check``/``repair`` do? See :doc:`scenario_solvability`.
 - Digging into a specific module? See the :doc:`api/index`.
 
 .. toctree::
@@ -42,6 +44,7 @@ Where to start
    architecture
    cli
    metrics
+   scenario_solvability
    api/index
 
 Indices and tables

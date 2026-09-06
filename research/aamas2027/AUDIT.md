@@ -1,5 +1,16 @@
 # MARLA repository audit
 
+> **Post-audit note:** two things changed materially after this document was
+> written and have not been reconciled into the text below: (1) the primary/
+> ID training scenario changed from `sm_entry_dmz_two_subnets.v2.yaml` to
+> `sm_entry_user_three_subnets.v2.yaml` (manifest.yaml v5 -- this document's
+> section 7.1 scenario-selection rationale predates that change and no
+> longer describes the current scenario), and (2) `episodes.csv`/
+> `decisions.csv`/`updates.csv` gained a companion `rollouts.csv` and had
+> several columns renamed/moved/removed (see `docs/metrics.rst` for the
+> current schema) -- any file:line reference or column name below tied to
+> the old metrics schema should be re-verified, not trusted as-is.
+
 Audited commit: `4e3c7ed411ee51890a7f857c9b0bb4b52c44aa3b`. Read-only inspection,
 no code changed while writing this document. All file:line references were
 verified against this commit; re-verify before trusting them against a later

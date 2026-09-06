@@ -16,5 +16,6 @@ Auto-generated from docstrings. Organized by subpackage, matching
    metrics
    models
    runtime
+   scenario
    utils
    cli

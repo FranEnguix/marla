@@ -8,7 +8,7 @@ def test_find_nasimemu_scenario_returns_none_when_absent(tmp_path):
 
 
 def test_find_nasimemu_scenario_finds_it_in_start_directory(tmp_path):
-    scenario = tmp_path / "NASimEmu" / "scenarios" / "sm_entry_dmz_one_subnet.v2.yaml"
+    scenario = tmp_path / "NASimEmu" / "scenarios" / "sm_entry_user_three_subnets.v2.yaml"
     scenario.parent.mkdir(parents=True)
     scenario.write_text("placeholder", encoding="utf-8")
 
@@ -16,7 +16,7 @@ def test_find_nasimemu_scenario_finds_it_in_start_directory(tmp_path):
 
 
 def test_find_nasimemu_scenario_walks_up_from_a_nested_start_directory(tmp_path):
-    scenario = tmp_path / "NASimEmu" / "scenarios" / "sm_entry_dmz_one_subnet.v2.yaml"
+    scenario = tmp_path / "NASimEmu" / "scenarios" / "sm_entry_user_three_subnets.v2.yaml"
     scenario.parent.mkdir(parents=True)
     scenario.write_text("placeholder", encoding="utf-8")
 
@@ -27,7 +27,7 @@ def test_find_nasimemu_scenario_walks_up_from_a_nested_start_directory(tmp_path)
 
 
 def test_find_nasimemu_scenario_gives_up_beyond_max_levels(tmp_path):
-    scenario = tmp_path / "NASimEmu" / "scenarios" / "sm_entry_dmz_one_subnet.v2.yaml"
+    scenario = tmp_path / "NASimEmu" / "scenarios" / "sm_entry_user_three_subnets.v2.yaml"
     scenario.parent.mkdir(parents=True)
     scenario.write_text("placeholder", encoding="utf-8")
 

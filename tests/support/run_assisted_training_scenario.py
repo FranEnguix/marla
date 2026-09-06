@@ -89,29 +89,36 @@ async def run_scenario(config_path: str, scenario_path: str, num_rollouts: int, 
     result = orchestrator.training_result
 
     def _finite(value) -> bool:
-        # mean_beta/mean_query_probability can be legitimately None (no
-        # queried/accepted records in that rollout), and checkpoint_id is
-        # always None until checkpointing is wired into the run loop.
+        # Every current update_metrics field is a required number; None is
+        # not expected for any of them any more (mean_beta/mean_query_rate/
+        # checkpoint_id, previously nullable, moved to rollouts.csv / were
+        # removed -- see metrics/writer.py's module docstring), but numeric
+        # fields must still be finite.
         if value is None:
             return True
+        if isinstance(value, str):
+            return True  # e.g. epoch/minibatch keys are ints, but be lenient
         return not (math.isnan(value) or math.isinf(value))
 
     if result is None:
         return {"failure": str(orchestrator.failure) if orchestrator.failure else "no training_result"}
 
-    queried_records = [r for r in result.all_records if r.sampled_query]
-    accepted_records = [r for r in queried_records if r.plan_maker_validation_status == "accepted"]
+    # result.decision_rows holds compact per-decision dicts (spec sections
+    # 1/3), not the heavyweight StepRecords those were built from -- see
+    # metrics/writer.build_decision_rows.
+    queried_rows = [r for r in result.decision_rows if r["queried"]]
+    accepted_rows = [r for r in queried_rows if r["response_status"] == "accepted"]
 
     return {
         "failure": str(orchestrator.failure) if orchestrator.failure else None,
         "environment_steps": result.environment_steps,
         "num_episodes": len(result.episode_summaries),
         "num_updates": len(result.update_metrics),
-        "any_queried": len(queried_records) > 0,
-        "any_accepted": len(accepted_records) > 0,
-        "accepted_betas": [r.beta for r in accepted_records],
-        "accepted_alphas": [r.alpha for r in accepted_records],
-        "total_consultation_cost": sum(r.consultation_cost for r in result.all_records),
+        "any_queried": len(queried_rows) > 0,
+        "any_accepted": len(accepted_rows) > 0,
+        "accepted_betas": [r["beta"] for r in accepted_rows],
+        "accepted_alphas": [r["alpha"] for r in accepted_rows],
+        "total_consultation_cost": sum(r["consultation_cost"] for r in result.decision_rows),
         "update_metrics_all_finite": all(_finite(v) for m in result.update_metrics for v in m.values()),
     }
 

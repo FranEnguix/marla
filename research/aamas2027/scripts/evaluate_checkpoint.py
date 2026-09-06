@@ -144,7 +144,12 @@ def main() -> None:
     decision_fieldnames = None
     with (args.out_dir / "decisions.csv").open("w", newline="", encoding="utf-8") as fh:
         for record in result.records:
-            row = _decision_row(None, record)  # config unused by _decision_row's body
+            # No GAE/PPO update ever runs during evaluation (see this
+            # module's own docstring), so there is no real advantage/return
+            # target to report -- None for both, matching how a training
+            # run's own decisions.csv leaves them null when they're not
+            # meaningful (e.g. the assisted-only fields for a baseline run).
+            row = _decision_row(record, None, None)
             is_baseline = args.condition == "PPO_ONLY"
             row["condition"] = args.condition
             row["training_seed"] = args.training_seed

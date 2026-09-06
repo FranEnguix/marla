@@ -31,7 +31,12 @@ class DistributedRunError(Exception):
 
 
 async def _build_and_run(
-    config: Config, config_dir: Path, selected_aliases: set[str], num_rollouts: int, debug: bool = False
+    config: Config,
+    config_dir: Path,
+    selected_aliases: set[str],
+    num_rollouts: int,
+    debug: bool = False,
+    run_dir: Path | None = None,
 ) -> list:
     from marla.agents.gatekeeper import GatekeeperAgent
     from marla.agents.orchestrator import RLOrchestratorAgent
@@ -70,6 +75,7 @@ async def _build_and_run(
             max_episode_steps=config.environment.max_episode_steps,
             completion_reward=config.objective.completion_reward,
             premature_finish_penalty=config.objective.premature_finish_penalty,
+            premature_finish_penalty_per_remaining_target=config.objective.premature_finish_penalty_per_remaining_target,
         )
         orchestrator_password = resolve_password(config.rl_orchestrator.password_env, config.rl_orchestrator.alias)
         orchestrator = RLOrchestratorAgent(
@@ -88,6 +94,7 @@ async def _build_and_run(
             gatekeeper_alias=config.gatekeeper.alias if config.gatekeeper else None,
             gatekeeper_jid=config.gatekeeper.jid if config.gatekeeper else None,
             stop_event=stop_event,
+            run_dir=run_dir,
         )
         agents.append(orchestrator)
 
@@ -156,7 +163,12 @@ async def _build_and_run(
 
 
 def run_distributed(
-    config: Config, config_dir: Path, selected_aliases: set[str], num_rollouts: int, debug: bool = False
+    config: Config,
+    config_dir: Path,
+    selected_aliases: set[str],
+    num_rollouts: int,
+    debug: bool = False,
+    run_dir: Path | None = None,
 ):
     """Entry point for ``marla run`` in distributed mode.
 
@@ -178,7 +190,9 @@ def run_distributed(
 
     async def main() -> None:
         try:
-            result["agents"] = await _build_and_run(config, config_dir, selected_aliases, num_rollouts, debug=debug)
+            result["agents"] = await _build_and_run(
+                config, config_dir, selected_aliases, num_rollouts, debug=debug, run_dir=run_dir
+            )
         except Exception as exc:
             result["error"] = exc
             raise

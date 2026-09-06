@@ -1,10 +1,30 @@
 # research/aamas2027 -- PPO_ONLY condition, training seed 303.
 #
+# SCENARIO MIGRATION (see manifest.yaml's latest revision note and
+# src/marla/scenarios/solvable/README.md): environment.scenario now points
+# at MARLA's repaired, universally-solvable copy of this scenario
+# (src/marla/scenarios/solvable/sm_entry_user_three_subnets.solvable.v2.yaml),
+# not the original NASimEmu/scenarios/sm_entry_user_three_subnets.v2.yaml.
+# `marla scenario check` proves the original is NOT universally solvable
+# (a sensitive Windows host can legally generate with only USER-level
+# exploitable services and no compatible ROOT privilege escalation) --
+# `marla run` would now refuse to start against it.
+#
+# IMPORTANT: the run this exact seed/run_id previously produced
+# (runs/aamas2027_ppo_only/ppo-only-seed-303/) was executed under the OLD,
+# unsolvable scenario, BEFORE this repair existed. That run is PILOT /
+# INVALID FOR FINAL COMPARISON (unsolvable source scenario) -- its
+# artifacts are preserved unmodified for provenance, but this config file
+# now describes the scenario that a *future* run of this seed should use,
+# not the one the existing run directory actually used. Do not treat the
+# existing run_dir's data as if it came from the new scenario, and do not
+# silently mix it with any future re-run's results in a "final" comparison.
+#
 # Every PPO/architecture hyperparameter below is copied verbatim from
 # examples/baseline.yaml (Phase 2's "keep the production PPO architecture
 # unless there is a demonstrated bug" instruction). The only deltas from
 # that file are:
-#   - environment.scenario: sm_entry_dmz_two_subnets.v2.yaml, not
+#   - environment.scenario: sm_entry_user_three_subnets.v2.yaml, not
 #     sm_entry_dmz_one_subnet.v2.yaml -- see AUDIT.md section 7.1 (the
 #     latter has a vacuous objective: 0.0 sensitive-host probability on
 #     both its subnets, so the goal is already satisfied at step 0).
@@ -50,7 +70,7 @@ xmpp:
 
 environment:
   mode: simulation
-  scenario: /home/ubuntu/work/marla/NASimEmu/scenarios/sm_entry_dmz_two_subnets.v2.yaml
+  scenario: /home/ubuntu/work/marla/src/marla/scenarios/solvable/sm_entry_user_three_subnets.solvable.v2.yaml
   max_episode_steps: 100
 
 objective:

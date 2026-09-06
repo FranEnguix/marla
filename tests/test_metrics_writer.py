@@ -11,9 +11,11 @@ import torch
 import yaml
 
 from marla.config.loader import config_hash, load_config
+from marla.environment.actions import ActionDescriptor
 from marla.learning.checkpoint import load_checkpoint
+from marla.learning.rollout import StepRecord
 from marla.learning.trainer import build_policy_and_optimizer, run_baseline_training
-from marla.metrics.writer import write_run_artifacts
+from marla.metrics.writer import build_decision_rows, write_run_artifacts
 from marla.runtime.device import resolve_device
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -61,7 +63,7 @@ def test_write_run_artifacts_creates_every_expected_file(written_run_dir):
     run_dir, _config, _result = written_run_dir
     for name in (
         "config.yaml", "metadata.json", "episodes.csv", "decisions.csv",
-        "updates.csv", "summary.json", "checkpoint.pt",
+        "rollouts.csv", "updates.csv", "summary.json", "checkpoint.pt", "checkpoint_last.pt",
     ):
         assert (run_dir / name).is_file(), name
 
@@ -103,6 +105,27 @@ def test_episodes_csv_has_one_row_per_episode_with_expected_columns(written_run_
     assert float(row["benchmark_return"]) == float(row["nasimemu_return"])
 
 
+def test_episodes_csv_distinguishes_objective_reached_from_successful_finish(written_run_dir):
+    """Spec sections 20/23: episodes.csv must carry these as distinct,
+    unambiguous columns -- never only the FINISH-gated goal_success.
+    """
+    run_dir, _config, _result = written_run_dir
+    rows = _read_csv(run_dir / "episodes.csv")
+    row = rows[0]
+    for field in (
+        "objective_reached", "successful_finish", "episode_success",
+        "sensitive_targets_total", "sensitive_targets_with_root_final", "sensitive_targets_remaining_final",
+    ):
+        assert field in row, f"episodes.csv is missing {field!r}"
+    # MARLA's protocol: episode_success is always identical to
+    # successful_finish, never to objective_reached (unless they happen to
+    # coincide, e.g. an immediate FINISH) -- assert the DEFINITIONAL
+    # equality, not just presence.
+    for r in rows:
+        assert r["episode_success"] == r["successful_finish"]
+        assert r["successful_finish"] == r["goal_success"]  # deprecated alias, same value
+
+
 def test_decisions_csv_has_one_row_per_step_with_derived_fields(written_run_dir):
     run_dir, _config, result = written_run_dir
     rows = _read_csv(run_dir / "decisions.csv")
@@ -110,11 +133,55 @@ def test_decisions_csv_has_one_row_per_step_with_derived_fields(written_run_dir)
     row = rows[0]
     assert row["base_top_action_id"]
     assert row["selected_action_id"]
+    assert row["selected_action_type"]
     assert row["selected_action_base_rank"] == "1" or int(row["selected_action_base_rank"]) >= 1
-    # Not populated in this release (see writer.py's module docstring).
-    assert row["schema_revision_count"] == ""
-    assert row["action_success"] == ""
-    assert row["artifact_path"] == ""
+    assert row["selected_action_final_rank"] == "1" or int(row["selected_action_final_rank"]) >= 1
+    float(row["selected_action_base_probability"])
+    float(row["selected_action_final_probability"])
+    float(row["final_policy_entropy"])
+    float(row["gae_advantage"])
+    float(row["return_target"])
+    assert row["global_environment_step"] != ""
+    assert row["access_gain"] in {"0", "1", "2"}
+    int(row["sensitive_targets_total"])
+    int(row["sensitive_targets_with_root"])
+    int(row["sensitive_targets_remaining"])
+    # Removed entirely, not left empty (see writer.py's module docstring).
+    assert "schema_revision_count" not in row
+    assert "action_success" not in row
+    assert "artifact_path" not in row
+
+
+def test_decision_row_persists_sensitive_target_counts_and_finish_reward():
+    """A direct, isolated check that build_decision_rows/_decision_row --
+    the code path shared by both the incremental and single-shot writers --
+    faithfully passes through the new sensitive-target counts and the
+    reward they were used to compute, independent of any real training run
+    or scenario (spec section 2's smoke-test-style "metrics record the
+    resulting reward correctly" requirement).
+    """
+    finish_action = ActionDescriptor(action_id="finish", action_type="finish", target_key=None, is_finish=True)
+    record = StepRecord(
+        run_id="r", episode_id=1, environment_step=0, observation_id="o",
+        graph_data=None, node_key_to_index={}, legal_action_descriptors=[finish_action],
+        initial_gru_hidden_state=torch.zeros(2), previous_action_embedding=torch.zeros(2),
+        previous_training_reward=0.0, previous_query=False,
+        base_logits=torch.zeros(1), final_logits=torch.zeros(1), selected_action_index=0,
+        old_action_log_probability=0.0, old_joint_log_probability=0.0, critic_value=0.0,
+        nasimemu_reward=-40.0, consultation_cost=0.0, training_reward=-40.0,
+        terminated=True, truncated=False,
+        selected_action_type="finish", objective_satisfied=False, objective_became_satisfied=False,
+        sensitive_targets_total=2, sensitive_targets_with_root=0, sensitive_targets_remaining=2,
+    )
+
+    [row] = build_decision_rows([record], advantages=[0.0], returns=[0.0])
+
+    assert row["sensitive_targets_total"] == 2
+    assert row["sensitive_targets_with_root"] == 0
+    assert row["sensitive_targets_remaining"] == 2
+    assert row["nasimemu_reward"] == -40.0  # -20 * 2 remaining, per AAMAS-style config
+    assert row["training_reward"] == -40.0
+    assert row["objective_satisfied"] is False
 
 
 def test_decisions_csv_omitted_when_record_decisions_is_false(tmp_path):
@@ -145,10 +212,31 @@ def test_updates_csv_has_run_id_and_expected_columns(written_run_dir):
     for row in rows:
         assert row["run_id"] == config.experiment.run_id
         float(row["policy_loss"])  # must parse as a number
+        assert row["epoch"] != ""
+        assert row["minibatch"] != ""
+        assert row["rollout"] != ""
+        # Rollout-level aggregates (mean_beta, mean_nasimemu_reward, ...)
+        # are no longer repeated per update -- they live once per rollout
+        # in rollouts.csv instead (see test_rollouts_csv_* below).
+        assert "mean_beta" not in row
+        assert "mean_nasimemu_reward" not in row
+        assert "checkpoint_id" not in row
+
+
+def test_rollouts_csv_has_one_row_per_rollout_with_expected_columns(written_run_dir):
+    run_dir, config, result = written_run_dir
+    rows = _read_csv(run_dir / "rollouts.csv")
+    assert len(rows) == len(result.rollout_rows)
+    assert len(rows) >= 1
+    for row in rows:
+        assert row["run_id"] == config.experiment.run_id
+        float(row["mean_nasimemu_reward"])
         assert row["mean_beta"] == ""  # baseline never queries
         # No consultation cost in baseline, so the raw reward signal and
         # what PPO actually trained on are identical.
         assert row["mean_nasimemu_reward"] == row["mean_training_reward"]
+        float(row["collection_seconds"])
+        float(row["optimization_seconds"])
 
 
 def test_summary_json_has_required_aggregate_fields(written_run_dir):
@@ -161,6 +249,19 @@ def test_summary_json_has_required_aggregate_fields(written_run_dir):
     assert summary["schema_rejection_rate"] is None
     assert summary["advice_acceptance_rate"] is None
     assert summary["queries_per_successful_episode"] is None
+
+
+def test_summary_json_reports_objective_reached_and_successful_finish_rates_separately(written_run_dir):
+    """Spec section 25: never collapsed into one number."""
+    run_dir, _config, _result = written_run_dir
+    summary = json.loads((run_dir / "summary.json").read_text(encoding="utf-8"))
+    assert 0.0 <= summary["objective_reached_rate"] <= 1.0
+    assert 0.0 <= summary["successful_finish_rate"] <= 1.0
+    # successful_finish (an explicit FINISH after the objective holds) can
+    # never exceed objective_reached (the objective holding at all) --
+    # FINISH-gated success is a strict subset of objective-reached.
+    assert summary["successful_finish_rate"] <= summary["objective_reached_rate"] + 1e-9
+    assert summary["successful_finish_rate"] == summary["goal_success_rate"]  # deprecated alias
 
 
 def test_summary_json_goal_success_rate_confidence_interval_brackets_the_point_estimate(written_run_dir):
@@ -350,9 +451,9 @@ def test_summary_json_reports_plan_maker_latency_and_beta_for_assisted_runs(writ
     assert summary["mean_beta"] is not None
 
 
-def test_updates_csv_populates_query_fields_for_assisted_runs(written_assisted_run_dir):
+def test_rollouts_csv_populates_query_fields_for_assisted_runs(written_assisted_run_dir):
     run_dir, _config, _result = written_assisted_run_dir
-    rows = _read_csv(run_dir / "updates.csv")
+    rows = _read_csv(run_dir / "rollouts.csv")
     assert all(row["mean_query_probability"] != "" for row in rows)
     assert all(0.0 <= float(row["actual_query_rate"]) <= 1.0 for row in rows)
     # Real consultations happened (forced consult_fn) with a non-zero cost,

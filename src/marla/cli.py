@@ -1,7 +1,8 @@
 """MARLA command-line interface, built with Typer.
 
-Commands: ``run``, ``validate``, ``summarize``, ``version``. Also invocable
-as ``python -m marla``.
+Commands: ``run``, ``validate``, ``summarize``, ``version``, and the
+``scenario`` command group (``check``/``repair``). Also invocable as
+``python -m marla``.
 """
 
 from __future__ import annotations
@@ -16,8 +17,12 @@ import typer
 from marla import __version__
 from marla.config.loader import ConfigError, load_config
 from marla.config.models import Config
-from marla.config.templates import find_nasimemu_scenario, render_templates
+from marla.config.templates import render_templates
 from marla.runtime.device import DeviceResolutionError, resolve_device
+from marla.scenario.models import SolvabilityStatus
+from marla.scenario.preflight import preflight_check
+from marla.scenario_cli import format_preflight_failure, scenario_app
+from marla.scenarios import solvable_scenario_path
 from marla.utils.python_version import UnsupportedPythonVersionError, check_python_version
 
 app = typer.Typer(
@@ -26,6 +31,7 @@ app = typer.Typer(
     add_completion=False,
     no_args_is_help=True,
 )
+app.add_typer(scenario_app, name="scenario")
 
 
 @app.callback()
@@ -111,17 +117,15 @@ def init(
             typer.secho(f"  - {path}", fg=typer.colors.RED, err=True)
         raise typer.Exit(code=1)
 
-    scenario_path = find_nasimemu_scenario(Path.cwd())
-    if scenario_path is None:
-        typer.secho(
-            "Warning: could not find NASimEmu/scenarios/ near the current directory; "
-            "the generated 'environment.scenario' path will need to be fixed by hand "
-            "before these configs will run.",
-            fg=typer.colors.YELLOW,
-        )
-        scenario_value = str(Path("NASimEmu") / "scenarios" / "sm_entry_dmz_one_subnet.v2.yaml")
-    else:
-        scenario_value = str(scenario_path)
+    # Always the MARLA-owned, pre-validated scenario (spec: "do not
+    # generate configs that immediately fail MARLA's own preflight
+    # validation") -- part of the installed package itself (see
+    # marla.scenarios), so this resolves correctly regardless of the
+    # user's current directory or whether a separate NASimEmu/ checkout is
+    # nearby, unlike the old NASimEmu/scenarios/ filesystem search this
+    # replaced (which, even when it found something, found the original
+    # *unsolvable* sm_entry_user_three_subnets.v2.yaml).
+    scenario_value = str(solvable_scenario_path("sm_entry_user_three_subnets.solvable.v2.yaml"))
 
     directory.mkdir(parents=True, exist_ok=True)
     for name, content in render_templates(scenario_value).items():
@@ -204,6 +208,35 @@ def run(
     if selected_aliases is not None:
         typer.echo(f"Selected agents: {selected_aliases}")
 
+    # Preflight scenario-solvability check (spec: "MARLA must never start a
+    # training/evaluation run on a scenario for which one or more valid
+    # NASimEmu-generated realizations cannot reach the configured success
+    # objective"). Runs before any agent -- RL Orchestrator, Gatekeeper,
+    # Plan Maker, XMPP -- is started, for both local and distributed mode.
+    # Deliberately quiet on success (a few lines); a failure gets the full
+    # diagnostic plus the exact repair command, and no agents are started.
+    from marla.runtime.local import resolve_scenario_path
+
+    scenario_path = resolve_scenario_path(config, config_path.parent)
+    typer.echo("Validating scenario solvability...")
+    try:
+        solvability_result = preflight_check(config, config_path.parent, scenario_path)
+    except Exception as exc:
+        typer.secho(f"Scenario solvability check could not be completed: {exc}", fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=1) from exc
+
+    if solvability_result.status != SolvabilityStatus.PROVEN_SOLVABLE:
+        typer.secho(format_preflight_failure(solvability_result), fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=1)
+    typer.secho("Scenario solvability: PASSED", fg=typer.colors.GREEN)
+    # Compact only (spec section 31) -- proof a paper run used a validated
+    # scenario, not a copy of the (potentially large) diagnostic result.
+    scenario_validation_metadata = {
+        "status": solvability_result.status.value,
+        "validator_version": solvability_result.validator_version,
+        "scenario_hash": solvability_result.scenario_hash,
+    }
+
     if resume is not None and config.execution.mode != "local":
         typer.secho("--resume is only supported in local mode", fg=typer.colors.RED, err=True)
         raise typer.Exit(code=1)
@@ -212,7 +245,7 @@ def run(
         import math
 
         from marla.learning.checkpoint import peek_checkpoint_metadata
-        from marla.metrics.writer import write_run_artifacts
+        from marla.metrics.writer import finalize_run_directory, initialize_run_directory
         from marla.runtime.local import LocalRunError, resolve_run_dir, run_local
 
         run_dir = resolve_run_dir(config)
@@ -240,16 +273,32 @@ def run(
         else:
             typer.echo(f"Starting local {config.consultation.mode} run: {num_rollouts} rollout(s) of {ppo.rollout_steps} steps each.")
         start_time = datetime.now(timezone.utc)
+        # Spec section 2: resolved config, provisional metadata.json, and
+        # every metrics CSV's header row exist before a single environment
+        # step runs -- the training loop (run_training_loop, via the RL
+        # Orchestrator) then flushes each rollout's results here as it goes,
+        # so an interrupted run's results up to the last completed rollout
+        # are already on disk however the process ends.
+        initialize_run_directory(run_dir, config, resolved_device, start_time, scenario_validation_metadata)
         try:
-            orchestrator = run_local(config, config_path.parent, num_rollouts=num_rollouts, debug=debug, resume_from=resume)
+            orchestrator = run_local(
+                config, config_path.parent, num_rollouts=num_rollouts, debug=debug,
+                resume_from=resume, run_dir=run_dir,
+            )
         except LocalRunError as exc:
-            write_run_artifacts(run_dir, config, None, resolved_device, start_time, datetime.now(timezone.utc), "failed")
+            finalize_run_directory(
+                run_dir, config, None, resolved_device, start_time, datetime.now(timezone.utc), "failed",
+                scenario_validation_metadata,
+            )
             typer.secho(f"Run failed: {exc}", fg=typer.colors.RED, err=True)
             raise typer.Exit(code=1) from exc
 
         result = orchestrator.training_result
         status = "stopped_by_user" if result.stopped_by_user else "completed"
-        write_run_artifacts(run_dir, config, result, resolved_device, start_time, datetime.now(timezone.utc), status)
+        finalize_run_directory(
+            run_dir, config, result, resolved_device, start_time, datetime.now(timezone.utc), status,
+            scenario_validation_metadata,
+        )
         typer.echo(f"Metrics written to {run_dir}/")
 
         verb = "Stopped by user" if result.stopped_by_user else "Run complete"
@@ -262,7 +311,7 @@ def run(
 
     import math
 
-    from marla.metrics.writer import write_run_artifacts
+    from marla.metrics.writer import finalize_run_directory, initialize_run_directory
     from marla.runtime.distributed import DistributedRunError, run_distributed
     from marla.runtime.local import resolve_run_dir
 
@@ -273,13 +322,22 @@ def run(
     owns_orchestrator = config.rl_orchestrator.alias in selected_aliases
     typer.echo(f"Starting distributed process for agents: {selected_aliases}")
     start_time = datetime.now(timezone.utc)
+    if owns_orchestrator:
+        # Only the process hosting the RL Orchestrator writes central
+        # metrics (spec section 21) -- see the incremental-persistence note
+        # on the local-mode branch above for what this enables.
+        initialize_run_directory(run_dir, config, resolved_device, start_time, scenario_validation_metadata)
     try:
         orchestrator = run_distributed(
-            config, config_path.parent, set(selected_aliases), num_rollouts=num_rollouts, debug=debug
+            config, config_path.parent, set(selected_aliases), num_rollouts=num_rollouts, debug=debug,
+            run_dir=run_dir if owns_orchestrator else None,
         )
     except DistributedRunError as exc:
         if owns_orchestrator:
-            write_run_artifacts(run_dir, config, None, resolved_device, start_time, datetime.now(timezone.utc), "failed")
+            finalize_run_directory(
+                run_dir, config, None, resolved_device, start_time, datetime.now(timezone.utc), "failed",
+                scenario_validation_metadata,
+            )
         typer.secho(f"Run failed: {exc}", fg=typer.colors.RED, err=True)
         raise typer.Exit(code=1) from exc
 
@@ -288,7 +346,10 @@ def run(
         # writer -- a Gatekeeper- or Plan-Maker-only process never does this.
         result = orchestrator.training_result
         status = "stopped_by_user" if result.stopped_by_user else "completed"
-        write_run_artifacts(run_dir, config, result, resolved_device, start_time, datetime.now(timezone.utc), status)
+        finalize_run_directory(
+            run_dir, config, result, resolved_device, start_time, datetime.now(timezone.utc), status,
+            scenario_validation_metadata,
+        )
         typer.echo(f"Metrics written to {run_dir}/")
 
         verb = "Stopped by user" if result.stopped_by_user else "Run complete"
@@ -357,9 +418,15 @@ def summarize(
         return "n/a" if value is None else f"{value:.{digits}f}" if isinstance(value, float) else str(value)
 
     typer.echo(f"  episodes: {summary['episode_count']}")
+    # Reported separately, never collapsed into one number (spec section
+    # 25): objective_reached doesn't require FINISH; successful_finish
+    # does. See EpisodeSummary's docstring for the exact distinction.
+    obj_ci_low, obj_ci_high = summary.get("objective_reached_rate_ci_low"), summary.get("objective_reached_rate_ci_high")
+    obj_ci_suffix = f" (95% CI {_fmt(obj_ci_low)}-{_fmt(obj_ci_high)})" if obj_ci_low is not None else ""
+    typer.echo(f"  objective reached rate: {_fmt(summary.get('objective_reached_rate'))}{obj_ci_suffix}")
     ci_low, ci_high = summary.get("goal_success_rate_ci_low"), summary.get("goal_success_rate_ci_high")
     ci_suffix = f" (95% CI {_fmt(ci_low)}-{_fmt(ci_high)})" if ci_low is not None else ""
-    typer.echo(f"  goal success rate: {_fmt(summary['goal_success_rate'])}{ci_suffix}")
+    typer.echo(f"  successful finish rate: {_fmt(summary.get('successful_finish_rate', summary['goal_success_rate']))}{ci_suffix}")
     if summary.get("premature_finish_rate") is not None:
         typer.echo(
             f"  premature finish rate: {_fmt(summary['premature_finish_rate'])}  "
@@ -379,7 +446,11 @@ def summarize(
     typer.echo(f"  advice changed top action rate: {_fmt(summary['advice_changed_top_action_rate'])}")
     if summary.get("eval_episode_count"):  # absent in summary.json written before eval episodes existed
         typer.echo(f"  eval episodes: {summary['eval_episode_count']}")
-        typer.echo(f"  eval goal success rate: {_fmt(summary.get('eval_goal_success_rate'))}")
+        typer.echo(f"  eval objective reached rate: {_fmt(summary.get('eval_objective_reached_rate'))}")
+        typer.echo(
+            f"  eval successful finish rate: "
+            f"{_fmt(summary.get('eval_successful_finish_rate', summary.get('eval_goal_success_rate')))}"
+        )
         typer.echo(f"  mean eval return: {_fmt(summary.get('mean_eval_return'))}")
     typer.echo(
         f"  total training: {summary['total_training_environment_steps']} steps, "

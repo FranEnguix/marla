@@ -119,8 +119,18 @@ objective
   to the Plan Maker verbatim as context.
 - ``completion_reward`` (float, default ``1.0``): reward for FINISH when
   the objective is satisfied.
-- ``premature_finish_penalty`` (float, default ``-1.0``): reward for
-  FINISH when it isn't.
+- ``premature_finish_penalty`` (float, default ``-1.0``): fixed component
+  of the reward for FINISH when the objective isn't satisfied.
+- ``premature_finish_penalty_per_remaining_target`` (float, default
+  ``0.0``): additional reward per sensitive/value target not yet at ROOT
+  access (USER access does not count) at the moment of a premature FINISH.
+  The two terms add: effective premature-FINISH reward is
+  ``premature_finish_penalty + premature_finish_penalty_per_remaining_target
+  * remaining_sensitive_targets``. Leaving this at its default ``0.0``
+  preserves the old fixed-penalty-only behavior exactly. For a *pure*
+  proportional penalty with no fixed component (e.g. -20 per remaining
+  target), set ``premature_finish_penalty: 0.0`` alongside a non-zero
+  per-target value.
 
 policy
 ~~~~~~
@@ -159,9 +169,27 @@ policy
   - ``action_entropy_coefficient`` (float >= 0): entropy bonus weight for
     the action distribution.
   - ``max_grad_norm`` (float > 0): gradient clipping norm.
-  - ``learning_rate`` (float > 0): Adam learning rate. Constant for the
-    whole run -- there is no learning-rate scheduler in this release (see
-    ``marla summarize``'s ``learning_rate.png``, :doc:`metrics`).
+  - ``learning_rate`` (float > 0): Adam's initial learning rate.
+  - ``learning_rate_schedule`` (``constant`` \| ``linear``, default
+    ``linear``): ``constant`` keeps ``learning_rate`` unchanged for the
+    whole run. ``linear`` decays it linearly to ``0`` as
+    ``completed_environment_steps / total_environment_steps`` goes from
+    ``0`` to ``1`` (clamped, so it never goes negative), evaluated once
+    per rollout rather than once per PPO minibatch -- see
+    :mod:`marla.learning.lr_schedule`. Older YAML omitting this field still
+    loads (it defaults to ``linear``, same as new configs). The actual
+    current rate is always recorded per update in ``updates.csv`` and
+    plotted in ``marla summarize``'s ``learning_rate.png`` (:doc:`metrics`).
+  - ``optimizer``: only ``adam`` is supported -- an unrecognized ``type``
+    is rejected rather than silently falling back to something else.
+
+    - ``type``: ``adam`` (only supported value; never AdamW).
+    - ``eps`` (float > 0, default ``1.0e-5``): Adam's numerical-stability
+      denominator term. Larger than torch's default (``1e-8``): PPO's
+      advantage-scaled policy gradient is noisier than typical
+      supervised-learning gradients, and this value (also used by OpenAI
+      Baselines / CleanRL's PPO) improves numerical stability. Older YAML
+      omitting ``optimizer`` entirely still loads with this default.
 
 consultation
 ~~~~~~~~~~~~

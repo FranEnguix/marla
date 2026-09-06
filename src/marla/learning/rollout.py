@@ -16,7 +16,7 @@ import logging
 import random
 import time
 from collections.abc import Awaitable, Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 import torch
 from torch_geometric.data import Data
@@ -24,6 +24,7 @@ from torch_geometric.data import Data
 from marla.environment.actions import ActionDescriptor
 from marla.environment.nasimemu_adapter import EnvironmentState, NasimEmuAdapter
 from marla.environment.observation_summary import build_observation_summary
+from marla.environment.state_delta import AccessGain, StateDelta, compute_state_delta
 from marla.evaluation.overrides import EvaluationOverrides
 from marla.learning.decision import (
     FinalDecision,
@@ -95,6 +96,27 @@ class StepRecord:
     # a rollout-window cutoff. See learning/gae.py.
     bootstrap_value: float | None = None
 
+    # Cheap, scalar-only additions for decisions.csv (spec section 3) --
+    # none of these retain any tensor or full observation, only what's
+    # needed to reconstruct a compact metrics row after PPO replay.
+    selected_action_type: str = ""
+    objective_satisfied: bool = False
+    objective_became_satisfied: bool = False
+    # Compact scalars only (spec: no hidden simulator state/large
+    # observations persisted merely to compute these) -- see
+    # NasimEmuAdapter.sensitive_target_status. sensitive_targets_with_root
+    # is derived (total - remaining), not separately queried.
+    sensitive_targets_total: int | None = None
+    sensitive_targets_with_root: int | None = None
+    sensitive_targets_remaining: int | None = None
+    state_delta: StateDelta = field(default_factory=lambda: StateDelta(0, 0, 0, 0, AccessGain.NONE))
+    # Set after collection, once the rollout's total step count is known
+    # (mirrors EpisodeSummary.rollout below) -- None only for a StepRecord
+    # never passed through run_training_loop (e.g. constructed directly in
+    # a unit test).
+    global_environment_step: int | None = None
+    rollout: int | None = None
+
     # Assisted-variant fields; left at defaults in the baseline.
     sampled_query: bool = False
     old_query_probability: float | None = None
@@ -115,14 +137,38 @@ class StepRecord:
 
 @dataclass
 class EpisodeSummary:
+    """Success semantics (do not conflate these -- see each field's own
+    docstring): ``objective_reached`` is true the instant the simulator
+    state satisfies the objective, independent of FINISH; ``successful_finish``
+    (and its synonym ``episode_success``) additionally requires the policy
+    to have explicitly selected FINISH while that held. A timeout after the
+    objective was reached is ``objective_reached=True`` but
+    ``successful_finish=False`` -- a real, important diagnostic case, not a
+    plain failure indistinguishable from never having reached the objective
+    at all.
+    """
+
     run_id: str
     episode_id: int
     seed: int
+    # DEPRECATED: kept only for backward compatibility with existing
+    # analysis code that reads this column. Identical to
+    # ``successful_finish`` -- NEVER to ``objective_reached`` -- and new
+    # code should read ``successful_finish``/``episode_success`` instead,
+    # which say what they mean without relying on institutional memory of
+    # what "goal_success" was defined to mean.
     goal_success: bool
     nasimemu_return: float
     training_return: float
     environment_steps: int
+    # First step at which the objective became satisfied, regardless of
+    # whether/when FINISH was later selected -- decoupled from finish_step
+    # below (spec section 5). None if the objective was never satisfied.
     steps_to_goal: int | None
+    # The step at which FINISH was selected, whether or not that made the
+    # episode a success (a premature FINISH still has a finish_step, just
+    # no steps_to_goal). None for a truncated (timeout) episode.
+    finish_step: int | None
     episode_seconds: float
     finish_reason: str
     consultation_count: int = 0
@@ -134,10 +180,36 @@ class EpisodeSummary:
     # episodes summarized outside run_training_loop (e.g. direct
     # RolloutCollector use in tests).
     rollout: int | None = None
+    # finish_step - steps_to_goal, only for a genuinely successful episode
+    # (successful_finish) where both exist -- see spec section 5. Not
+    # meaningful (left None) for a premature finish or a timeout.
+    finish_delay_steps: int | None = None
     # True for a deterministic (greedy) evaluation episode from
     # run_evaluation_episodes, contributing nothing to the PPO buffer.
     # False for an ordinary stochastic training episode.
     is_eval: bool = False
+    # True the moment adapter.objective_satisfied() ever becomes True
+    # during this episode (all sensitive targets rooted), regardless of
+    # whether/when FINISH was selected afterward. Equivalent to
+    # ``steps_to_goal is not None`` -- kept as its own explicit boolean so
+    # analysis code doesn't have to re-derive it from a timing field.
+    objective_reached: bool = False
+    # True only if the policy explicitly selected FINISH while the
+    # objective held (identical value to the deprecated ``goal_success``).
+    successful_finish: bool = False
+    # MARLA's protocol defines "successful episode" as an explicit FINISH
+    # after the objective is satisfied -- so this is always identical to
+    # ``successful_finish``, never to ``objective_reached``. Kept as a
+    # separate, explicitly-documented field rather than expecting every
+    # reader to know that definition (spec section 20).
+    episode_success: bool = False
+    # Final simulator state at episode end (whether ended by FINISH or by
+    # truncation) -- a direct query, not a running/cached value, so it is
+    # correct even when FINISH (which itself performs no simulator action)
+    # ends the episode.
+    sensitive_targets_total: int | None = None
+    sensitive_targets_with_root_final: int | None = None
+    sensitive_targets_remaining_final: int | None = None
 
 
 class RolloutCollector:
@@ -190,6 +262,8 @@ class RolloutCollector:
         self._episode_training_return = 0.0
         self._episode_steps = 0
         self._steps_to_goal: int | None = None
+        self._finish_step: int | None = None
+        self._objective_satisfied_so_far = False
         self._episode_consultation_count = 0
         self._episode_consultation_cost_total = 0.0
         self._episode_schema_rejection_count = 0
@@ -218,6 +292,8 @@ class RolloutCollector:
         self._episode_training_return = 0.0
         self._episode_steps = 0
         self._steps_to_goal = None
+        self._finish_step = None
+        self._objective_satisfied_so_far = False
         self._episode_consultation_count = 0
         self._episode_consultation_cost_total = 0.0
         self._episode_schema_rejection_count = 0
@@ -252,6 +328,18 @@ class RolloutCollector:
             transition = self._adapter.step(selected)
             consultation_cost = decision["consultation_cost"]
             training_reward = transition.nasimemu_reward - consultation_cost
+
+            # Called explicitly, not read from transition.info: the info
+            # dict only ever carries "objective_satisfied" on the FINISH
+            # branch (see NasimEmuAdapter.step), but steps_to_goal now needs
+            # this on *every* step to detect the exact transition step,
+            # independent of whether/when FINISH is later selected (spec
+            # section 5). Cheap: a direct query of the underlying env's own
+            # current state, not derived from any stored snapshot.
+            objective_satisfied_now = self._adapter.objective_satisfied()
+            objective_became_satisfied = objective_satisfied_now and not self._objective_satisfied_so_far
+            sensitive_targets_total, sensitive_targets_remaining = self._adapter.sensitive_target_status()
+            state_delta = compute_state_delta(state, transition.state)
 
             # A stop request arriving during this step's (possibly slow,
             # blocking) consultation makes this record the last one of the
@@ -303,6 +391,13 @@ class RolloutCollector:
                 normalized_advice=decision["normalized_advice"],
                 beta=decision["beta"],
                 alpha=decision["alpha"],
+                selected_action_type=selected.action_type,
+                objective_satisfied=objective_satisfied_now,
+                objective_became_satisfied=objective_became_satisfied,
+                sensitive_targets_total=sensitive_targets_total,
+                sensitive_targets_with_root=sensitive_targets_total - sensitive_targets_remaining,
+                sensitive_targets_remaining=sensitive_targets_remaining,
+                state_delta=state_delta,
             )
             records.append(record)
 
@@ -314,26 +409,61 @@ class RolloutCollector:
                 self._episode_consultation_cost_total += consultation_cost
                 if decision["plan_maker_response_status"] == "schema_rejected":
                     self._episode_schema_rejection_count += 1
-            if selected.is_finish and transition.info.get("objective_satisfied"):
+            if objective_became_satisfied:
                 self._steps_to_goal = self._episode_steps
+            self._objective_satisfied_so_far = self._objective_satisfied_so_far or objective_satisfied_now
+            if selected.is_finish:
+                self._finish_step = self._episode_steps
 
             if transition.terminated or transition.truncated:
+                # Unchanged fundamental rule: success requires an explicit
+                # FINISH selection while the objective holds, not merely
+                # having satisfied it at some point (see steps_to_goal
+                # above, which tracks that separately for credit-assignment
+                # analysis, not for this pass/fail determination).
+                # successful_finish (and its deprecated name, goal_success)
+                # requires an EXPLICIT FINISH while the objective holds --
+                # unchanged rule. objective_reached is independent of
+                # FINISH entirely: it is true the instant the simulator
+                # state satisfies the objective (self._objective_satisfied_so_far,
+                # already updated above to include this step), whether or
+                # not FINISH ever gets selected afterward -- this is what
+                # distinguishes "timeout after reaching the objective"
+                # (objective_reached=True, successful_finish=False) from
+                # "never reached it at all" (both False), a distinction
+                # `goal_success` alone could not express.
+                successful_finish = selected.is_finish and objective_satisfied_now
+                objective_reached = self._objective_satisfied_so_far
+                finish_delay_steps = (
+                    self._finish_step - self._steps_to_goal
+                    if successful_finish and self._steps_to_goal is not None and self._finish_step is not None
+                    else None
+                )
+                sensitive_targets_total, sensitive_targets_remaining = self._adapter.sensitive_target_status()
                 summaries.append(
                     EpisodeSummary(
                         run_id=self._run_id,
                         episode_id=self._episode_id,
                         seed=self._episode_seed,
-                        goal_success=bool(transition.info.get("objective_satisfied", False)),
+                        goal_success=successful_finish,
                         nasimemu_return=self._episode_nasimemu_return,
                         training_return=self._episode_training_return,
                         environment_steps=self._episode_steps,
                         steps_to_goal=self._steps_to_goal,
+                        finish_step=self._finish_step,
+                        finish_delay_steps=finish_delay_steps,
                         episode_seconds=time.monotonic() - self._episode_start_time,
                         finish_reason="finish" if selected.is_finish else "truncated",
                         consultation_count=self._episode_consultation_count,
                         consultation_cost=self._episode_consultation_cost_total,
                         schema_rejection_count=self._episode_schema_rejection_count,
                         is_eval=self._deterministic,
+                        objective_reached=objective_reached,
+                        successful_finish=successful_finish,
+                        episode_success=successful_finish,
+                        sensitive_targets_total=sensitive_targets_total,
+                        sensitive_targets_with_root_final=sensitive_targets_total - sensitive_targets_remaining,
+                        sensitive_targets_remaining_final=sensitive_targets_remaining,
                     )
                 )
                 self._state = None
@@ -544,10 +674,20 @@ async def run_evaluation_episodes(
     performance without exploration noise on the same scenario training
     uses, not generalization to unseen scenarios.
 
-    Reuses ``adapter`` rather than building a second instance: training and
-    evaluation never run concurrently (this is awaited strictly between
-    rollout-collection phases in ``run_training_loop``), and
-    ``NasimEmuAdapter`` holds no state of its own between ``reset()`` calls.
+    ``adapter`` must be a *different instance* than any adapter a training
+    collector might resume mid-episode on -- ``NasimEmuAdapter`` wraps a
+    genuinely mutable, stateful ``NASimEmuEnv`` (the live scenario
+    instance, step index, ...), and this function's own ``reset()``/
+    ``step()`` calls would otherwise silently overwrite that live state out
+    from under a training collector's paused, resumed-next-rollout episode
+    -- observed in practice for scenarios whose host count varies across
+    resets (a "ranges of hosts" scenario file, which most bundled ones are)
+    as a shape mismatch several steps later, not an error at the point of
+    interference itself. ``run_training_loop`` builds a dedicated eval
+    adapter for exactly this reason; only a caller with no concurrent
+    training collector on the same adapter (e.g. a standalone evaluation
+    script) may safely pass an adapter it also uses elsewhere, and only
+    between full episodes.
     """
     policy.eval()
     try:

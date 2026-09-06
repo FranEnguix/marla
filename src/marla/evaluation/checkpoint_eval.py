@@ -139,6 +139,7 @@ async def evaluate_checkpoint(
         max_episode_steps=config.environment.max_episode_steps,
         completion_reward=config.objective.completion_reward,
         premature_finish_penalty=config.objective.premature_finish_penalty,
+        premature_finish_penalty_per_remaining_target=config.objective.premature_finish_penalty_per_remaining_target,
     )
 
     consult_fn: ConsultFn | None = None

@@ -18,6 +18,19 @@ def compute_finish_reward(
     objective_satisfied: bool,
     completion_reward: float,
     premature_finish_penalty: float,
+    premature_finish_penalty_per_remaining_target: float = 0.0,
+    remaining_sensitive_targets: int = 0,
 ) -> float:
-    """Reward for a FINISH action, per spec section 7."""
-    return completion_reward if objective_satisfied else premature_finish_penalty
+    """Reward for a FINISH action, per spec section 7.
+
+    A premature FINISH (``objective_satisfied`` is False) costs a fixed
+    ``premature_finish_penalty`` plus ``premature_finish_penalty_per_remaining_target``
+    for each sensitive/value host not yet at ROOT access. The per-target
+    term defaults to 0.0, so callers that never pass it (or pass the
+    default) get exactly the old fixed-penalty behavior. ``remaining_sensitive_targets``
+    is ignored -- and should be 0 -- when the objective is satisfied, since
+    a satisfied objective means no targets remain.
+    """
+    if objective_satisfied:
+        return completion_reward
+    return premature_finish_penalty + premature_finish_penalty_per_remaining_target * remaining_sensitive_targets

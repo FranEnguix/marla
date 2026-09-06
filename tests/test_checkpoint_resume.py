@@ -24,7 +24,14 @@ from marla.learning.recurrent_policy import RecurrentPolicy
 from marla.config.loader import load_config
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
-SMALL_SCENARIO = str((REPO_ROOT / "NASimEmu/scenarios/sm_entry_dmz_two_subnets.v2.yaml").resolve())
+# sm_entry_dmz_two_subnets.v2.yaml is not universally solvable (see
+# marla.scenario.solvability's analysis -- a real, separate finding this
+# purely-mechanical resume test is not about) and would now fail `marla
+# run`'s preflight check; sm_entry_dmz_one_subnet.v2.yaml has a vacuous
+# objective (0 sensitive-host probability) and is trivially solvable,
+# matching the sibling subprocess tests in test_local_runtime.py /
+# test_local_runtime_assisted.py / test_distributed.py.
+SMALL_SCENARIO = str((REPO_ROOT / "NASimEmu/scenarios/sm_entry_dmz_one_subnet.v2.yaml").resolve())
 
 
 def _write_tiny_baseline_config(tmp_path: Path, run_id: str, total_environment_steps: int) -> Path:

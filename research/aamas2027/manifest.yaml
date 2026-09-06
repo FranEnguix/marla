@@ -6,6 +6,37 @@
 #
 # REVISION HISTORY (kept, not overwritten, so every past decision stays
 # traceable):
+#   v7 (current) -- primary_training_scenario switched to MARLA's own
+#         repaired, universally-solvable copy of the scenario
+#         (src/marla/scenarios/solvable/sm_entry_user_three_subnets.solvable.v2.yaml,
+#         see that directory's README.md for the exact repair). `marla
+#         scenario check` proved the v5/v6 scenario
+#         (NASimEmu/scenarios/sm_entry_user_three_subnets.v2.yaml) is NOT
+#         universally solvable: a sensitive Windows host can legally
+#         generate with only USER-level exploitable services (e_wp_ninja)
+#         and no compatible ROOT privilege escalation -- confirmed both
+#         symbolically (exhaustive worst-case proof, not sampling) and
+#         empirically (2206/6744 sampled windows-sensitive hosts across
+#         3000 seeds hit exactly this class). This means every PPO_ONLY
+#         run under conditions.PPO_ONLY.runs below (seeds 101/202/303,
+#         "v6") was trained and evaluated against a scenario that could
+#         not always be won even in principle -- **those three runs are
+#         PILOT / INVALID FOR FINAL COMPARISON / UNSOLVABLE SOURCE
+#         SCENARIO** (see the per-seed ``status`` field added below). Their
+#         artifacts under runs/aamas2027_ppo_only/ are preserved unmodified
+#         (never rewritten to pretend they used the repaired scenario) --
+#         they remain useful evidence of the 0%-success/FINISH-collapse
+#         investigation that led to this repair, just not comparable to
+#         any future run. All 6 configs/*.yaml now point at the repaired
+#         scenario for the NEXT execution of each seed; MARLA_FULL has
+#         still never been executed under any scenario, so its configs
+#         needed no provenance annotation, only the scenario-field update.
+#         No PPO/consultation hyperparameter was changed as part of this
+#         revision. Final AAMAS experiments are NOT launched by this
+#         revision -- re-running PPO_ONLY (and then MARLA_FULL) under the
+#         repaired scenario, and separately re-validating PPO
+#         learnability (a different question from structural solvability;
+#         see docs/scenario_solvability.rst), remain future work.
 #   v1 -- 50k-step primary training, full ablation set including
 #         ALWAYS_QUERY/PLAN_MAKER_ONLY/BETA_ZERO/BETA_ONE.
 #   v2 -- reduced primary training to 5k steps after a first smoke test
@@ -13,7 +44,7 @@
 #         "smoke test" (killed partway, see pilot_measurements).
 #   v3 -- primary training restored to 50k steps; required suite cut to
 #         PPO_ONLY/MARLA_FULL/MARLA_FULL_NO_QUERY.
-#   v4 (current) -- staged training: 5,000-step Stage A now (the real
+#   v4 -- staged training: 5,000-step Stage A now (the real
 #         target, not a placeholder), STOP and report, extend to 10,000 via
 #         `marla run --resume` only with explicit approval -- 50k is off
 #         the table entirely for this paper's timeline. Checkpoint resume
@@ -22,10 +53,58 @@
 #         Maker profiling (plan_maker_profiling below) found no fixable
 #         latency bottleneck -- the ~73s mean is a genuine cost of the
 #         current model/design, not a bug.
+#   v6 (current) -- PPO_ONLY Stage A actually run for all 3 seeds (101,
+#         202, 303) under the v5 scenario/config, real final ID evaluation
+#         run against the manifest's own fixed eval seeds (5001, 5 episodes/
+#         seed), and a PPO_ONLY-specific aggregate/figure set generated
+#         (research/aamas2027/scripts/ppo_only_report.py,
+#         aggregate/ppo_only_seed_summary.csv,
+#         tables/ppo_only_seed_summary.md, figures/ppo_only_*). MARLA_FULL
+#         was NOT run in this revision (out of scope for the task that
+#         produced it). Two implementation bugs in the analysis tooling were
+#         found and fixed as part of validating these results (see git
+#         history around this revision): evaluate_checkpoint.py called
+#         marla.metrics.writer._decision_row with a stale signature, and
+#         analyze.py's query_rate_over_training/beta_over_training read
+#         updates.csv columns that had moved to rollouts.csv -- both would
+#         have silently produced broken/empty output for MARLA_FULL's
+#         eventual evaluation and analysis too. See the PPO_ONLY conditions
+#         block's own note below for the actual (concerning) results.
+#   v5 -- primary/ID training scenario switched to
+#         sm_entry_user_three_subnets.v2.yaml, matching a repo-wide default
+#         scenario change (examples/, config/templates.py, CLI). It was
+#         previously this program's OOD "entry/topology shift" scenario
+#         (v1-v4); the former ID scenario, sm_entry_dmz_two_subnets.v2.yaml,
+#         is demoted to OOD in its place (still a genuine entry/topology
+#         shift relative to the new ID) and
+#         md_entry_user_three_subnets.v2.yaml -- a larger scenario sharing
+#         the new ID's user-subnet entry point -- takes over as the
+#         "harder, same-entry-type" OOD slot, replacing
+#         sm_entry_dmz_three_subnets.v2.yaml. All 6 configs/ files' own
+#         environment.scenario are updated; the v1-v4 pilot/interim results
+#         and Plan Maker profiling above were measured against the OLD ID
+#         scenario and are STALE for any scenario-dependent conclusion
+#         (goal success rate, steps-to-goal, episode length) -- Plan Maker
+#         latency/token-count numbers remain valid (model/hardware-driven,
+#         not scenario-driven). The pilot has not been re-run since this
+#         change; see QUICKSTART.md/AUDIT.md, which still describe the old
+#         scenario pairing and need a matching update before being trusted
+#         again. This reclassification was made to satisfy an explicit
+#         instruction to adopt the new scenario "including all the aamas
+#         experiments"; the specific OOD replacement choices above were not
+#         independently re-verified for loadability/steppability against a
+#         policy trained on the new ID scenario the way the v1 pairing
+#         originally was (AUDIT.md 7.1) -- do that before relying on any
+#         OOD figure produced under this manifest revision.
 
 schema_version: 1
-git_sha: a82df30c4f2c8737b3f78f6f66c8d3d6ed63ca3f  # the v4-revision commit (checkpoint resume + Plan Maker profiling + staged training)
-primary_training_scenario: NASimEmu/scenarios/sm_entry_dmz_two_subnets.v2.yaml
+git_sha: a82df30c4f2c8737b3f78f6f66c8d3d6ed63ca3f  # the v4-revision commit; v5-v7 only edit this manifest + configs/, not marla's own training code
+# v7: MARLA-owned, universally-solvable repaired copy -- see the v7 note
+# above and src/marla/scenarios/solvable/README.md. The original,
+# NOT-universally-solvable NASimEmu/scenarios/sm_entry_user_three_subnets.v2.yaml
+# is deliberately left unmodified as provenance (see AUDIT.md / `marla
+# scenario check NASimEmu/scenarios/sm_entry_user_three_subnets.v2.yaml`).
+primary_training_scenario: src/marla/scenarios/solvable/sm_entry_user_three_subnets.solvable.v2.yaml
 scenario_manifest: scenario_manifest.csv
 
 # Fixed BEFORE any run exists; not selected based on results (Phase 2).
@@ -76,22 +155,29 @@ evaluation_seed_sets:
   final_id:
     start: 5001
     count: 5
-    scenario: NASimEmu/scenarios/sm_entry_dmz_two_subnets.v2.yaml
+    scenario: NASimEmu/scenarios/sm_entry_user_three_subnets.v2.yaml
     id_or_ood: ID
   final_ood_dmz_three_subnets:
     start: 6001
     count: 3
-    scenario: NASimEmu/scenarios/sm_entry_dmz_three_subnets.v2.yaml
+    # v5: harder-variant OOD slot, now filled by the larger scenario
+    # sharing the new ID's user-subnet entry point (see manifest revision
+    # history above) -- key kept as "dmz_three_subnets" for continuity
+    # with earlier aggregate/ output; the scenario it points at changed.
+    scenario: NASimEmu/scenarios/md_entry_user_three_subnets.v2.yaml
     id_or_ood: OOD
   final_ood_user_three_subnets:
     start: 6001  # same numeric seeds reused across OOD scenarios on purpose
     count: 3
-    scenario: NASimEmu/scenarios/sm_entry_user_three_subnets.v2.yaml
+    # v5: entry/topology-shift OOD slot, now filled by the former ID
+    # scenario (see manifest revision history above) -- key kept as
+    # "user_three_subnets" for continuity; the scenario it points at changed.
+    scenario: NASimEmu/scenarios/sm_entry_dmz_two_subnets.v2.yaml
     id_or_ood: OOD
   periodic_learning_curve:
     start: 1000000000  # EVAL_SEED_OFFSET, a source constant -- identical across every run by construction
     count: 3
-    scenario: NASimEmu/scenarios/sm_entry_dmz_two_subnets.v2.yaml
+    scenario: NASimEmu/scenarios/sm_entry_user_three_subnets.v2.yaml
     id_or_ood: ID
     note: >
       PPO_ONLY: eval_every_rollouts=2, eval_episodes=3 (free, 5 points
@@ -118,10 +204,10 @@ conditions:
     advice_transformation: n/a
     training_step_budget: 5000  # Stage A -- see staged_training
     runs:
-      101: {config: configs/ppo_only_seed101.yaml, run_dir: runs/aamas2027_ppo_only/ppo-only-seed-101}
-      202: {config: configs/ppo_only_seed202.yaml, run_dir: runs/aamas2027_ppo_only/ppo-only-seed-202}
-      303: {config: configs/ppo_only_seed303.yaml, run_dir: runs/aamas2027_ppo_only/ppo-only-seed-303}
-    note: "seed 101 is COMPLETED: verified byte-identical config (environment/policy/experiment blocks) between the current Stage A config and runs/aamas2027_ppo_only/ppo-only-seed-101/config.yaml, 5000 real environment steps, 5 real periodic-eval points at rollouts 2/4/6/8/10 (15 eval episodes) already on disk -- reused as-is, not re-run."
+      101: {config: configs/ppo_only_seed101.yaml, run_dir: runs/aamas2027_ppo_only/ppo-only-seed-101, status: PILOT_INVALID_UNSOLVABLE_SCENARIO}
+      202: {config: configs/ppo_only_seed202.yaml, run_dir: runs/aamas2027_ppo_only/ppo-only-seed-202, status: PILOT_INVALID_UNSOLVABLE_SCENARIO}
+      303: {config: configs/ppo_only_seed303.yaml, run_dir: runs/aamas2027_ppo_only/ppo-only-seed-303, status: PILOT_INVALID_UNSOLVABLE_SCENARIO}
+    note: "v6 (run) / v7 (reclassified): all 3 seeds (101, 202, 303) COMPLETED under the v5/v6 scenario -- 5120 real environment steps each (ceil(5000/512)*512), config_hash-verified to match this file's own configs/*.yaml at the time, all incremental-metrics CSVs parse with monotonic global_environment_step and single headers (see research/aamas2027/aggregate/ppo_only_seed_summary.csv). PILOT / INVALID FOR FINAL COMPARISON / UNSOLVABLE SOURCE SCENARIO (v7): `marla scenario check` proved NASimEmu/scenarios/sm_entry_user_three_subnets.v2.yaml -- the scenario these 3 runs actually used -- is not universally solvable, so these results must not be presented as, or silently mixed into, a final scientific comparison; any analysis script that auto-discovers run directories under runs/aamas2027_ppo_only/ must check this manifest's per-run `status` field (any value other than absent/OK excludes it from a final-comparison figure/table) rather than assuming every discovered run is comparable. IMPORTANT CAVEAT, preserved from v6 (see aggregate/ppo_only_seed_summary.csv and figures/ppo_only_finish_behavior.*): 0% goal success on all 3 seeds (expected for Stage A's short budget), and 2 of 3 seeds (101, 202) show the base policy's argmax collapsing onto FINISH by the final rollouts of training, with final deterministic evaluation selecting FINISH as the very first action in 5/5 episodes for both -- the third seed (303) shows the opposite degenerate behavior (never selects FINISH, all 5 eval episodes time out). This is evidence Stage A is not just quantitatively undertrained but may be converging toward degenerate solutions -- and, per the FINISH-collapse investigation this led to (research/aamas2027/investigation/), a separate, now-fixed problem from the unsolvable-scenario finding above. Do not treat these PPO_ONLY numbers as paper-ready under any circumstance -- they must be re-run against the repaired scenario before any final comparison."
 
   MARLA_FULL:
     trainable: true

@@ -6,3 +6,6 @@ reference.
 
 .. automodule:: marla.cli
    :members:
+
+.. automodule:: marla.scenario_cli
+   :members:

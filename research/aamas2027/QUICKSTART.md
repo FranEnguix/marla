@@ -2,6 +2,15 @@
 
 Last verified with git commit: `6c7839530f2a1b5a75f8b1884ff2c61804cc21d2`
 
+> **manifest v5 note:** the primary/ID training scenario changed to
+> `sm_entry_user_three_subnets.v2.yaml` (see `manifest.yaml`'s revision
+> history and `scenario_manifest.csv`), matching a repo-wide default
+> scenario change. Everything below that names
+> `sm_entry_dmz_two_subnets.v2.yaml` as the ID scenario describes the
+> v1-v4 pilot/interim results, which predate that change and are stale
+> for scenario-dependent conclusions -- `configs/*.yaml` already point at
+> the new scenario, but this page's narrative has not been rewritten yet.
+
 For the full experimental reasoning, see `AUDIT.md` (what the codebase
 does and its limitations), `manifest.yaml` (the exact condition/seed/scenario
 matrix), and `VALIDATION.md` (checks run before any long training job).
@@ -9,7 +18,8 @@ This page is deliberately shorter and command-oriented.
 
 ## 1. What this reproduces
 
-Three conditions, all on the scenario `NASimEmu/scenarios/sm_entry_dmz_two_subnets.v2.yaml`:
+Three conditions, all on the scenario `NASimEmu/scenarios/sm_entry_dmz_two_subnets.v2.yaml`
+(**pre-v5**; the current ID scenario is `sm_entry_user_three_subnets.v2.yaml`, see the note above):
 
 - **PPO_ONLY** -- recurrent PPO alone, no Plan Maker. Independently trained.
 - **MARLA_FULL** -- the same PPO policy plus a learned query gate (when to

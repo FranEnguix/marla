@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-_SCENARIO_RELATIVE_PATH = Path("NASimEmu") / "scenarios" / "sm_entry_dmz_one_subnet.v2.yaml"
+_SCENARIO_RELATIVE_PATH = Path("NASimEmu") / "scenarios" / "sm_entry_user_three_subnets.v2.yaml"
 
 BASELINE_TEMPLATE = """\
 schema_version: "1.0"
@@ -48,7 +48,7 @@ policy:
     action_type_embedding_size: 32
   recurrent:
     hidden_size: 128
-    sequence_length: 16
+    sequence_length: 64
   ppo:
     # Small on purpose: enough rollouts to see the training loop actually
     # learn something, fast enough to finish in well under a minute on CPU.
@@ -65,6 +65,10 @@ policy:
     action_entropy_coefficient: 0.01
     max_grad_norm: 0.5
     learning_rate: 0.0003
+    learning_rate_schedule: linear
+    optimizer:
+      type: adam
+      eps: 1.0e-5
 
 consultation:
   mode: disabled
@@ -131,7 +135,7 @@ policy:
     action_type_embedding_size: 32
   recurrent:
     hidden_size: 128
-    sequence_length: 16
+    sequence_length: 64
   ppo:
     # Smaller than baseline.yaml's, on top of being small for the same
     # reason: a real consultation is a real, slow-on-CPU model call, so the
@@ -149,6 +153,10 @@ policy:
     action_entropy_coefficient: 0.01
     max_grad_norm: 0.5
     learning_rate: 0.0003
+    learning_rate_schedule: linear
+    optimizer:
+      type: adam
+      eps: 1.0e-5
 
 consultation:
   mode: learned

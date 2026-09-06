@@ -11,7 +11,7 @@ build-backend = "hatchling.build"
 # existing project, and "marla" collides with the already-registered
 # "marl" and "marlo".
 name = "marla-agents"
-version = "0.1.0"
+version = "0.2.0"
 description = "MARLA: Multi-Agent Reinforcement Learning Architecture for NASimEmu"
 readme = "README.md"
 requires-python = ">=3.10,<3.11"

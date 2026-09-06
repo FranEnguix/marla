@@ -4,7 +4,7 @@ All Plan Maker advisory requests/responses route through here:
 ``RL Orchestrator -> Gatekeeper -> Plan Maker`` and back. The Gatekeeper
 validates communication and advisory payloads, never final NASimEmu
 actions. It holds only the transient pending-request registry described in
-spec section 6 -- no Blackboard, no cross-run memory.
+spec section 6.
 """
 
 from __future__ import annotations

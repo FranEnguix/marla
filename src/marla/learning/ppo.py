@@ -258,12 +258,15 @@ def optimize(
     chunks = build_sequence_chunks(records, advantages, returns, sequence_length)
     metrics: list[dict[str, float]] = []
 
-    for _epoch in range(ppo_config.epochs):
+    for epoch in range(1, ppo_config.epochs + 1):
         order = list(range(len(chunks)))
         rng.shuffle(order)
-        for start in range(0, len(order), minibatch_sequences):
+        for minibatch_index, start in enumerate(range(0, len(order), minibatch_sequences), start=1):
             batch_indices = order[start : start + minibatch_sequences]
             minibatch = [chunks[i] for i in batch_indices]
-            metrics.append(ppo_update(policy, optimizer, minibatch, ppo_config, device, consultation_cost))
+            update_metrics = ppo_update(policy, optimizer, minibatch, ppo_config, device, consultation_cost)
+            update_metrics["epoch"] = epoch
+            update_metrics["minibatch"] = minibatch_index
+            metrics.append(update_metrics)
 
     return metrics

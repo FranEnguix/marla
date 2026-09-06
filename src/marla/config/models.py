@@ -59,7 +59,23 @@ class ObjectiveConfig(MarlaBaseModel):
     # the spec's example YAML; defaulted here so those examples still
     # validate as-is while remaining overridable per experiment.
     completion_reward: float = 1.0
+    # Effective reward for selecting FINISH before the objective is
+    # satisfied is a base term plus a per-remaining-target term:
+    #
+    #   premature_finish_penalty
+    #   + premature_finish_penalty_per_remaining_target * remaining_sensitive_targets
+    #
+    # "remaining" means a sensitive/value host not yet at ROOT access --
+    # USER access does not count (see NasimEmuAdapter.sensitive_target_status,
+    # matching NASimEmu's own all_sensitive_hosts_compromised()). The
+    # per-target term defaults to 0.0, so an older config using only the
+    # fixed `premature_finish_penalty` keeps its exact old semantics
+    # unchanged. To get a *pure* proportional penalty with no fixed
+    # component (e.g. -20 per remaining target and nothing else), set
+    # `premature_finish_penalty: 0.0` alongside a non-zero per-target value
+    # -- there is no separate "mode" switch; the two terms simply add.
     premature_finish_penalty: float = -1.0
+    premature_finish_penalty_per_remaining_target: float = 0.0
 
 
 class GraphEncoderConfig(MarlaBaseModel):
@@ -78,6 +94,22 @@ class RecurrentConfig(MarlaBaseModel):
     sequence_length: int = Field(gt=0)
 
 
+class OptimizerConfig(MarlaBaseModel):
+    """Only Adam is supported in this release -- an unrecognized ``type``
+    is rejected outright (Pydantic's ``Literal`` does this for free) rather
+    than silently falling back to some other optimizer.
+    """
+
+    type: Literal["adam"] = "adam"
+    # Matches the Adam paper's numerical-stability term added inside the
+    # denominator, not a learning-rate-like quantity -- torch's default
+    # (1e-8) is tuned for supervised learning with typically well-scaled
+    # gradients; PPO's advantage-scaled policy gradient is noisier, and a
+    # slightly larger eps (1e-5, the same value used by OpenAI Baselines /
+    # CleanRL's PPO implementations) improves numerical stability there.
+    eps: float = Field(default=1.0e-5, gt=0)
+
+
 class PPOConfig(MarlaBaseModel):
     # Not shown in the spec's example YAML but required to know when a
     # training run should stop; kept explicit rather than defaulted since
@@ -94,6 +126,16 @@ class PPOConfig(MarlaBaseModel):
     action_entropy_coefficient: float = Field(ge=0)
     max_grad_norm: float = Field(gt=0)
     learning_rate: float = Field(gt=0)
+    # "constant": learning_rate is used unchanged for the whole run (prior
+    # behavior, still supported for reproducing older experiments).
+    # "linear": decays linearly from learning_rate to 0 over
+    # total_environment_steps (see learning/lr_schedule.py for exact
+    # semantics). Defaults to "linear" for new/generated configs; older
+    # YAML omitting this field also gets "linear" on load (spec section 16
+    # requires this field to have a default, not that the default match
+    # historical behavior -- "constant" remains one explicit value away).
+    learning_rate_schedule: Literal["constant", "linear"] = "linear"
+    optimizer: OptimizerConfig = Field(default_factory=OptimizerConfig)
 
 
 class PolicyConfig(MarlaBaseModel):

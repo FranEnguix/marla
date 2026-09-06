@@ -19,6 +19,26 @@ import pandas as pd
 _RATE_YLIM = (-0.05, 1.05)
 
 
+def _accepted_advice_rows(decisions: pd.DataFrame) -> pd.DataFrame:
+    """Rows where consultation was queried *and accepted* -- the only rows
+    where advice was actually applied.
+
+    Deliberately not ``decisions["queried"] == True``: a schema-rejected
+    query also has a real, non-null ``beta`` -- forced to exactly 0 (see
+    learning/decision.py's ``compute_final_decision``), which in turn makes
+    ``final_logits`` identical to ``base_logits`` and
+    ``advice_changed_top_action`` deterministically ``False``. A plot
+    meant to show "how much does accepted advice actually change the
+    decision" must not silently mix in those zero/False rejected-query
+    rows, which would pull any such statistic toward 0 in proportion to
+    the schema rejection rate rather than reflecting the trust head's
+    actual behavior on advice it was actually given.
+    """
+    if "response_status" not in decisions.columns:
+        return decisions.iloc[0:0]
+    return decisions[decisions["response_status"] == "accepted"]
+
+
 def generate_plots(run_dir: Path, plots_dir: Path) -> list[Path]:
     """Render whichever plots the available CSVs support; returns the files written.
 
@@ -37,17 +57,29 @@ def generate_plots(run_dir: Path, plots_dir: Path) -> list[Path]:
             written += _plot_consultation_activity(episodes, plots_dir)
             written += _plot_episode_efficiency(episodes, plots_dir)
             written += _plot_episode_outcomes(episodes, plots_dir)
+            written += _plot_finish_efficiency(episodes, plots_dir)
 
     updates_path = run_dir / "updates.csv"
     if updates_path.exists() and updates_path.stat().st_size > 0:
         updates = pd.read_csv(updates_path)
         if not updates.empty:
             written += _plot_losses(updates, plots_dir)
-            written += _plot_query_behavior(updates, plots_dir)
             written += _plot_training_dynamics(updates, plots_dir)
             written += _plot_optimization_diagnostics(updates, plots_dir)
             written += _plot_learning_rate(updates, plots_dir)
-            written += _plot_reward(updates, plots_dir)
+
+    # rollouts.csv (spec section 6): rollout-level aggregates that used to
+    # be repeated on every updates.csv row -- absent entirely for a run
+    # written before rollouts.csv existed, in which case the two plots
+    # sourced from it are simply skipped (see module docstring's note on
+    # tolerating older run directories).
+    rollouts_path = run_dir / "rollouts.csv"
+    if rollouts_path.exists() and rollouts_path.stat().st_size > 0:
+        rollouts = pd.read_csv(rollouts_path)
+        if not rollouts.empty:
+            written += _plot_query_behavior(rollouts, plots_dir)
+            written += _plot_reward(rollouts, plots_dir)
+            written += _plot_rollout_timing(rollouts, plots_dir)
 
     decisions_path = run_dir / "decisions.csv"
     if decisions_path.exists() and decisions_path.stat().st_size > 0:
@@ -58,6 +90,10 @@ def generate_plots(run_dir: Path, plots_dir: Path) -> list[Path]:
             written += _plot_gatekeeper_reliability(decisions, plots_dir)
             written += _plot_plan_maker_latency(decisions, plots_dir)
             written += _plot_query_decision_analysis(decisions, plots_dir)
+            written += _plot_critic_quality(decisions, plots_dir)
+            written += _plot_reward_vs_credit_assignment(decisions, plots_dir)
+            written += _plot_action_type_distribution(decisions, plots_dir)
+            written += _plot_assisted_policy_influence(decisions, plots_dir)
 
     return written
 
@@ -184,13 +220,17 @@ def _plot_losses(updates: pd.DataFrame, plots_dir: Path) -> list[Path]:
     return [_save(fig, plots_dir / "ppo_losses.png")]
 
 
-def _plot_query_behavior(updates: pd.DataFrame, plots_dir: Path) -> list[Path]:
-    if updates["mean_query_probability"].isna().all():
+def _plot_query_behavior(rollouts: pd.DataFrame, plots_dir: Path) -> list[Path]:
+    """Sourced from rollouts.csv (spec section 6), not updates.csv -- these
+    are rollout-level aggregates, computed once per rollout, not per PPO
+    minibatch update.
+    """
+    if rollouts["mean_query_probability"].isna().all():
         return []  # baseline variant: no query gate at all
     fig, ax = plt.subplots(figsize=(8, 4.5))
-    ax.plot(updates["update"], updates["mean_query_probability"], label="mean query probability")
-    ax.plot(updates["update"], updates["actual_query_rate"], label="actual query rate", alpha=0.7)
-    ax.set_xlabel("PPO update")
+    ax.plot(rollouts["rollout"], rollouts["mean_query_probability"], label="mean query probability", marker=".")
+    ax.plot(rollouts["rollout"], rollouts["actual_query_rate"], label="actual query rate", alpha=0.7, marker=".")
+    ax.set_xlabel("Rollout")
     ax.set_ylabel("Rate")
     ax.set_ylim(*_RATE_YLIM)
     ax.set_title("Query gate behavior over training")
@@ -217,7 +257,7 @@ def _plot_decision_diagnostics(decisions: pd.DataFrame, plots_dir: Path) -> list
     normalized_entropy = (decisions["base_policy_entropy"] / log_n.replace(0, np.nan)).clip(0, 1)
     ax2.plot(decisions.index, normalized_entropy, color="tab:purple", alpha=0.8)
     ax2.set_xlabel("Decision (in collection order)")
-    ax2.set_ylabel("Normalized entropy (H / log N)")
+    ax2.set_ylabel(r"Normalized entropy $H / \log N$")
     ax2.set_ylim(*_RATE_YLIM)
     ax2.set_title("Action-count-normalized policy entropy")
     ax2.grid(alpha=0.3)
@@ -234,22 +274,41 @@ def _plot_episode_efficiency(episodes: pd.DataFrame, plots_dir: Path) -> list[Pa
     train = train.assign(goal_success=train["goal_success"].astype(float))
     if not eval_.empty:
         eval_ = eval_.assign(goal_success=eval_["goal_success"].astype(float))
+    # objective_reached (independent of FINISH) is a newer column -- tolerate
+    # an older episodes.csv written before this field existed rather than
+    # KeyError'ing (same tolerance pattern used elsewhere in this module).
+    has_objective_reached = "objective_reached" in episodes.columns
+    if has_objective_reached:
+        train = train.assign(objective_reached=train["objective_reached"].astype(float))
+        if not eval_.empty:
+            eval_ = eval_.assign(objective_reached=eval_["objective_reached"].astype(float))
     x_label = "Rollout" if x_col == "rollout" else "Episode"
 
     fig, (ax1, ax2, ax3) = plt.subplots(1, 3, figsize=(14, 4))
 
+    # Reported as two distinct lines, never collapsed into one (spec
+    # section 25): objective_reached doesn't require FINISH;
+    # successful_finish (== goal_success) does -- see EpisodeSummary's
+    # docstring for the exact distinction.
+    if has_objective_reached:
+        x, mean, band = _grouped_mean_and_band(train, x_col, "objective_reached")
+        ax1.plot(x, mean, label="objective reached (train)", color="tab:green", marker="^", alpha=0.7)
+        if not eval_.empty:
+            x, mean, band = _grouped_mean_and_band(eval_, x_col, "objective_reached")
+            ax1.plot(x, mean, label="objective reached (eval)", color="tab:green", linestyle="--", marker="^", alpha=0.7)
+
     x, mean, band = _grouped_mean_and_band(train, x_col, "goal_success")
-    ax1.plot(x, mean, label="train (stochastic policy)", color="tab:blue", marker=".")
+    ax1.plot(x, mean, label="successful FINISH (train)", color="tab:blue", marker=".")
     ax1.fill_between(x, (mean - band).clip(0, 1), (mean + band).clip(0, 1), color="tab:blue", alpha=0.2)
     if not eval_.empty:
         x, mean, band = _grouped_mean_and_band(eval_, x_col, "goal_success")
-        ax1.plot(x, mean, label="eval (greedy policy)", color="tab:orange", linestyle="--", marker=".")
+        ax1.plot(x, mean, label="successful FINISH (eval)", color="tab:orange", linestyle="--", marker=".")
         ax1.fill_between(x, (mean - band).clip(0, 1), (mean + band).clip(0, 1), color="tab:orange", alpha=0.2)
     ax1.set_xlabel(x_label)
-    ax1.set_ylabel("Goal success rate")
+    ax1.set_ylabel("Rate")
     ax1.set_ylim(*_RATE_YLIM)
-    ax1.set_title("Goal success rate\n(sensitive hosts captured)")
-    ax1.legend()
+    ax1.set_title("Objective reached vs. successful FINISH\n(sensitive hosts captured)")
+    ax1.legend(fontsize="x-small")
     ax1.grid(alpha=0.3)
 
     # Episode length can't be negative; clip the band's lower edge so a
@@ -287,11 +346,11 @@ def _plot_episode_efficiency(episodes: pd.DataFrame, plots_dir: Path) -> list[Pa
         ax3.fill_between(x, (mean - band).clip(min=0), mean + band, color="tab:orange", alpha=0.2)
     ax3.set_xlabel(x_label)
     ax3.set_ylabel("Steps to goal")
-    ax3.set_title("Steps to goal\n(successful episodes only)")
+    ax3.set_title("Steps to goal\n(episodes that reached the objective; FINISH not required)")
     if any_success:
         ax3.legend()
     else:
-        ax3.text(0.5, 0.5, "no successful episodes yet", ha="center", va="center", transform=ax3.transAxes)
+        ax3.text(0.5, 0.5, "objective never reached yet", ha="center", va="center", transform=ax3.transAxes)
     ax3.grid(alpha=0.3)
     return [_save(fig, plots_dir / "episode_efficiency.png")]
 
@@ -386,11 +445,12 @@ def _plot_learning_rate(updates: pd.DataFrame, plots_dir: Path) -> list[Path]:
     return [_save(fig, plots_dir / "learning_rate.png")]
 
 
-def _plot_reward(updates: pd.DataFrame, plots_dir: Path) -> list[Path]:
-    # Absent in updates.csv files written before this field existed --
+def _plot_reward(rollouts: pd.DataFrame, plots_dir: Path) -> list[Path]:
+    # Absent in rollouts.csv files written before this field existed, and
+    # in any run directory written before rollouts.csv existed at all --
     # fields are additive, never backfilled into old runs (see the module
     # docstring's note on permanently-empty columns for the same pattern).
-    if "mean_nasimemu_reward" not in updates.columns:
+    if "mean_nasimemu_reward" not in rollouts.columns:
         return []
 
     # The raw per-step reward signal actually driving PPO, over training --
@@ -399,11 +459,11 @@ def _plot_reward(updates: pd.DataFrame, plots_dir: Path) -> list[Path]:
     # assisted variant, where mean_training_reward additionally reflects
     # consultation-cost deductions that mean_nasimemu_reward does not.
     fig, ax = plt.subplots(figsize=(8, 4.5))
-    ax.plot(updates["update"], updates["mean_nasimemu_reward"], label="mean nasimemu reward")
-    if not updates["mean_training_reward"].equals(updates["mean_nasimemu_reward"]):
-        ax.plot(updates["update"], updates["mean_training_reward"], label="mean training reward", alpha=0.7)
+    ax.plot(rollouts["rollout"], rollouts["mean_nasimemu_reward"], label="mean nasimemu reward", marker=".")
+    if not rollouts["mean_training_reward"].equals(rollouts["mean_nasimemu_reward"]):
+        ax.plot(rollouts["rollout"], rollouts["mean_training_reward"], label="mean training reward", alpha=0.7, marker=".")
     ax.axhline(0, color="black", linewidth=0.8, alpha=0.4)
-    ax.set_xlabel("PPO update")
+    ax.set_xlabel("Rollout")
     ax.set_ylabel("Mean reward per step")
     ax.set_title("Reward over training")
     ax.legend()
@@ -429,20 +489,22 @@ def _plot_optimization_diagnostics(updates: pd.DataFrame, plots_dir: Path) -> li
 
 
 def _plot_advice_influence(decisions: pd.DataFrame, plots_dir: Path) -> list[Path]:
-    queried = decisions[decisions["queried"] == True]  # noqa: E712 (pandas bool comparison)
-    if queried.empty or queried["beta"].isna().all():
+    """Trust weight and top-action-change rate, over *accepted* advice only
+    (see :func:`_accepted_advice_rows`)."""
+    accepted = _accepted_advice_rows(decisions)
+    if accepted.empty or accepted["beta"].isna().all():
         return []  # baseline variant (or a run with no accepted advice): nothing to show
 
-    window = max(1, min(20, len(queried)))
+    window = max(1, min(20, len(accepted)))
     fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(10, 4))
 
-    ax1.plot(range(len(queried)), queried["beta"].rolling(window, min_periods=1).mean())
-    ax1.set_xlabel("Queried decision (in collection order)")
-    ax1.set_ylabel(f"Mean beta (rolling, window={window})")
-    ax1.set_title("Advice trust weight over training")
+    ax1.plot(range(len(accepted)), accepted["beta"].rolling(window, min_periods=1).mean())
+    ax1.set_xlabel("Accepted-advice decision (in collection order)")
+    ax1.set_ylabel(rf"Mean $\beta$ (rolling, window={window})")
+    ax1.set_title(r"Advice trust weight $\beta$ over training")
     ax1.grid(alpha=0.3)
 
-    changed = queried["advice_changed_top_action"].dropna().astype(float)
+    changed = accepted["advice_changed_top_action"].dropna().astype(float)
     if not changed.empty:
         ax2.plot(range(len(changed)), changed.rolling(window, min_periods=1).mean(), color="tab:green")
     ax2.set_xlabel("Accepted-advice decision (in collection order)")
@@ -566,3 +628,196 @@ def _plot_query_decision_analysis(decisions: pd.DataFrame, plots_dir: Path) -> l
     ax2.set_title("Query probability vs. base policy entropy")
     ax2.grid(alpha=0.3)
     return [_save(fig, plots_dir / "query_decision_analysis.png")]
+
+
+def _plot_rollout_timing(rollouts: pd.DataFrame, plots_dir: Path) -> list[Path]:
+    """Where rollout wall-clock time actually goes -- environment/rollout
+    collection vs. PPO optimization vs. periodic evaluation (spec section
+    17). Plan Maker latency is never a separate term here: it is already
+    included in collection_seconds (a consultation happens *during*
+    collection, see learning/rollout.py's ``_decide``), never in
+    optimization_seconds (PPO replay never calls the Plan Maker at all).
+    """
+    if "collection_seconds" not in rollouts.columns:
+        return []
+    fig, ax = plt.subplots(figsize=(8, 4.5))
+    ax.plot(rollouts["rollout"], rollouts["collection_seconds"], label="collection (env + Plan Maker)", marker=".")
+    ax.plot(rollouts["rollout"], rollouts["optimization_seconds"], label="PPO optimization", marker=".")
+    if rollouts["evaluation_seconds"].notna().any():
+        ax.plot(rollouts["rollout"], rollouts["evaluation_seconds"], label="periodic evaluation", marker=".")
+    ax.set_xlabel("Rollout")
+    ax.set_ylabel("Seconds")
+    ax.set_title("Rollout wall-clock time breakdown")
+    ax.legend()
+    ax.grid(alpha=0.3)
+    return [_save(fig, plots_dir / "rollout_timing.png")]
+
+
+def _plot_critic_quality(decisions: pd.DataFrame, plots_dir: Path) -> list[Path]:
+    r"""Is the critic well-calibrated? ``critic_value`` ($V_t$, predicted at
+    collection time) vs. ``return_target`` ($R_t$, the GAE-derived target it
+    was trained toward) -- points near the y=x line mean $V_t \approx R_t$.
+    """
+    if "critic_value" not in decisions.columns or "return_target" not in decisions.columns:
+        return []
+    fig, ax = plt.subplots(figsize=(6, 6))
+    ax.scatter(decisions["return_target"], decisions["critic_value"], s=6, alpha=0.15, color="tab:blue")
+    lo = min(decisions["return_target"].min(), decisions["critic_value"].min())
+    hi = max(decisions["return_target"].max(), decisions["critic_value"].max())
+    ax.plot([lo, hi], [lo, hi], color="black", linestyle="--", linewidth=1, label=r"$V_t = R_t$")
+    ax.set_xlabel(r"Return target $R_t$")
+    ax.set_ylabel(r"Critic value $V_t$")
+    ax.set_title(r"Critic calibration: predicted value $V_t$ vs. GAE return target $R_t$")
+    ax.legend()
+    ax.grid(alpha=0.3)
+    return [_save(fig, plots_dir / "critic_quality.png")]
+
+
+def _plot_reward_vs_credit_assignment(decisions: pd.DataFrame, plots_dir: Path) -> list[Path]:
+    """Immediate reward vs. the credit PPO actually assigned the step
+    (``gae_advantage``) -- the interesting quadrant is negative reward with
+    positive advantage: an immediately costly step (e.g. a paid
+    consultation, or a failed exploit attempt) that GAE still credits
+    because it led to later success.
+    """
+    if "gae_advantage" not in decisions.columns:
+        return []
+    fig, ax = plt.subplots(figsize=(7, 5.5))
+    negative_reward_positive_advantage = (decisions["training_reward"] < 0) & (decisions["gae_advantage"] > 0)
+    ax.scatter(
+        decisions.loc[~negative_reward_positive_advantage, "training_reward"],
+        decisions.loc[~negative_reward_positive_advantage, "gae_advantage"],
+        s=6, alpha=0.15, color="tab:gray", label="other",
+    )
+    ax.scatter(
+        decisions.loc[negative_reward_positive_advantage, "training_reward"],
+        decisions.loc[negative_reward_positive_advantage, "gae_advantage"],
+        s=10, alpha=0.4, color="tab:red", label="negative reward, positive advantage",
+    )
+    ax.axhline(0, color="black", linewidth=0.8, alpha=0.4)
+    ax.axvline(0, color="black", linewidth=0.8, alpha=0.4)
+    ax.set_xlabel("Training reward (this step)")
+    ax.set_ylabel("GAE advantage")
+    ax.set_title("Reward vs. credit assignment")
+    ax.legend(fontsize="small")
+    ax.grid(alpha=0.3)
+    return [_save(fig, plots_dir / "reward_vs_credit_assignment.png")]
+
+
+def _plot_action_type_distribution(decisions: pd.DataFrame, plots_dir: Path) -> list[Path]:
+    """How the mix of chosen action types (scan / exploit / privilege
+    escalation / finish / ...) shifts over training -- e.g. a policy that
+    starts by scanning almost everything and gradually shifts toward
+    exploiting/escalating as it learns is a qualitatively different
+    learning curve than raw return alone can show.
+    """
+    if "selected_action_type" not in decisions.columns:
+        return []
+    x_col = "rollout" if "rollout" in decisions.columns and decisions["rollout"].notna().any() else None
+    if x_col is None:
+        return []
+    fractions = (
+        decisions.groupby(x_col)["selected_action_type"]
+        .value_counts(normalize=True)
+        .unstack("selected_action_type")
+        .fillna(0.0)
+        .sort_index()
+    )
+    fig, ax = plt.subplots(figsize=(9, 4.5))
+    bottom = np.zeros(len(fractions))
+    for action_type in fractions.columns:
+        ax.bar(fractions.index, fractions[action_type], bottom=bottom, label=action_type, alpha=0.85)
+        bottom += fractions[action_type].to_numpy()
+    ax.set_xlabel("Rollout")
+    ax.set_ylabel("Fraction of decisions")
+    ax.set_ylim(0, _RATE_YLIM[1])
+    ax.set_title("Action-type distribution over training")
+    ax.legend(loc="upper left", bbox_to_anchor=(1.0, 1.0), fontsize="small")
+    ax.grid(alpha=0.3)
+    return [_save(fig, plots_dir / "action_type_distribution.png")]
+
+
+def _plot_finish_efficiency(episodes: pd.DataFrame, plots_dir: Path) -> list[Path]:
+    """Goal/finish timing (spec section 5): when the objective first became
+    satisfied (``steps_to_goal``) vs. when the agent actually selected
+    FINISH (``finish_step``) vs. the gap between them
+    (``finish_delay_steps``) -- distinct from episode_efficiency.png's
+    steps_to_goal panel, which doesn't show the finish-timing side at all.
+    """
+    if "finish_step" not in episodes.columns or "finish_delay_steps" not in episodes.columns:
+        return []
+    train, _eval_, x_col = _split_train_eval(episodes)
+    x_label = "Rollout" if x_col == "rollout" else "Episode"
+    successful = train[train["goal_success"] == True]  # noqa: E712
+    if successful.empty:
+        return []
+
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(10, 4))
+    for column, label, color in (
+        ("steps_to_goal", "steps to goal", "tab:blue"),
+        ("finish_step", "finish step", "tab:orange"),
+    ):
+        x, mean, band = _grouped_mean_and_band(successful, x_col, column)
+        ax1.plot(x, mean, label=label, color=color, marker=".")
+        ax1.fill_between(x, (mean - band).clip(min=0), mean + band, color=color, alpha=0.15)
+    ax1.set_xlabel(x_label)
+    ax1.set_ylabel("Environment step")
+    ax1.set_title("Goal reached vs. FINISH selected\n(successful episodes only)")
+    ax1.legend()
+    ax1.grid(alpha=0.3)
+
+    x, mean, band = _grouped_mean_and_band(successful, x_col, "finish_delay_steps")
+    ax2.plot(x, mean, color="tab:green", marker=".")
+    ax2.fill_between(x, (mean - band).clip(min=0), mean + band, color="tab:green", alpha=0.2)
+    ax2.set_xlabel(x_label)
+    ax2.set_ylabel("FINISH step minus steps to goal")
+    ax2.set_title("FINISH delay after goal reached\n(successful episodes only)")
+    ax2.grid(alpha=0.3)
+    return [_save(fig, plots_dir / "finish_efficiency.png")]
+
+
+def _plot_assisted_policy_influence(decisions: pd.DataFrame, plots_dir: Path) -> list[Path]:
+    """Base vs. final policy confidence, for accepted advice only (see
+    :func:`_accepted_advice_rows`) -- does consultation actually sharpen
+    (lower entropy) or reshape (lower selected-action probability at the
+    base policy, higher at the final one) the decision, on top of
+    advice_influence.png's beta/top-action-change view.
+    """
+    if "final_policy_entropy" not in decisions.columns:
+        return []
+    accepted = _accepted_advice_rows(decisions)
+    if accepted.empty:
+        return []
+
+    window = max(1, min(20, len(accepted)))
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(10, 4))
+
+    ax1.plot(
+        range(len(accepted)), accepted["base_policy_entropy"].rolling(window, min_periods=1).mean(),
+        label="base entropy", color="tab:gray",
+    )
+    ax1.plot(
+        range(len(accepted)), accepted["final_policy_entropy"].rolling(window, min_periods=1).mean(),
+        label="final entropy", color="tab:purple",
+    )
+    ax1.set_xlabel("Queried decision (in collection order)")
+    ax1.set_ylabel(f"Entropy (rolling, window={window})")
+    ax1.set_title("Base vs. final policy entropy\n(queried decisions)")
+    ax1.legend()
+    ax1.grid(alpha=0.3)
+
+    ax2.plot(
+        range(len(accepted)), accepted["selected_action_base_probability"].rolling(window, min_periods=1).mean(),
+        label="base probability", color="tab:gray",
+    )
+    ax2.plot(
+        range(len(accepted)), accepted["selected_action_final_probability"].rolling(window, min_periods=1).mean(),
+        label="final probability", color="tab:purple",
+    )
+    ax2.set_xlabel("Queried decision (in collection order)")
+    ax2.set_ylabel(f"P(selected action) (rolling, window={window})")
+    ax2.set_ylim(*_RATE_YLIM)
+    ax2.set_title("Selected-action probability shift\n(queried decisions)")
+    ax2.legend()
+    ax2.grid(alpha=0.3)
+    return [_save(fig, plots_dir / "assisted_policy_influence.png")]

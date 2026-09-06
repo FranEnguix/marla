@@ -1,8 +1,18 @@
 # research/aamas2027 -- MARLA_FULL condition, training seed 303.
 #
+# SCENARIO MIGRATION (see manifest.yaml's latest revision note and
+# src/marla/scenarios/solvable/README.md): environment.scenario now points
+# at MARLA's repaired, universally-solvable copy of this scenario
+# (src/marla/scenarios/solvable/sm_entry_user_three_subnets.solvable.v2.yaml),
+# not the original NASimEmu/scenarios/sm_entry_user_three_subnets.v2.yaml
+# (`marla scenario check` proves the original is not universally solvable).
+# No MARLA_FULL run has been executed under this or any prior scenario
+# yet, so this is a plain update, not a provenance concern -- see
+# ppo_only_seed303.yaml's comment for the seeds where it is one.
+#
 # Every PPO/architecture hyperparameter and every Plan Maker setting below
 # is copied verbatim from examples/assisted.yaml. Deltas from that file:
-#   - environment.scenario: sm_entry_dmz_two_subnets.v2.yaml (absolute
+#   - environment.scenario: sm_entry_user_three_subnets.v2.yaml (absolute
 #     path), not sm_entry_dmz_one_subnet.v2.yaml -- see
 #     ppo_only_seed303.yaml's comment / AUDIT.md section 7.1.
 #   - ppo.total_environment_steps: 5000 -- Stage A of a staged-training
@@ -52,7 +62,7 @@ xmpp:
 
 environment:
   mode: simulation
-  scenario: /home/ubuntu/work/marla/NASimEmu/scenarios/sm_entry_dmz_two_subnets.v2.yaml
+  scenario: /home/ubuntu/work/marla/src/marla/scenarios/solvable/sm_entry_user_three_subnets.solvable.v2.yaml
   max_episode_steps: 100
 
 objective:

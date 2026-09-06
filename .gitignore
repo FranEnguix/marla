@@ -217,6 +217,7 @@ runs/
 runs_*/
 debug/
 debug_*/
+research/
 
 # Generated evaluation output, not source (see
 # research/aamas2027/scripts/evaluate_checkpoint.py and raw/README.md)

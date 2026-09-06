@@ -22,7 +22,7 @@ def test_help():
 def test_version_command():
     result = runner.invoke(app, ["version"])
     assert result.exit_code == 0
-    assert "marla 0.1.0" in result.output
+    assert "marla 0.2.0" in result.output
 
 
 def test_validate_baseline_ok(baseline_config_path):
@@ -49,6 +49,26 @@ def test_run_assisted_local_fails_cleanly_without_password_env(assisted_config_p
     # config's model would trigger a real (large) download. Here we only
     # check that a missing password_env fails fast and cleanly -- before any
     # heavy model loading -- rather than leaking an unhandled exception.
+    #
+    # examples/assisted.yaml's bundled scenario is not (yet) universally
+    # solvable (see marla.scenario.solvability's analysis of
+    # sm_entry_user_three_subnets.v2.yaml -- a real, separate finding this
+    # test is not about), so the new preflight check would otherwise be the
+    # first thing to fail here instead of the password check this test
+    # exists to cover -- stub it out to keep this test focused.
+    from marla.scenario.models import ScenarioSolvabilityResult, SolvabilityStatus
+
+    monkeypatch.setattr(
+        "marla.cli.preflight_check",
+        lambda config, config_dir, scenario_path: ScenarioSolvabilityResult(
+            status=SolvabilityStatus.PROVEN_SOLVABLE,
+            universally_solvable=True,
+            scenario_path=scenario_path,
+            scenario_format="v2",
+            objective="capture_target",
+            randomized=True,
+        ),
+    )
     for var in ("MARLA_RL_ORCHESTRATOR_PASSWORD", "MARLA_GATEKEEPER_PASSWORD", "MARLA_PLAN_MAKER_1_PASSWORD"):
         monkeypatch.delenv(var, raising=False)
 
@@ -175,7 +195,11 @@ def test_summarize_prints_stats_and_generates_plots(tmp_path):
 
     assert result.exit_code == 0
     assert "episodes:" in result.output
-    assert "goal success rate:" in result.output
+    # "goal success rate" was renamed to "successful finish rate", reported
+    # alongside the new, distinct "objective reached rate" (spec sections
+    # 20/25: objective_reached must not be conflated with successful_finish).
+    assert "objective reached rate:" in result.output
+    assert "successful finish rate:" in result.output
     plots_dir = run_dir / "plots"
     assert plots_dir.is_dir()
     written_files = {p.name for p in plots_dir.glob("*.png")}
@@ -196,18 +220,15 @@ def test_summarize_prints_stats_and_generates_plots(tmp_path):
 
 
 def test_init_creates_valid_baseline_and_assisted_templates(tmp_path, monkeypatch):
-    # No NASimEmu findable from tmp_path: exercises the fallback path and its
-    # warning. The scenario path is then fictional, so this checks schema
-    # validity (parse_config) rather than full load_config, which also
-    # requires the scenario file to exist on disk.
-    import yaml
-
-    from marla.config.loader import parse_config
-
+    # marla init always resolves MARLA's own packaged, pre-validated
+    # solvable scenario (marla.scenarios.solvable_scenario_path) -- it
+    # genuinely exists on disk regardless of CWD or any nearby NASimEmu/
+    # checkout, so this exercises full load_config (schema + on-disk
+    # scenario check), not just parse_config.
     monkeypatch.chdir(tmp_path)
     result = runner.invoke(app, ["init"])
     assert result.exit_code == 0
-    assert "could not find NASimEmu" in result.output
+    assert "could not find NASimEmu" not in result.output
 
     target = tmp_path / "experiment_templates"
     baseline_path = target / "baseline.yaml"
@@ -215,18 +236,36 @@ def test_init_creates_valid_baseline_and_assisted_templates(tmp_path, monkeypatc
     assert baseline_path.exists()
     assert assisted_path.exists()
 
-    baseline_config = parse_config(yaml.safe_load(baseline_path.read_text(encoding="utf-8")))
+    baseline_config = load_config(baseline_path)
     assert baseline_config.execution.mode == "local"
     assert baseline_config.consultation.mode == "disabled"
+    assert baseline_config.policy.recurrent.sequence_length == 64
+    assert baseline_config.policy.ppo.optimizer.eps == pytest.approx(1.0e-5)
+    assert baseline_config.policy.ppo.learning_rate_schedule == "linear"
+    assert "sm_entry_user_three_subnets.solvable.v2.yaml" in baseline_config.environment.scenario
+    assert "scenarios/solvable/" in baseline_config.environment.scenario
 
-    assisted_config = parse_config(yaml.safe_load(assisted_path.read_text(encoding="utf-8")))
+    assisted_config = load_config(assisted_path)
     assert assisted_config.consultation.mode == "learned"
+    assert assisted_config.policy.recurrent.sequence_length == 64
     assert assisted_config.gatekeeper is not None
     assert len(assisted_config.agents) == 1
 
 
-def test_init_resolves_absolute_scenario_path_when_nasimemu_is_found(tmp_path, monkeypatch):
-    nasim_scenario = tmp_path / "NASimEmu" / "scenarios" / "sm_entry_dmz_one_subnet.v2.yaml"
+def test_init_always_uses_marla_owned_scenario_regardless_of_a_nearby_nasimemu_checkout(tmp_path, monkeypatch):
+    """marla init must resolve the MARLA-owned, pre-validated scenario
+    (marla.scenarios.solvable_scenario_path) even from a directory that
+    happens to have its own (irrelevant, and in this fixture also
+    unsolvable-shaped) NASimEmu/scenarios/ checkout nearby -- unlike the
+    old filesystem-search behavior, which would have found and used that
+    local (and, for the real bundled scenario, NOT universally solvable)
+    file instead. See marla.scenarios' own docstring for why this
+    guarantee only holds for a MARLA-owned scenario, never a filesystem
+    search.
+    """
+    from marla.scenarios import solvable_scenario_path
+
+    nasim_scenario = tmp_path / "NASimEmu" / "scenarios" / "sm_entry_user_three_subnets.v2.yaml"
     nasim_scenario.parent.mkdir(parents=True)
     nasim_scenario.write_text("placeholder", encoding="utf-8")
 
@@ -238,14 +277,14 @@ def test_init_resolves_absolute_scenario_path_when_nasimemu_is_found(tmp_path, m
     assert result.exit_code == 0
     assert "could not find NASimEmu" not in result.output
 
+    expected_scenario = solvable_scenario_path("sm_entry_user_three_subnets.solvable.v2.yaml")
     baseline_path = workdir / "experiment_templates" / "baseline.yaml"
     content = baseline_path.read_text(encoding="utf-8")
-    assert f"scenario: {nasim_scenario}" in content
+    assert f"scenario: {expected_scenario}" in content
+    assert str(nasim_scenario) not in content
 
-    # The scenario file genuinely exists here, so this exercises full
-    # load_config (schema + on-disk scenario check), not just parse_config.
     config = load_config(baseline_path)
-    assert str(nasim_scenario) in config.environment.scenario
+    assert str(expected_scenario) == config.environment.scenario
 
 
 def test_init_refuses_to_overwrite_without_force(tmp_path, monkeypatch):

@@ -67,7 +67,12 @@ def resolve_debug_dir(config: Config, run_id: str) -> Path:
 
 
 async def _build_and_run(
-    config: Config, config_dir: Path, num_rollouts: int, debug: bool = False, resume_from: Path | None = None
+    config: Config,
+    config_dir: Path,
+    num_rollouts: int,
+    debug: bool = False,
+    resume_from: Path | None = None,
+    run_dir: Path | None = None,
 ) -> "object":
     from marla.agents.gatekeeper import GatekeeperAgent
     from marla.agents.orchestrator import RLOrchestratorAgent
@@ -121,6 +126,7 @@ async def _build_and_run(
         max_episode_steps=config.environment.max_episode_steps,
         completion_reward=config.objective.completion_reward,
         premature_finish_penalty=config.objective.premature_finish_penalty,
+        premature_finish_penalty_per_remaining_target=config.objective.premature_finish_penalty_per_remaining_target,
     )
 
     required_participants: dict[str, str] = {}
@@ -192,6 +198,7 @@ async def _build_and_run(
         gatekeeper_alias=config.gatekeeper.alias if config.gatekeeper else None,
         gatekeeper_jid=config.gatekeeper.jid if config.gatekeeper else None,
         stop_event=stop_event,
+        run_dir=run_dir,
     )
 
     for agent in support_agents:
@@ -208,6 +215,7 @@ def run_local(
     embedded_xmpp_server: bool = True,
     debug: bool = False,
     resume_from: Path | None = None,
+    run_dir: Path | None = None,
 ):
     """Run a local-mode experiment; blocks until the RL Orchestrator finishes.
 
@@ -235,7 +243,7 @@ def run_local(
     async def main() -> None:
         try:
             result["orchestrator"] = await _build_and_run(
-                config, config_dir, num_rollouts, debug=debug, resume_from=resume_from
+                config, config_dir, num_rollouts, debug=debug, resume_from=resume_from, run_dir=run_dir
             )
         except Exception as exc:
             # SPADE's container.run() swallows exceptions raised in main()

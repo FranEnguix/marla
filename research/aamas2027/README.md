@@ -13,16 +13,45 @@ real compute), *completed* (finished, artifacts exist on disk). Never
 conflated -- see the final summary given alongside this deliverable set for
 which experiments are currently in which state.
 
-**Current status (manifest.yaml v4 -- staged training)**: 50k/20k/15k-step
+**Current status (manifest.yaml v7)**: the primary/ID training scenario is
+now MARLA's own repaired, universally-solvable copy,
+`src/marla/scenarios/solvable/sm_entry_user_three_subnets.solvable.v2.yaml`
+(see that directory's `README.md` and `docs/scenario_solvability.rst`).
+`marla scenario check` proved the previous scenario
+(`NASimEmu/scenarios/sm_entry_user_three_subnets.v2.yaml`, used by v5/v6)
+is **not universally solvable**: a sensitive Windows host can legally be
+generated with only USER-level exploitable services and no compatible ROOT
+privilege escalation. All 6 `configs/*.yaml` now point at the repaired
+scenario for their *next* execution.
+
+**PPO_ONLY seeds 101/202/303 ARE already executed (v6), under the OLD,
+unsolvable scenario** -- see `runs/aamas2027_ppo_only/`. Per
+`manifest.yaml`'s v7 note and each run's `status:
+PILOT_INVALID_UNSOLVABLE_SCENARIO` entry, **these three runs are PILOT /
+INVALID FOR FINAL COMPARISON / UNSOLVABLE SOURCE SCENARIO** -- their
+artifacts are preserved unmodified (never rewritten to pretend they used
+the repaired scenario) and remain valid evidence for the FINISH-collapse
+investigation that used them (`research/aamas2027/investigation/`), but
+must not be presented as, or silently mixed into, a final scientific
+comparison. `analyze.py`'s `learning_curve` already skips any run whose
+manifest entry carries a `status`; apply the same check in any new
+analysis script that discovers run directories automatically. **No
+MARLA_FULL run has been executed under any scenario yet** -- its configs
+needed only the scenario-field update, no provenance annotation.
+
+Re-running PPO_ONLY (and then MARLA_FULL) against the repaired scenario,
+and separately investigating PPO *learnability* on it (a different
+question from structural solvability -- see
+`docs/scenario_solvability.rst`), are both future work, not done as part
+of the scenario-repair task that produced this note. 50k/20k/15k-step
 MARLA_FULL training is off the table for this paper's timeline (real pilot
-measurement: ~13.5 days/seed at 50k). Training now proceeds in stages --
-Stage A is 5,000 steps, extending to Stage B (10,000, via `marla run
+measurement, pre-v5 scenario: ~13.5 days/seed at 50k). Training proceeds
+in stages -- Stage A is 5,000 steps (the `total_environment_steps` already
+set in `configs/*.yaml`), extending to Stage B (10,000, via `marla run
 --resume`, never from scratch) only with explicit approval after Stage A's
-interim report. `runs/aamas2027_ppo_only/ppo-only-seed-101` already holds
-a real, verified-matching 5,000-step Stage A result (reused as-is).
-`runs/aamas2027_marla_full/marla-full-seed-101` holds nothing on disk (the
-pilot measurement pass was killed before writing anything) -- Stage A for
-MARLA_FULL has not been launched. See `VALIDATION.md` and the final
+interim report; no Stage B config exists yet (create one, identical to
+Stage A except `total_environment_steps: 10000` and a distinct `run_id`,
+when that approval is given). See `VALIDATION.md` and the final
 summary for the launch decision.
 
 ## Layout
@@ -119,21 +148,30 @@ python research/aamas2027/scripts/evaluate_checkpoint.py \
   --out-dir research/aamas2027/raw/eval/PPO_ONLY/seed-101
 ```
 
-## Reproduce: OOD evaluation (harder-DMZ scenario)
+## Reproduce: OOD evaluation
+
+v5's OOD pair (see manifest.yaml's revision history and
+scenario_manifest.csv -- reclassified when the ID scenario changed, and
+**not independently re-verified for loadability/steppability against a
+policy trained on the new ID scenario** the way the v1 pairing originally
+was; do that -- load + step a handful of times -- before committing to a
+full evaluation run): `md_entry_user_three_subnets.v2.yaml` (harder,
+same user-subnet entry as the new ID) and `sm_entry_dmz_two_subnets.v2.yaml`
+(entry/topology shift -- this is the *former* ID scenario).
 
 ```bash
 python research/aamas2027/scripts/evaluate_checkpoint.py \
   --run-dir runs/aamas2027_marla_full/marla-full-seed-101 \
   --condition MARLA_FULL_NORMAL \
-  --scenario "$(pwd)/NASimEmu/scenarios/sm_entry_dmz_three_subnets.v2.yaml" \
+  --scenario "$(pwd)/NASimEmu/scenarios/md_entry_user_three_subnets.v2.yaml" \
   --seed-start 6001 --num-episodes 3 \
   --training-seed 101 --id-or-ood OOD \
   --cache research/aamas2027/raw/advisory_cache.jsonl \
-  --out-dir research/aamas2027/raw/eval/MARLA_FULL_NORMAL__OOD_dmz_three_subnets/seed-101
+  --out-dir research/aamas2027/raw/eval/MARLA_FULL_NORMAL__OOD_md_entry_user_three_subnets/seed-101
 ```
 
-Repeat with `sm_entry_user_three_subnets.v2.yaml` and output directory
-suffix `OOD_user_three_subnets` for the second OOD scenario, and with
+Repeat with `sm_entry_dmz_two_subnets.v2.yaml` and output directory
+suffix `OOD_dmz_two_subnets` for the second OOD scenario, and with
 `--condition PPO_ONLY` (no `--cache` needed) for the PPO_ONLY baseline.
 
 ## Reproduce: the main inference ablation (MARLA_FULL_NO_QUERY)

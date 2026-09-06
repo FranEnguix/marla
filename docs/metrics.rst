@@ -7,6 +7,30 @@ Every run writes a self-contained directory:
 completed, was stopped by the user, or failed. All of it is produced by
 :mod:`marla.metrics.writer`.
 
+Incremental persistence
+--------------------------
+
+Results are written *as training progresses*, not only at the very end:
+``config.yaml`` and a provisional ``metadata.json`` (``status: "running"``)
+exist before a single environment step runs
+(:func:`marla.metrics.writer.initialize_run_directory`), and every CSV
+below gets its header row at the same time. After each completed rollout,
+that rollout's episode/decision/rollout/update rows are appended
+immediately (:func:`marla.metrics.writer.append_rollout_metrics`), and
+``checkpoint_last.pt`` is overwritten. Only ``summary.json``, the final
+``metadata.json`` (with ``end_time``/final ``status``), and
+``checkpoint.pt`` are written once, at shutdown
+(:func:`marla.metrics.writer.finalize_run_directory`). This is what makes
+an interrupted long run's results usable: a process killed hard mid-run
+still leaves every completed rollout's data on disk, not just whatever
+happened to be in memory at the moment of the crash.
+
+This module also keeps memory bounded independent of run length: each
+rollout's heavyweight per-step records (graph tensors, logits, ...) are
+used only to compute GAE and run the PPO update, then immediately turned
+into that rollout's compact ``decisions.csv`` rows and discarded -- nothing
+resembling a full-run list of per-step tensors is ever retained.
+
 Run directory contents
 ------------------------
 
@@ -24,57 +48,146 @@ Run directory contents
 ``episodes.csv``
     One row per episode -- both ordinary training episodes and, if
     ``metrics.eval_episodes > 0``, deterministic evaluation episodes
-    (tagged via ``is_eval``). Columns include ``goal_success``,
+    (tagged via ``is_eval``). Columns include ``objective_reached``,
+    ``successful_finish``, ``episode_success``, ``goal_success`` (see the
+    success-semantics note below),
     ``nasimemu_return``/``training_return``/``benchmark_return``,
-    ``environment_steps``, ``steps_to_goal``, ``consultation_count``/``consultation_cost``,
-    ``schema_rejection_count``, ``finish_reason``, and ``rollout`` (which
-    training rollout produced -- or immediately followed, for an eval
-    episode -- this row, so returns can be bucketed by training progress
-    rather than raw episode index).
+    ``environment_steps``, ``steps_to_goal`` (first step the objective
+    became satisfied, whether or not/whenever FINISH was later selected),
+    ``finish_step`` (the step FINISH was actually selected),
+    ``finish_delay_steps`` (``finish_step - steps_to_goal``, only for a
+    ``successful_finish`` episode where both exist), ``sensitive_targets_total``
+    / ``sensitive_targets_with_root_final`` / ``sensitive_targets_remaining_final``
+    (the simulator's real sensitive-target state at episode end, a direct
+    query rather than a running/cached value -- correct however the episode
+    ended, since FINISH itself performs no simulator action),
+    ``consultation_count``/``consultation_cost``, ``schema_rejection_count``,
+    ``finish_reason``, and ``rollout`` (which training rollout produced --
+    or immediately followed, for an eval episode -- this row, so returns
+    can be bucketed by training progress rather than raw episode index).
+
+    **Success semantics -- three related but distinct fields, never
+    conflated:**
+
+    - ``objective_reached``: true the instant ``adapter.objective_satisfied()``
+      first becomes true (all sensitive targets rooted), independent of
+      FINISH entirely. Equivalent to ``steps_to_goal is not None``.
+    - ``successful_finish``: true only if the policy *additionally* selected
+      FINISH while the objective held. A timeout after the objective was
+      reached is ``objective_reached=True`` but ``successful_finish=False``
+      -- a real, important diagnostic case (Stage A undertraining can look
+      very different from "never found a solution at all"), not a plain
+      failure indistinguishable from never reaching the objective.
+    - ``episode_success``: MARLA's protocol defines a successful episode as
+      an explicit FINISH after the objective holds, so this is always
+      identical to ``successful_finish`` -- kept as an explicitly-named
+      synonym so a reader doesn't have to know that definition already.
+    - ``goal_success``: **deprecated**, kept only for backward compatibility
+      with existing analysis code. Identical to ``successful_finish``,
+      never to ``objective_reached`` -- new code should read
+      ``successful_finish``/``episode_success`` instead.
+
+    ``steps_to_goal`` and ``finish_step`` are tracked independently: the
+    agent can satisfy the objective and keep acting for several more steps
+    before finally choosing FINISH (or never choose it at all, timing out
+    instead) -- MARLA's fundamental rule that a successful episode requires
+    an explicit FINISH is unchanged, ``successful_finish``/``episode_success``/
+    ``goal_success`` all still require it; only ``objective_reached`` does not.
 
 ``decisions.csv``
     One row per environment step (omitted if
-    ``metrics.record_decisions: false``) -- the full compound-decision
-    record: whether this step was queried, the request/response status and
-    latency, base vs. Plan Maker vs. final top action and their ranks,
-    ``beta``/``alpha``, whether accepted advice changed the top action, and
-    the reward/termination outcome. This is the ground truth for
-    understanding *when* and *how much* the query gate and trust head are
-    actually doing.
+    ``metrics.record_decisions: false``). Identity/progress columns
+    (``global_environment_step``, ``rollout``, ``episode_id``,
+    ``environment_step``, ``observation_id``); action-space
+    (``legal_action_count``, ``selected_action_id``,
+    ``selected_action_type``); policy confidence, computed once from the
+    logits available at that step -- never a stored full probability
+    vector (``base_policy_entropy``, ``base_top_two_margin``,
+    ``selected_action_base_probability``/``selected_action_final_probability``,
+    their ranks, ``final_policy_entropy``); critic/credit assignment
+    (``critic_value``, ``gae_advantage``, ``return_target``); rewards
+    (``nasimemu_reward``, ``training_reward``, ``consultation_cost``);
+    objective/episode state (``objective_satisfied``,
+    ``objective_became_satisfied`` -- true exactly on the step the
+    objective first becomes satisfied -- ``terminated``, ``truncated``);
+    observable state change since the previous step, derived from a cheap
+    scalar diff of the two ``HostVector`` snapshots, never a stored
+    observation (``new_hosts_discovered``, ``new_subnets_discovered``,
+    ``new_services_confirmed``, ``new_processes_confirmed``,
+    ``access_gain`` -- 0/1/2 for none/USER/ROOT); sensitive-target progress,
+    a direct query of the underlying simulator's current state rather than
+    anything stored (``sensitive_targets_total``, ``sensitive_targets_with_root``,
+    ``sensitive_targets_remaining`` -- USER access does not count as
+    "with root"; feeds ``objective.premature_finish_penalty_per_remaining_target``);
+    and, for the assisted variant only (``null`` in the baseline): whether/how this step was
+    queried, the request/response status and latency, base vs. Plan Maker
+    vs. final top action, ``beta``/``alpha``, and whether accepted advice
+    changed the top action.
+
+``rollouts.csv``
+    One row per completed rollout: ``environment_steps_total`` (the main
+    training-progress x-axis), ``steps_collected``, ``episodes_finished``,
+    reward/critic/advantage statistics (mean and, where meaningful, std)
+    over that rollout's steps, query-gate aggregates (``mean_query_probability``,
+    ``actual_query_rate``, ``mean_beta`` -- ``null`` in the baseline), and
+    wall-clock timing (``collection_seconds``, ``optimization_seconds``,
+    ``evaluation_seconds``). Every rollout-level aggregate lives here
+    exactly once -- ``updates.csv`` no longer repeats them per minibatch.
 
 ``updates.csv``
-    One row per PPO gradient step: losses, entropies, KL, clip fraction,
-    explained variance, gradient norm, learning rate, and per-rollout
-    aggregates (mean beta, mean/actual query rate).
+    One row per PPO minibatch update: ``update``, ``rollout``, ``epoch``,
+    ``minibatch`` (so a row maps back to exactly which PPO replay pass
+    produced it), ``environment_steps``, losses, entropies,
+    ``approximate_kl``, ``clip_fraction``, ``explained_variance``,
+    ``gradient_norm``, and the actual current ``learning_rate`` (reflecting
+    the configured schedule, see :doc:`configuration`).
 
 ``summary.json``
-    Aggregate statistics computed from the above: episode/goal-success
-    rate (with a 95% Wilson-score confidence interval -- more reliable
-    than a normal approximation when the rate is near 0 or 1, which a
-    short run's episode count often is), premature-finish and timeout
-    rates, mean/median return, consultation totals and rates (including
-    queries-per-successful-episode and the Gatekeeper's advice-acceptance
-    rate), Plan Maker latency (mean/median/p95/max), advice-changed-top-
-    action rate, and (when eval episodes ran) their own separate
-    aggregates.
+    Aggregate statistics computed from the above, without ever holding a
+    full-run list of per-step records in memory (see "Incremental
+    persistence" above): ``objective_reached_rate`` and
+    ``successful_finish_rate`` are always reported as two separate numbers
+    (each with its own 95% Wilson-score confidence interval) -- never
+    collapsed into one, since they answer different questions (see
+    ``episodes.csv``'s success-semantics note above). ``goal_success_rate``
+    is kept, deprecated, identical to ``successful_finish_rate``. Also:
+    premature-finish and timeout rates,
+    mean/median return, mean/median ``finish_delay_steps`` and mean
+    successful ``steps_to_goal``, action-type frequencies, consultation
+    totals and rates (including queries-per-successful-episode and the
+    Gatekeeper's advice-acceptance rate), Plan Maker latency
+    (mean/median/p95/max), advice-changed-top-action rate, rollout timing
+    totals, and (when eval episodes ran) their own separate aggregates.
 
-``checkpoint.pt``
-    The final policy + optimizer state (only written once training
-    actually started -- absent if construction failed before that).
-    Load it with :func:`marla.learning.checkpoint.load_checkpoint`.
+``checkpoint_last.pt`` / ``checkpoint_best.pt`` / ``checkpoint.pt``
+    ``checkpoint_last.pt`` is overwritten at every rollout boundary
+    (including intra-run, not just at shutdown) -- the one to use for
+    ``marla run --resume`` after an interrupted run. ``checkpoint_best.pt``
+    exists only when ``metrics.eval_episodes > 0``, and is overwritten only
+    when a periodic evaluation pass beats the running best (goal success
+    rate primary, mean evaluation return as tie-breaker). ``checkpoint.pt``
+    is written once at shutdown, identical to ``checkpoint_last.pt`` at
+    that point -- kept for backward compatibility with tooling that looks
+    for the old, single-checkpoint name. All three are only written once
+    training actually started (absent if construction failed before that),
+    and all three load with :func:`marla.learning.checkpoint.load_checkpoint`.
 
 ``plots/``
     Written by ``marla summarize`` (or directly via
     :func:`marla.metrics.plots.generate_plots`), not by ``marla run``
     itself -- see below.
 
-A handful of spec-listed ``decisions.csv``/``updates.csv`` columns are
-always written empty in this release (not populated, not removed, so the
-schema stays stable): ``schema_revision_count``, ``action_success``,
-``artifact_path``, and per-update ``checkpoint_id`` (there is one
-end-of-run checkpoint, not one per update). See
-:mod:`marla.metrics.writer`'s module docstring for exactly why each one is
-unpopulated.
+A few spec-listed ``decisions.csv`` columns are not populated in this
+release and are omitted from the schema entirely (not written empty):
+``schema_revision_count`` (would need a wire-protocol change to report the
+Gatekeeper's internal revision count back to the RL Orchestrator) and
+``action_success``/``artifact_path`` (NASimEmu doesn't expose a distinct
+success signal separate from reward, and no generic boolean was invented
+in its place). See :mod:`marla.metrics.writer`'s module docstring for
+details. Older run directories written before this schema existed may
+still have these columns (harmlessly ignored) or be missing newer ones
+entirely -- ``marla summarize`` tolerates both, degrading individual plots
+rather than failing outright.
 
 Plots
 -----
@@ -159,11 +272,12 @@ Is Plan Maker consultation actually useful?
     for the baseline variant.
 
 ``query_behavior.png``
-    Mean query probability vs. actual query rate over PPO updates -- a
-    consistently high rate may mean the policy has learned to depend on
-    the Plan Maker; a decreasing rate with stable performance suggests
-    growing autonomy; a near-zero rate from the very start may mean the
-    query gate collapsed prematurely. Skipped for the baseline variant.
+    Mean query probability vs. actual query rate over rollouts (sourced
+    from ``rollouts.csv``, not ``updates.csv``) -- a consistently high rate
+    may mean the policy has learned to depend on the Plan Maker; a
+    decreasing rate with stable performance suggests growing autonomy; a
+    near-zero rate from the very start may mean the query gate collapsed
+    prematurely. Skipped for the baseline variant.
 
 ``query_decision_analysis.png``
     Does the query gate actually ask under uncertainty? Splits base-policy
@@ -201,6 +315,14 @@ Is Plan Maker consultation actually useful?
     and seed, consultation on vs. off), which is outside what a single
     run's plots can show. Skipped when there's no accepted advice.
 
+``assisted_policy_influence.png``
+    Base vs. final policy entropy, and base vs. final probability of the
+    *selected* action, over accepted-advice decisions -- a companion to
+    ``advice_influence.png``'s beta/top-action-change view: does
+    consultation actually sharpen (lower entropy) or reshape confidence in
+    the chosen action, not just occasionally flip the argmax. Skipped when
+    there's no accepted advice.
+
 Is PPO training numerically stable?
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
@@ -222,10 +344,48 @@ Is PPO training numerically stable?
     it alongside KL and task performance.
 
 ``learning_rate.png``
-    Learning rate over PPO updates. Currently always a flat line -- there
-    is no learning-rate scheduler in this release -- but titled explicitly
-    as constant rather than silently omitted, so that remains visible
-    rather than assumed.
+    Actual learning rate over PPO updates, reflecting whichever schedule is
+    configured (``policy.ppo.learning_rate_schedule``, see
+    :doc:`configuration`) -- a flat line for ``constant``, monotonically
+    decreasing toward zero for ``linear``. Titled explicitly as constant
+    when every value is identical, so that remains visible rather than
+    assumed.
+
+``rollout_timing.png``
+    Wall-clock seconds per rollout, split into environment/rollout
+    collection, PPO optimization, and periodic evaluation
+    (``rollouts.csv``'s ``collection_seconds``/``optimization_seconds``/
+    ``evaluation_seconds``). Plan Maker latency is never a separate term:
+    it's already inside collection time (a consultation happens *during*
+    collection), never inside optimization time (PPO replay never calls
+    the Plan Maker).
+
+``critic_quality.png``
+    Scatter of the critic's predicted value (``critic_value``, at
+    collection time) against the GAE return target it was trained toward
+    (``return_target``), with a y=x reference line -- how well-calibrated
+    the critic is, complementing ``ppo_losses.png``'s explained-variance
+    summary statistic with the actual point cloud.
+
+``reward_vs_credit_assignment.png``
+    Immediate ``training_reward`` vs. the credit PPO actually assigned
+    that step (``gae_advantage``), highlighting the negative-reward/
+    positive-advantage quadrant: a step that cost something immediately
+    (a paid consultation, a failed attempt) but that GAE still credits
+    because it led to later success.
+
+``action_type_distribution.png``
+    Stacked bar chart of the fraction of decisions choosing each
+    ``selected_action_type`` (scan / exploit / privilege escalation /
+    finish / ...) per rollout -- shows *how* the policy's behavior shifts
+    over training, not just whether return improves.
+
+``finish_efficiency.png``
+    Mean ``steps_to_goal`` and ``finish_step`` (successful episodes only),
+    plus the gap between them (``finish_delay_steps``) -- distinct from
+    ``episode_efficiency.png``'s steps-to-goal panel, this shows how much
+    the agent lingers after the objective is already satisfied before
+    finally selecting FINISH.
 
 Periodic evaluation
 ----------------------
