@@ -448,9 +448,9 @@ Is the RL policy learning?
     :math:`P(\text{FINISH})` (base policy), restricted to decisions where
     every *currently visible* sensitive target already has ROOT, split by
     ``known_exploration_frontier_remaining_before_action`` -- "targets
-    complete, exploration frontier remains" (orange) vs. "targets
-    complete, no known frontier remains" (green), over training
-    environment steps. Unlike ``finish_probability_by_objective_state.png``
+    complete, an unscanned subnet remains" (orange) vs. "targets complete,
+    no unscanned subnets known" (green), over training environment steps.
+    Unlike ``finish_probability_by_objective_state.png``
     above, this conditions entirely on what the policy has *itself*
     observed, never on hidden simulator truth. The desirable shape is the
     no-frontier curve rising above the frontier-remaining curve (a growing
@@ -463,26 +463,29 @@ Is the RL policy learning?
 
 ``known_subnet_exploration_progress.png``
     ``mean_fraction_known_subnets_scanned`` and, when present,
-    ``known_frontier_remaining_rate``, over training environment steps --
-    a training-health diagnostic for the exploration representation
-    itself (is the policy actually driving the known frontier toward
-    zero, or is exploration effectively stalled), not a claim about true
-    network coverage. y-axis fixed to ``[0, 1]``. Skipped cleanly for a
-    run written before these ``rollouts.csv`` columns existed.
+    ``known_frontier_remaining_rate`` (plotted as "decisions with an
+    unscanned known subnet remaining") -- a training-health diagnostic for
+    the exploration representation itself (is the policy actually driving
+    the known frontier toward zero, or is exploration effectively
+    stalled), not a claim about true network coverage. y-axis fixed to
+    ``[0, 1]``. Skipped cleanly for a run written before these
+    ``rollouts.csv`` columns existed.
 
 Is the learned policy successful and efficient?
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 ``episode_efficiency.png``
-    Three panels, train vs. eval: **goal success rate** (the fraction of
-    episodes that captured every sensitive host -- arguably more
-    understandable than any loss curve, and reported in ``summary.json``
-    with a 95% confidence interval); episode length over *all* episodes
-    (success and failure); and steps-to-goal over *successful* episodes
-    only. Conflating the last two would be misleading -- an agent
-    succeeding in 90% of episodes in 20 steps is better than one
-    succeeding in 90% in 100 steps, and failed episodes shouldn't dilute
-    that comparison.
+    Three panels, train vs. eval: **objective-reached / successful-FINISH
+    rate** (the fraction of episodes that captured every sensitive host,
+    and, separately, that also ended in a successful FINISH -- arguably
+    more understandable than any loss curve, and reported in
+    ``summary.json`` with a 95% confidence interval); episode length over
+    *all* episodes (success and failure); and steps to objective
+    (``steps_to_goal``) over episodes that *reached the objective* (FINISH
+    not required for inclusion -- see the success-semantics note above).
+    Conflating the last two would be misleading -- an agent succeeding in 90% of episodes in
+    20 steps is better than one succeeding in 90% in 100 steps, and failed
+    episodes shouldn't dilute that comparison.
 
 ``episode_outcomes.png``
     Stacked bar chart of *why* each rollout's episodes ended: successful
@@ -629,11 +632,12 @@ Is PPO training numerically stable?
     over training, not just whether return improves.
 
 ``finish_efficiency.png``
-    Mean ``steps_to_goal`` and ``finish_step`` (successful episodes only),
-    plus the gap between them (``finish_delay_steps``) -- distinct from
-    ``episode_efficiency.png``'s steps-to-goal panel, this shows how much
-    the agent lingers after the objective is already satisfied before
-    finally selecting FINISH.
+    Mean ``steps_to_goal`` and ``finish_step`` (successful-FINISH episodes
+    only), plus the gap between them (``finish_delay_steps``) -- distinct
+    from ``episode_efficiency.png``'s steps-to-objective panel (which
+    includes any episode that reached the objective, not only successful-
+    FINISH ones), this shows how much the agent lingers after the
+    objective is already satisfied before finally selecting FINISH.
 
 Periodic evaluation
 ----------------------

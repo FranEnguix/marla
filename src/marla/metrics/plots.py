@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import textwrap
 from pathlib import Path
 
 import matplotlib
@@ -28,6 +29,65 @@ _RATE_YLIM = (-0.05, 1.05)
 # normal run but falls back to episode_id for an older episodes.csv
 # written before the rollout column existed (see _split_train_eval).
 _SMOOTHING_NOTE = " (5-point rolling mean)"
+
+# Minimum resource-telemetry samples needed before a time-series resource
+# plot is considered meaningful. Below this, a line/area plot either draws
+# nothing visible (a single point has no line to connect, see
+# _plot_resource_by_phase's own history) or is too short a window to say
+# anything about a trend -- an explicit "not enough data" panel is always
+# clearer than a chart that LOOKS complete but silently shows ~nothing.
+_MIN_RESOURCE_SAMPLES_FOR_TIMESERIES = 3
+
+
+def _set_title_with_note(ax, title: str, note: str | None = None, *, fontsize: int = 12, note_fontsize: int = 8) -> None:
+    """A short, bold main title with an optional smaller gray note
+    directly beneath it, inside the axes' own top margin -- keeps
+    secondary conditions/caveats (filtering rules, "diagnostic only",
+    smoothing disclosures, ...) out of an oversized, wrapping main title
+    that clips or overlaps a neighboring subplot. ``note`` may contain
+    explicit ``\\n`` line breaks for multi-line notes; it is never
+    auto-wrapped (matplotlib's own text auto-wrap is approximate and can
+    still overflow a narrow subplot), so callers keep each line short by
+    construction.
+
+    The note sits directly above the axes' own top edge (an ``annotate``
+    anchored to axes-fraction (0.5, 1.0) with a small points-based
+    offset); the title's own ``pad`` is sized in points from the note's
+    line count so the two never overlap regardless of figure size/DPI --
+    a fixed pad only worked for a single-line note (see git history: an
+    earlier fixed-pad version visibly overlapped a real two-line note).
+    """
+    n_note_lines = note.count("\n") + 1 if note else 0
+    pad = 6 + n_note_lines * (note_fontsize * 1.5) if note else 6
+    ax.set_title(title, fontsize=fontsize, pad=pad)
+    if note:
+        ax.annotate(
+            note, xy=(0.5, 1.0), xycoords="axes fraction", xytext=(0, 4), textcoords="offset points",
+            ha="center", va="bottom", fontsize=note_fontsize, color="dimgray",
+        )
+
+
+def _insufficient_samples_panel(ax, message: str, *, wrap_width: int = 46) -> None:
+    """A deliberate, explicit "not enough data" panel -- used instead of
+    silently rendering a blank-looking axes (spec: never a misleading
+    empty chart). Keeps the axes frame/labels visible (so the reader can
+    still see what metric this would have been) but replaces the data
+    area with a plain, honest sentence.
+
+    Hard-wraps at ``wrap_width`` characters via ``textwrap`` rather than
+    matplotlib's own ``wrap=True`` -- the latter wraps against the whole
+    FIGURE's width, not this axes' own (narrower, in a multi-panel
+    figure) width, and visibly overflowed a real two-panel resource plot
+    when tried. Existing ``\\n`` breaks in ``message`` are preserved;
+    each resulting line is wrapped independently.
+    """
+    wrapped = "\n".join(textwrap.fill(line, width=wrap_width) for line in message.split("\n"))
+    ax.text(
+        0.5, 0.5, wrapped, ha="center", va="center", transform=ax.transAxes,
+        fontsize=9, color="dimgray",
+    )
+    ax.set_xticks([])
+    ax.set_yticks([])
 
 
 def _accepted_advice_rows(decisions: pd.DataFrame) -> pd.DataFrame:
@@ -309,7 +369,7 @@ def _plot_episode_efficiency(episodes: pd.DataFrame, plots_dir: Path) -> list[Pa
             eval_ = eval_.assign(objective_reached=eval_["objective_reached"].astype(float))
     x_label = "Rollout" if x_col == "rollout" else "Episode"
 
-    fig, (ax1, ax2, ax3) = plt.subplots(1, 3, figsize=(14, 4))
+    fig, (ax1, ax2, ax3) = plt.subplots(1, 3, figsize=(16, 4.3))
 
     # Reported as two distinct lines, never collapsed into one (spec
     # section 25): objective_reached doesn't require FINISH;
@@ -332,7 +392,7 @@ def _plot_episode_efficiency(episodes: pd.DataFrame, plots_dir: Path) -> list[Pa
     ax1.set_xlabel(x_label)
     ax1.set_ylabel("Rate")
     ax1.set_ylim(*_RATE_YLIM)
-    ax1.set_title("Objective reached vs. successful FINISH\n(sensitive hosts captured)" + _SMOOTHING_NOTE)
+    _set_title_with_note(ax1, "Objective reached vs. successful FINISH", "Sensitive hosts captured" + _SMOOTHING_NOTE)
     ax1.legend(fontsize="x-small")
     ax1.grid(alpha=0.3)
 
@@ -349,15 +409,21 @@ def _plot_episode_efficiency(episodes: pd.DataFrame, plots_dir: Path) -> list[Pa
         ax2.fill_between(x, (mean - band).clip(min=0), mean + band, color="tab:orange", alpha=0.2)
     ax2.set_xlabel(x_label)
     ax2.set_ylabel("Episode length (environment steps)")
-    ax2.set_title("Episode length\n(all episodes: success + failure)" + _SMOOTHING_NOTE)
+    _set_title_with_note(ax2, "Episode length", "All episodes (success + failure)" + _SMOOTHING_NOTE)
     ax2.legend()
     ax2.grid(alpha=0.3)
 
-    # steps_to_goal is NaN for any episode that didn't reach the goal
-    # (rollout.py only sets it on a successful FINISH); groupby's mean/std
-    # already skip NaN, so this is the mean *only over successful episodes*
-    # at each point, with no separate filtering needed -- a rollout with
-    # zero successes simply leaves a gap rather than a misleading zero.
+    # steps_to_goal is set the instant the simulator's true objective
+    # becomes satisfied (rollout.py's `objective_became_satisfied`),
+    # regardless of whether FINISH is ever selected afterward -- NOT only
+    # on a successful FINISH (a stale claim this comment used to make;
+    # corrected here since a code comment being wrong is itself a
+    # correctness bug, even though nothing user-facing read it). It is
+    # NaN for an episode that never reached the objective at all.
+    # groupby's mean/std already skip NaN, so this is the mean *only over
+    # objective-reached episodes* at each point, with no separate
+    # filtering needed -- a rollout with zero such episodes simply leaves
+    # a gap rather than a misleading zero.
     any_success = False
     if train["steps_to_goal"].notna().any():
         any_success = True
@@ -370,12 +436,15 @@ def _plot_episode_efficiency(episodes: pd.DataFrame, plots_dir: Path) -> list[Pa
         ax3.plot(x, mean, label="eval (greedy policy)", color="tab:orange", linestyle="--", marker=".")
         ax3.fill_between(x, (mean - band).clip(min=0), mean + band, color="tab:orange", alpha=0.2)
     ax3.set_xlabel(x_label)
-    ax3.set_ylabel("Steps to goal")
-    ax3.set_title("Steps to goal\n(episodes that reached the objective; FINISH not required)" + _SMOOTHING_NOTE)
+    ax3.set_ylabel("Steps to objective")
+    _set_title_with_note(
+        ax3, "Steps to objective",
+        "Only episodes that reached the objective are included\nFINISH is not required for inclusion" + _SMOOTHING_NOTE,
+    )
     if any_success:
         ax3.legend()
     else:
-        ax3.text(0.5, 0.5, "objective never reached yet", ha="center", va="center", transform=ax3.transAxes)
+        _insufficient_samples_panel(ax3, "Objective never reached yet in this run")
     ax3.grid(alpha=0.3)
     return [_save(fig, plots_dir / "episode_efficiency.png")]
 
@@ -484,11 +553,24 @@ def _resource_wall_clock_seconds(resources: pd.DataFrame) -> pd.Series:
     return resources["timestamp"] - resources["timestamp"].iloc[0]
 
 
+def _resource_insufficient_message(n_samples: int) -> str:
+    return (
+        f"Insufficient resource telemetry samples (n={n_samples}, "
+        f"need >= {_MIN_RESOURCE_SAMPLES_FOR_TIMESERIES}).\n"
+        "This run was likely too short for the background sampler to record more."
+    )
+
+
 def _plot_resource_by_phase(resources: pd.DataFrame, y_col: str, ylabel: str, title: str, filename: str, plots_dir: Path) -> list[Path]:
     if y_col not in resources.columns or resources[y_col].dropna().empty:
         return []
-    x = _resource_wall_clock_seconds(resources)
+    n = len(resources[y_col].dropna())
     fig, ax = plt.subplots(figsize=(9, 4.5))
+    if n < _MIN_RESOURCE_SAMPLES_FOR_TIMESERIES:
+        _set_title_with_note(ax, title)
+        _insufficient_samples_panel(ax, _resource_insufficient_message(n))
+        return [_save(fig, plots_dir / filename)]
+    x = _resource_wall_clock_seconds(resources)
     if "phase" in resources.columns:
         for phase, color in _PHASE_COLOR.items():
             mask = resources["phase"] == phase
@@ -513,8 +595,14 @@ def _plot_resource_cpu(resources: pd.DataFrame, plots_dir: Path) -> list[Path]:
     # monitoring/resources.py's module docstring.
     if "cpu_process_pct" not in resources.columns:
         return []
-    x = _resource_wall_clock_seconds(resources)
+    n = len(resources["cpu_process_pct"].dropna())
     fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(11, 4.5))
+    if n < _MIN_RESOURCE_SAMPLES_FOR_TIMESERIES:
+        for ax, title in ((ax1, "Process CPU utilization"), (ax2, "System-wide CPU utilization")):
+            _set_title_with_note(ax, title)
+            _insufficient_samples_panel(ax, _resource_insufficient_message(n), wrap_width=28)
+        return [_save(fig, plots_dir / "resource_cpu_over_time.png")]
+    x = _resource_wall_clock_seconds(resources)
     ax1.plot(x, resources["cpu_process_pct"], color="tab:blue")
     ax1.set_xlabel("Wall-clock seconds since run start")
     ax1.set_ylabel("Process CPU % (sum across cores, can exceed 100%)")
@@ -532,8 +620,13 @@ def _plot_resource_cpu(resources: pd.DataFrame, plots_dir: Path) -> list[Path]:
 def _plot_resource_ram(resources: pd.DataFrame, plots_dir: Path) -> list[Path]:
     if "ram_rss_mb" not in resources.columns:
         return []
-    x = _resource_wall_clock_seconds(resources)
+    n = len(resources["ram_rss_mb"].dropna())
     fig, ax = plt.subplots(figsize=(9, 4.5))
+    if n < _MIN_RESOURCE_SAMPLES_FOR_TIMESERIES:
+        _set_title_with_note(ax, "RAM usage over training")
+        _insufficient_samples_panel(ax, _resource_insufficient_message(n))
+        return [_save(fig, plots_dir / "resource_ram_over_time.png")]
+    x = _resource_wall_clock_seconds(resources)
     ax.plot(x, resources["ram_rss_mb"], label="process RSS (MB)", color="tab:purple")
     if "ram_system_used_mb" in resources.columns:
         ax.plot(x, resources["ram_system_used_mb"], label="system RAM used (MB)", color="tab:gray", alpha=0.7)
@@ -557,8 +650,13 @@ def _plot_resource_gpu(resources: pd.DataFrame, plots_dir: Path) -> list[Path]:
 def _plot_resource_gpu_memory(resources: pd.DataFrame, plots_dir: Path) -> list[Path]:
     if "torch_cuda_allocated_mb" not in resources.columns or resources["torch_cuda_allocated_mb"].dropna().empty:
         return []
-    x = _resource_wall_clock_seconds(resources)
+    n = len(resources["torch_cuda_allocated_mb"].dropna())
     fig, ax = plt.subplots(figsize=(9, 4.5))
+    if n < _MIN_RESOURCE_SAMPLES_FOR_TIMESERIES:
+        _set_title_with_note(ax, "GPU memory over training")
+        _insufficient_samples_panel(ax, _resource_insufficient_message(n))
+        return [_save(fig, plots_dir / "resource_gpu_memory_over_time.png")]
+    x = _resource_wall_clock_seconds(resources)
     ax.plot(x, resources["torch_cuda_allocated_mb"], label="torch allocated (MB)", color="tab:red")
     ax.plot(x, resources["torch_cuda_reserved_mb"], label="torch reserved (MB)", color="tab:orange", alpha=0.7)
     if "gpu_memory_used_mb" in resources.columns and resources["gpu_memory_used_mb"].notna().any():
@@ -870,7 +968,7 @@ def _plot_finish_probability_by_objective_state(rollouts: pd.DataFrame, plots_di
     return [_save(fig, plots_dir / "finish_probability_by_objective_state.png")]
 
 
-_MIN_REMAINING_TARGETS_BUCKET_SIZE = 5
+_MIN_DECISIONS_PER_REMAINING_TARGET_COUNT = 5
 
 
 def _plot_finish_probability_by_remaining_targets(decisions: pd.DataFrame, plots_dir: Path) -> list[Path]:
@@ -879,10 +977,17 @@ def _plot_finish_probability_by_remaining_targets(decisions: pd.DataFrame, plots
     *at decision time* (``sensitive_targets_remaining_before_action`` --
     diagnostic simulator truth, never a policy input). Expected shape:
     remaining=0 -> high FINISH probability, remaining>0 -> low. A purely
-    diagnostic plot, not a paper result: a remaining-count with fewer than
-    :data:`_MIN_REMAINING_TARGETS_BUCKET_SIZE` observations this run is
-    dropped rather than shown as a fabricated stable estimate. Absent
-    entirely for a run written before these columns existed.
+    diagnostic plot, not a paper result: a remaining-target count with
+    fewer than :data:`_MIN_DECISIONS_PER_REMAINING_TARGET_COUNT` decisions
+    this run is dropped rather than shown as a fabricated stable estimate.
+    Absent entirely for a run written before these columns existed.
+
+    Line+markers (not bars): the x values (remaining-target counts) are
+    ordered discrete counts where the *trend* across them is the point of
+    the plot (does FINISH probability fall as more targets remain?) --
+    bars would visually suggest unordered categories, and a connecting
+    line makes that trend legible at a glance in a way a bare scatter of
+    points would not.
     """
     required = {"sensitive_targets_remaining_before_action", "base_finish_probability"}
     if not required.issubset(decisions.columns):
@@ -895,7 +1000,7 @@ def _plot_finish_probability_by_remaining_targets(decisions: pd.DataFrame, plots
     counts = grouped.count()
     means = grouped.mean()
     stds = grouped.std().fillna(0.0)
-    kept = counts[counts >= _MIN_REMAINING_TARGETS_BUCKET_SIZE].index
+    kept = counts[counts >= _MIN_DECISIONS_PER_REMAINING_TARGET_COUNT].index
     if len(kept) == 0:
         return []
     means, stds, counts = means.loc[kept].sort_index(), stds.loc[kept], counts.loc[kept]
@@ -905,11 +1010,20 @@ def _plot_finish_probability_by_remaining_targets(decisions: pd.DataFrame, plots
     ax.errorbar(x, means.to_numpy(), yerr=stds.reindex(means.index).to_numpy(), fmt="o-", color="tab:blue", capsize=3)
     for xi, n in zip(x, counts.reindex(means.index).to_numpy()):
         ax.annotate(f"n={n}", (xi, means.loc[xi]), textcoords="offset points", xytext=(0, 8), fontsize=7, ha="center")
-    ax.set_xlabel("True sensitive targets remaining (without ROOT) at decision time")
+    ax.set_xlabel("Sensitive targets remaining without ROOT")
     ax.set_ylabel(r"Mean $P(\mathrm{FINISH})$ (base policy)")
     ax.set_ylim(*_RATE_YLIM)
     ax.set_xticks(x)
-    ax.set_title("FINISH probability vs. true remaining targets\n(diagnostic; buckets with < %d observations omitted)" % _MIN_REMAINING_TARGETS_BUCKET_SIZE)
+    if len(x) == 1:
+        # A single x-category still needs to look intentional, not like a
+        # sliver of a wider plot that failed to render -- give the one
+        # point some visible breathing room either side.
+        ax.set_xlim(x[0] - 1, x[0] + 1)
+    _set_title_with_note(
+        ax, "FINISH probability vs. remaining targets",
+        "Diagnostic only -- uses true simulator state, not the policy's own observation\n"
+        f"Only remaining-target counts with >= {_MIN_DECISIONS_PER_REMAINING_TARGET_COUNT} decisions are shown",
+    )
     ax.grid(alpha=0.3)
     return [_save(fig, plots_dir / "finish_probability_by_remaining_targets.png")]
 
@@ -938,20 +1052,23 @@ def _plot_finish_probability_by_visible_completion_and_frontier(rollouts: pd.Dat
     if rollouts[list(required)].isna().all().all():
         return []
 
-    fig, ax = plt.subplots(figsize=(8, 4.5))
+    fig, ax = plt.subplots(figsize=(8, 4.7))
     x = rollouts["environment_steps_total"]
     ax.plot(
         x, rollouts["mean_finish_probability_visible_complete_no_frontier"],
-        label=r"visible targets complete, no known frontier", color="tab:green", marker=".",
+        label="targets complete, no unscanned subnets known", color="tab:green", marker=".",
     )
     ax.plot(
         x, rollouts["mean_finish_probability_visible_complete_frontier_remaining"],
-        label=r"visible targets complete, frontier remains", color="tab:orange", marker=".",
+        label="targets complete, an unscanned subnet remains", color="tab:orange", marker=".",
     )
     ax.set_xlabel("Environment steps")
     ax.set_ylabel(r"$P(\mathrm{FINISH})$ (base policy)")
     ax.set_ylim(*_RATE_YLIM)
-    ax.set_title("FINISH probability by visible target completion and exploration frontier")
+    _set_title_with_note(
+        ax, "FINISH probability by exploration status",
+        "Visible-target-complete decisions only, split by whether an unscanned known subnet remains",
+    )
     ax.legend(fontsize="small")
     ax.grid(alpha=0.3)
     return [_save(fig, plots_dir / "finish_probability_by_visible_completion_and_frontier.png")]
@@ -980,7 +1097,7 @@ def _plot_known_subnet_exploration_progress(rollouts: pd.DataFrame, plots_dir: P
     if "known_frontier_remaining_rate" in rollouts.columns and not rollouts["known_frontier_remaining_rate"].isna().all():
         ax.plot(
             x, rollouts["known_frontier_remaining_rate"],
-            label="known exploration frontier remaining rate", color="tab:purple", linestyle="--", marker=".",
+            label="decisions with an unscanned known subnet remaining", color="tab:purple", linestyle="--", marker=".",
         )
     ax.set_xlabel("Environment steps")
     ax.set_ylabel("Rate")
@@ -1012,31 +1129,41 @@ def _plot_critic_quality(decisions: pd.DataFrame, plots_dir: Path) -> list[Path]
 
 
 def _plot_reward_vs_credit_assignment(decisions: pd.DataFrame, plots_dir: Path) -> list[Path]:
-    """Immediate reward vs. the credit PPO actually assigned the step
-    (``gae_advantage``) -- the interesting quadrant is negative reward with
-    positive advantage: an immediately costly step (e.g. a paid
-    consultation, or a failed exploit attempt) that GAE still credits
-    because it led to later success.
+    """A temporal-credit-assignment diagnostic: one point per training
+    decision, immediate reward vs. the credit PPO actually assigned that
+    step (``gae_advantage``) -- the highlighted quadrant is negative
+    reward with positive advantage: an immediately costly step (e.g. a
+    paid consultation, or a failed exploit attempt) that GAE still
+    credits because it led to later success. Everything else is plotted
+    too, unhighlighted, so the highlighted quadrant's actual density is
+    visible in context rather than shown in isolation.
     """
     if "gae_advantage" not in decisions.columns:
         return []
-    fig, ax = plt.subplots(figsize=(7, 5.5))
+    fig, ax = plt.subplots(figsize=(7, 5.8))
     negative_reward_positive_advantage = (decisions["training_reward"] < 0) & (decisions["gae_advantage"] > 0)
+    # Exactly one condition is highlighted; its complement is genuinely
+    # "every other decision" (not a fabricated 3- or 4-way breakdown this
+    # plot doesn't actually compute) -- "All other decisions" says that
+    # honestly, where a bare "other" would not explain itself.
     ax.scatter(
         decisions.loc[~negative_reward_positive_advantage, "training_reward"],
         decisions.loc[~negative_reward_positive_advantage, "gae_advantage"],
-        s=6, alpha=0.15, color="tab:gray", label="other",
+        s=6, alpha=0.15, color="tab:gray", label="All other decisions",
     )
     ax.scatter(
         decisions.loc[negative_reward_positive_advantage, "training_reward"],
         decisions.loc[negative_reward_positive_advantage, "gae_advantage"],
-        s=10, alpha=0.4, color="tab:red", label="negative reward, positive advantage",
+        s=10, alpha=0.4, color="tab:red", label="Negative reward, positive advantage",
     )
     ax.axhline(0, color="black", linewidth=0.8, alpha=0.4)
     ax.axvline(0, color="black", linewidth=0.8, alpha=0.4)
     ax.set_xlabel("Training reward (this step)")
     ax.set_ylabel("GAE advantage")
-    ax.set_title("Reward vs. credit assignment")
+    _set_title_with_note(
+        ax, "Reward vs. GAE advantage",
+        "Each point is one training decision\nHighlighted: an immediately costly step PPO still credits for later success",
+    )
     ax.legend(fontsize="small")
     ax.grid(alpha=0.3)
     return [_save(fig, plots_dir / "reward_vs_credit_assignment.png")]
@@ -1076,11 +1203,13 @@ def _plot_action_type_distribution(decisions: pd.DataFrame, plots_dir: Path) -> 
 
 
 def _plot_finish_efficiency(episodes: pd.DataFrame, plots_dir: Path) -> list[Path]:
-    """Goal/finish timing (spec section 5): when the objective first became
-    satisfied (``steps_to_goal``) vs. when the agent actually selected
-    FINISH (``finish_step``) vs. the gap between them
-    (``finish_delay_steps``) -- distinct from episode_efficiency.png's
-    steps_to_goal panel, which doesn't show the finish-timing side at all.
+    """Objective/FINISH timing (spec section 5), restricted to
+    successful-FINISH episodes: when the objective first became satisfied
+    (``steps_to_goal``) vs. when the agent actually selected FINISH
+    (``finish_step``) vs. the gap between them (``finish_delay_steps``) --
+    distinct from episode_efficiency.png's "steps to objective" panel,
+    which covers every objective-reached episode (FINISH not required)
+    and doesn't show the finish-timing side at all.
     """
     if "finish_step" not in episodes.columns or "finish_delay_steps" not in episodes.columns:
         return []
@@ -1090,17 +1219,17 @@ def _plot_finish_efficiency(episodes: pd.DataFrame, plots_dir: Path) -> list[Pat
     if successful.empty:
         return []
 
-    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(10, 4))
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(11, 4.3))
     for column, label, color in (
-        ("steps_to_goal", "steps to goal", "tab:blue"),
-        ("finish_step", "finish step", "tab:orange"),
+        ("steps_to_goal", "steps to objective", "tab:blue"),
+        ("finish_step", "FINISH step", "tab:orange"),
     ):
         x, mean, band = _grouped_mean_and_band(successful, x_col, column)
         ax1.plot(x, mean, label=label, color=color, marker=".")
         ax1.fill_between(x, (mean - band).clip(min=0), mean + band, color=color, alpha=0.15)
     ax1.set_xlabel(x_label)
     ax1.set_ylabel("Environment step")
-    ax1.set_title("Goal reached vs. FINISH selected\n(successful episodes only)" + _SMOOTHING_NOTE)
+    _set_title_with_note(ax1, "Steps to objective vs. FINISH step", "Successful-FINISH episodes only" + _SMOOTHING_NOTE)
     ax1.legend()
     ax1.grid(alpha=0.3)
 
@@ -1108,8 +1237,8 @@ def _plot_finish_efficiency(episodes: pd.DataFrame, plots_dir: Path) -> list[Pat
     ax2.plot(x, mean, color="tab:green", marker=".")
     ax2.fill_between(x, (mean - band).clip(min=0), mean + band, color="tab:green", alpha=0.2)
     ax2.set_xlabel(x_label)
-    ax2.set_ylabel("FINISH step minus steps to goal")
-    ax2.set_title("FINISH delay after goal reached\n(successful episodes only)" + _SMOOTHING_NOTE)
+    ax2.set_ylabel("FINISH step minus steps to objective")
+    _set_title_with_note(ax2, "FINISH delay after objective satisfied", "Successful-FINISH episodes only" + _SMOOTHING_NOTE)
     ax2.grid(alpha=0.3)
     return [_save(fig, plots_dir / "finish_efficiency.png")]
 

@@ -494,6 +494,57 @@ def summarize(
 
 
 @app.command()
+def compare(
+    run_directories: list[Path] = typer.Argument(
+        ..., exists=False, help="Two or more run directories (runs/<experiment>/<run-id>) to compare."
+    ),
+    output: Path = typer.Option(
+        None, "--output", help="Directory to write comparison plots to (default: a compare_plots/ directory next to the first run)."
+    ),
+    label: list[str] = typer.Option(
+        [], "--label", help="Repeatable; one label per --run-directory, in order (default: '<parent-dir>/<run-id>')."
+    ),
+) -> None:
+    """Compare wall-clock/resource/energy metrics ACROSS multiple runs
+    (seeds, algorithms, ...) -- never a single run's own time series (see
+    `marla summarize` for that). Each run contributes one scalar per
+    metric (its own total training time, mean CPU%, ...); this command
+    shows each run's value plus a mean +/- std summary, never a
+    box-and-whisker plot (too few runs, typically, for quartiles to mean
+    anything -- see marla.metrics.compare_plots's own docstring).
+    """
+    from marla.metrics.compare_plots import generate_comparison_plots
+
+    if len(run_directories) < 2:
+        typer.secho("marla compare needs at least 2 run directories to compare.", fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=1)
+
+    missing = [d for d in run_directories if not d.is_dir()]
+    if missing:
+        typer.secho(f"Not a directory: {missing[0]}", fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=1)
+    if label and len(label) != len(run_directories):
+        typer.secho(
+            f"--label given {len(label)} time(s) but {len(run_directories)} run director(y/ies) were given -- "
+            "pass one --label per run directory, or none at all.",
+            fg=typer.colors.RED, err=True,
+        )
+        raise typer.Exit(code=1)
+
+    plots_dir = output or (run_directories[0].parent / "compare_plots")
+    written = generate_comparison_plots(run_directories, plots_dir, labels=label or None)
+    if written:
+        typer.secho(f"Wrote {len(written)} comparison plot(s) to {plots_dir}/:", fg=typer.colors.GREEN)
+        for path in written:
+            typer.echo(f"  {path.name}")
+    else:
+        typer.secho(
+            "No comparison plots generated (none of the given runs have summary.json/resource_summary.json/carbon data).",
+            fg=typer.colors.YELLOW,
+        )
+
+
+@app.command()
 def version() -> None:
     """Print MARLA and key dependency versions."""
     from marla.utils.versions import collect_dependency_versions, python_version
