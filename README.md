@@ -14,6 +14,12 @@ reference, architecture, CLI, and metrics/plots) -- build it locally with
 
 ```bash
 pip install -e ".[dev]"
+
+# NASimEmu is a separate editable install (not a regular pip dependency
+# -- see docs/installation.rst for why); do this too, or `marla run`
+# has nothing to run against:
+pip install -e ./gym-0.21.0   # vendored, buildable gym==0.21.0
+pip install -e ./NASimEmu
 ```
 
 Optional extras: `local-lm` (a real local Plan Maker model), `gpu` (NVML

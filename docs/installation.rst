@@ -7,9 +7,10 @@ Requirements
 - Python **3.10.x** exactly (``>=3.10,<3.11``). MARLA checks this at CLI
   startup and refuses to run on any other version -- see
   :mod:`marla.utils.python_version`.
-- `NASimEmu <https://github.com/jaromiru/NASimEmu>`_, cloned alongside (or
-  vendored inside) the MARLA repository. ``marla init`` will look for it
-  automatically; see :doc:`quickstart`.
+- `NASimEmu <https://github.com/jaromiru/NASimEmu>`_, installed separately
+  -- see "Installing NASimEmu" below. ``marla init`` will look for a
+  ``NASimEmu/scenarios/`` directory near your current directory to fill
+  in a starter config automatically; see :doc:`quickstart`.
 - A CUDA-capable GPU if you plan to set ``device: gpu`` -- otherwise
   ``device: cpu`` or ``device: auto`` (the default) both work on CPU alone,
   just slower for the recurrent PPO forward/backward passes.
@@ -45,6 +46,35 @@ suite):
 This installs MARLA itself (editable) plus the ``dev`` extra (pytest and
 pytest-asyncio), which is enough to run the **baseline** variant (no
 Gatekeeper, no Plan Maker) and the test suite.
+
+Installing NASimEmu
+--------------------
+
+MARLA does not declare NASimEmu as a regular ``pip`` dependency (it isn't
+published on PyPI under a name/version this project can pin), so it's
+installed as a second, separate editable install. A repository clone
+vendors two directories for exactly this purpose:
+
+.. code-block:: bash
+
+   pip install -e ./gym-0.21.0   # NASimEmu pins gym==0.21.0; PyPI's own
+                                  # 0.21.0 has known build issues on modern
+                                  # Python/setuptools, so this vendored,
+                                  # buildable copy is used instead.
+   pip install -e ./NASimEmu
+
+Do this before ``pip install -e ".[dev]"`` or after -- order doesn't
+matter, only that both end up installed in the same environment.
+``marla version`` reports ``nasimemu <version>`` once this worked; it
+reports ``nasimemu not installed`` otherwise (and ``marla run``/``marla
+scenario check`` fail immediately and specifically, rather than with a
+bare ``ImportError``, if it's missing).
+
+If you're not working from a MARLA repository clone (e.g. installed
+``marla-agents`` from PyPI on its own), clone `NASimEmu
+<https://github.com/jaromiru/NASimEmu>`_ (and, if its own ``gym==0.21.0``
+pin fails to build, a working ``gym==0.21.0`` from any source) yourself
+and install both the same way.
 
 Optional extras
 ----------------
