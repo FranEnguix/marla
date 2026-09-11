@@ -1,6 +1,0 @@
-condition,checkpoint_environment_steps,num_seeds,goal_success_point,goal_success_ci_low,goal_success_ci_high,benchmark_return_point,benchmark_return_ci_low,benchmark_return_ci_high
-PPO_ONLY,1024,1,0.0,0.0,0.0,-1.0,-1.0,-1.0
-PPO_ONLY,2048,1,0.0,0.0,0.0,-1.0,-1.0,-1.0
-PPO_ONLY,3072,1,0.0,0.0,0.0,-1.0,-1.0,-1.0
-PPO_ONLY,4096,1,0.0,0.0,0.0,-1.0,-1.0,-1.0
-PPO_ONLY,5120,1,0.0,0.0,0.0,-1.0,-1.0,-1.0
