@@ -227,6 +227,42 @@ def test_summarize_omits_carbon_line_when_no_carbon_directory_exists(tmp_path):
     assert "estimated CO2eq" not in result.output
 
 
+def test_compare_requires_at_least_two_run_directories(tmp_path):
+    run_dir = _write_minimal_summary_fixture(tmp_path, carbon=None)
+    result = runner.invoke(app, ["compare", str(run_dir)])
+    assert result.exit_code == 1
+    assert "at least 2" in result.output
+
+
+def test_compare_rejects_a_missing_directory(tmp_path):
+    run_a = _write_minimal_summary_fixture(tmp_path, carbon=None)
+    result = runner.invoke(app, ["compare", str(run_a), str(tmp_path / "does-not-exist")])
+    assert result.exit_code == 1
+    assert "Not a directory" in result.output
+
+
+def test_compare_writes_plots_for_two_real_runs(tmp_path):
+    (tmp_path / "a").mkdir()
+    (tmp_path / "b").mkdir()
+    run_a = _write_minimal_summary_fixture(tmp_path / "a", carbon={"enabled": True, "energy_consumed_kwh": 0.01, "emissions_kg_co2eq": 0.0003})
+    run_b = _write_minimal_summary_fixture(tmp_path / "b", carbon={"enabled": True, "energy_consumed_kwh": 0.012, "emissions_kg_co2eq": 0.00035})
+    output_dir = tmp_path / "compare_out"
+    result = runner.invoke(app, ["compare", str(run_a), str(run_b), "--output", str(output_dir)])
+    assert result.exit_code == 0, result.output
+    assert (output_dir / "compare_total_training_seconds.png").is_file()
+    assert (output_dir / "compare_energy_kwh.png").is_file()
+
+
+def test_compare_rejects_mismatched_label_count(tmp_path):
+    (tmp_path / "a").mkdir()
+    (tmp_path / "b").mkdir()
+    run_a = _write_minimal_summary_fixture(tmp_path / "a", carbon=None)
+    run_b = _write_minimal_summary_fixture(tmp_path / "b", carbon=None)
+    result = runner.invoke(app, ["compare", str(run_a), str(run_b), "--label", "only-one"])
+    assert result.exit_code == 1
+    assert "--label" in result.output
+
+
 def _write_real_run(tmp_path):
     """A real tiny baseline TrainingResult, written via write_run_artifacts."""
     import asyncio
