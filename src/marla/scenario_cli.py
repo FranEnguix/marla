@@ -21,6 +21,7 @@ from marla.scenario.repair import (
 )
 from marla.scenario.solvability import check_solvability
 from marla.scenario.spec import load_scenario_spec
+from marla.scenarios.uri import ScenarioReferenceError, resolve_scenario_reference
 
 scenario_app = typer.Typer(help="Validate and repair NASimEmu scenario solvability.")
 
@@ -164,9 +165,27 @@ def format_preflight_failure(result: ScenarioSolvabilityResult) -> str:
     return "\n".join(lines)
 
 
+def _resolve_cli_scenario_argument(reference: str) -> Path:
+    """Resolves a scenario CLI argument -- a ``marla://...`` reference or a
+    plain filesystem path (relative to the current working directory,
+    matching Typer's previous bare-``Path`` behavior) -- to a real file,
+    or exits with an actionable error (spec: ``marla scenario check``/
+    ``repair`` must resolve ``marla://`` identically to every other call
+    site, via the one authoritative resolver).
+    """
+    try:
+        resolved = resolve_scenario_reference(reference, config_dir=Path.cwd())
+    except ScenarioReferenceError as exc:
+        typer.secho(str(exc), fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=1) from exc
+    return Path(resolved)
+
+
 @scenario_app.command("check")
 def check(
-    scenario: Path = typer.Argument(..., exists=False, help="Path to a NASimEmu scenario YAML file."),
+    scenario: str = typer.Argument(
+        ..., help="Path to a NASimEmu scenario YAML file, or a marla://<name> reference."
+    ),
     objective: str = typer.Option(
         "capture_target", "--objective", help="Objective semantics to check against (defaults to MARLA's current capture_target)."
     ),
@@ -175,6 +194,7 @@ def check(
 ) -> None:
     """Analyze whether every NASimEmu realization of SCENARIO can reach the
     configured objective, without starting any MARLA agents."""
+    scenario = _resolve_cli_scenario_argument(scenario)
     if not scenario.is_file():
         typer.secho(f"Not a file: {scenario}", fg=typer.colors.RED, err=True)
         raise typer.Exit(code=1)
@@ -194,7 +214,9 @@ def check(
 
 @scenario_app.command("repair")
 def repair(
-    scenario: Path = typer.Argument(..., exists=False, help="Path to a NASimEmu scenario YAML file."),
+    scenario: str = typer.Argument(
+        ..., help="Path to a NASimEmu scenario YAML file, or a marla://<name> reference."
+    ),
     output: Path = typer.Option(
         None, "--output", "-o", help="Path for the repaired scenario (default: <name>.solvable.v2.yaml next to the source)."
     ),
@@ -206,6 +228,7 @@ def repair(
 
     Never modifies SCENARIO itself; writes a new file (see --output).
     """
+    scenario = _resolve_cli_scenario_argument(scenario)
     if not scenario.is_file():
         typer.secho(f"Not a file: {scenario}", fg=typer.colors.RED, err=True)
         raise typer.Exit(code=1)

@@ -11,27 +11,33 @@ from __future__ import annotations
 from pathlib import Path
 
 from marla.config.models import Config
+from marla.scenarios.uri import MARLA_SCENARIO_URI_PREFIX, ScenarioReferenceError, resolve_scenario_reference
 
 
 def validate_scenario_reference(config: Config, config_dir: Path) -> list[str]:
     """Return a list of human-readable warnings/errors about the scenario reference.
 
-    NASimEmu treats a scenario ending in ``.yaml`` as a path to a static
-    scenario file, and any other string as the name of a procedurally
-    generated benchmark looked up at runtime. We can only meaningfully
-    check existence for the file case here.
+    Three forms (see :mod:`marla.scenarios.uri`): a ``marla://<name>``
+    reference (a MARLA-owned packaged scenario -- resolved and existence-
+    checked against MARLA's own package data, never ``config_dir``), a
+    plain filesystem path ending in ``.yaml`` (resolved relative to
+    ``config_dir`` if not already absolute), or any other string (a
+    NASimEmu procedurally generated benchmark name looked up at runtime --
+    we can only meaningfully check existence for the first two cases).
     """
     problems: list[str] = []
     scenario = config.environment.scenario
 
-    if scenario.endswith(".yaml"):
-        scenario_path = Path(scenario)
-        if not scenario_path.is_absolute():
-            scenario_path = (config_dir / scenario_path).resolve()
-        if not scenario_path.is_file():
+    if scenario.startswith(MARLA_SCENARIO_URI_PREFIX) or scenario.endswith(".yaml"):
+        try:
+            resolved = resolve_scenario_reference(scenario, config_dir)
+        except ScenarioReferenceError as exc:
+            problems.append(f"environment.scenario '{scenario}' is invalid: {exc}")
+            return problems
+        if not Path(resolved).is_file():
             problems.append(
                 f"environment.scenario '{scenario}' does not exist "
-                f"(resolved to '{scenario_path}')"
+                f"(resolved to '{resolved}')"
             )
 
     return problems

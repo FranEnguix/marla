@@ -20,6 +20,7 @@ import torch
 import yaml
 
 from marla.learning.checkpoint import load_checkpoint, peek_checkpoint_metadata, save_checkpoint
+from marla.learning.lr_scheduler import build_scheduler
 from marla.learning.recurrent_policy import RecurrentPolicy
 from marla.config.loader import load_config
 
@@ -40,7 +41,7 @@ def _write_tiny_baseline_config(tmp_path: Path, run_id: str, total_environment_s
     data["environment"]["scenario"] = SMALL_SCENARIO
     data["environment"]["max_episode_steps"] = 5
     data["policy"]["ppo"]["total_environment_steps"] = total_environment_steps
-    data["policy"]["ppo"]["rollout_steps"] = 12
+    data["policy"]["ppo"]["steps_per_env"] = 12
     data["policy"]["ppo"]["epochs"] = 1
     data["policy"]["ppo"]["minibatch_sequences"] = 2
     data["policy"]["recurrent"]["sequence_length"] = 4
@@ -86,11 +87,13 @@ def test_load_checkpoint_restores_rng_state_only_when_requested(tmp_path):
     optimizer = torch.optim.Adam(policy.parameters(), lr=1e-3)
     checkpoint_path = tmp_path / "checkpoint.pt"
 
+    scheduler = build_scheduler(optimizer, config.policy.ppo)
     torch.manual_seed(42)
     saved_state = torch.get_rng_state()
     save_checkpoint(
         checkpoint_path, policy, optimizer, update_count=1, environment_steps=1, config_hash="x",
         next_episode_seed=1, rng_state=saved_state,
+        scheduler=scheduler, scheduler_config=config.policy.ppo.optimizer.scheduler.model_dump(),
     )
 
     torch.manual_seed(999)  # perturb the global RNG state to something else
@@ -116,7 +119,15 @@ def test_peek_checkpoint_metadata_does_not_need_a_policy(tmp_path):
 
 def test_load_checkpoint_without_resume_fields_still_works(tmp_path):
     """A checkpoint saved before resume support existed (no next_episode_seed/
-    rng_state keys at all) must still load -- backward compatibility."""
+    rng_state keys at all) must still load -- backward compatibility for
+    resume metadata specifically, independent of policy_representation_version
+    (which has its own, separate, deliberately-NOT-backward-compatible
+    contract -- see test_checkpoint.py's mismatch tests). This fixture
+    therefore still records the *current* representation version, isolating
+    the one thing this test is actually about.
+    """
+    from marla.learning.action_encoder import POLICY_REPRESENTATION_VERSION
+
     config = load_config(REPO_ROOT / "examples" / "baseline.yaml")
     policy = RecurrentPolicy(config.policy)
     optimizer = torch.optim.Adam(policy.parameters(), lr=1e-3)
@@ -128,6 +139,9 @@ def test_load_checkpoint_without_resume_fields_still_works(tmp_path):
             "update_count": 3,
             "environment_steps": 256,
             "config_hash": "old",
+            "policy_representation_version": POLICY_REPRESENTATION_VERSION,
+            "visible_target_progress_enabled": policy.visible_target_progress_enabled,
+            "visible_subnet_exploration_enabled": policy.visible_subnet_exploration_enabled,
         },
         checkpoint_path,
     )
@@ -173,6 +187,44 @@ def test_resume_continues_rather_than_restarts(tmp_path):
     import shutil
 
     shutil.rmtree(REPO_ROOT / "runs" / "ppo_baseline" / "resume-stage-a", ignore_errors=True)
+    shutil.rmtree(run_dir_b, ignore_errors=True)
+
+
+@pytest.mark.integration
+def test_resume_continues_the_lr_scheduler_trajectory_not_a_fresh_one(tmp_path):
+    """Spec: save/resume must preserve the LR scheduler's trajectory
+    exactly (exercises the new scheduler framework's checkpoint round-
+    trip through the real ``marla run --resume`` path, not just the
+    lower-level unit test in test_lr_scheduler.py).
+    """
+    stage_a_config = _write_tiny_baseline_config(tmp_path, run_id="resume-sched-a", total_environment_steps=12)
+    result_a = _run_marla(["run", str(stage_a_config)])
+    assert result_a.returncode == 0, result_a.stdout + result_a.stderr
+
+    checkpoint_a = REPO_ROOT / "runs" / "ppo_baseline" / "resume-sched-a" / "checkpoint.pt"
+    metadata_a = peek_checkpoint_metadata(checkpoint_a)
+    assert metadata_a.scheduler_type == "linear"  # examples/baseline.yaml's own choice
+    assert metadata_a.scheduler_state_dict is not None
+    step_a = metadata_a.scheduler_state_dict["last_epoch"]
+    lr_a = metadata_a.learning_rate
+    assert step_a > 0  # at least one PPO update ran
+
+    stage_b_config = _write_tiny_baseline_config(tmp_path, run_id="resume-sched-b", total_environment_steps=36)
+    result_b = _run_marla(["run", "--resume", str(checkpoint_a), str(stage_b_config)])
+    assert result_b.returncode == 0, result_b.stdout + result_b.stderr
+
+    run_dir_b = REPO_ROOT / "runs" / "ppo_baseline" / "resume-sched-b"
+    metadata_b = peek_checkpoint_metadata(run_dir_b / "checkpoint.pt")
+    step_b = metadata_b.scheduler_state_dict["last_epoch"]
+    # The resumed run's scheduler CONTINUED from step_a (more updates ran
+    # on top of it), never reset to step 0 -- a fresh scheduler would show
+    # step_b < step_a or an LR back up near the initial rate.
+    assert step_b > step_a
+    assert metadata_b.learning_rate <= lr_a  # linear decay: continued rate is <= where it left off
+
+    import shutil
+
+    shutil.rmtree(REPO_ROOT / "runs" / "ppo_baseline" / "resume-sched-a", ignore_errors=True)
     shutil.rmtree(run_dir_b, ignore_errors=True)
 
 

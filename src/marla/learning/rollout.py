@@ -21,10 +21,17 @@ from dataclasses import dataclass, field
 import torch
 from torch_geometric.data import Data
 
+from marla.environment.action_compatibility import compute_compatibility_matrix
 from marla.environment.actions import ActionDescriptor
 from marla.environment.nasimemu_adapter import EnvironmentState, NasimEmuAdapter
 from marla.environment.observation_summary import build_observation_summary
 from marla.environment.state_delta import AccessGain, StateDelta, compute_state_delta
+from marla.environment.visible_facts import (
+    all_visible_sensitive_targets_rooted,
+    assemble_visible_progress,
+    extract_visible_host_facts,
+    extract_visible_network_exploration,
+)
 from marla.evaluation.overrides import EvaluationOverrides
 from marla.learning.decision import (
     FinalDecision,
@@ -71,6 +78,19 @@ class StepRecord:
     graph_data: Data
     node_key_to_index: dict[str, int]
     legal_action_descriptors: list[ActionDescriptor]
+    # (N, COMPATIBILITY_FEATURE_DIM) -- the exact tensor passed to
+    # ActionEncoder at collection time (spec section 5/11). Training-buffer
+    # state only, like graph_data/legal_action_descriptors above: discarded
+    # with the rest of this rollout's StepRecords after the PPO update,
+    # never persisted to decisions.csv. PPO replay (learning/ppo.py) reuses
+    # this exact tensor rather than recomputing it from (by then stale,
+    # and inaccessible without calling the simulator again) live state.
+    compatibility_features: torch.Tensor
+    # (VISIBLE_PROGRESS_DIM,) -- the exact visible-only global-progress
+    # vector passed to RecurrentCore at collection time (FINISH-
+    # learnability investigation). Same training-buffer-only/replay-reuse
+    # contract as compatibility_features above.
+    visible_progress: torch.Tensor
 
     initial_gru_hidden_state: torch.Tensor  # z_{t-1}, detached
     previous_action_embedding: torch.Tensor  # E(a_{t-1}), detached
@@ -109,6 +129,37 @@ class StepRecord:
     sensitive_targets_total: int | None = None
     sensitive_targets_with_root: int | None = None
     sensitive_targets_remaining: int | None = None
+    # Decision-time diagnostic truth (FINISH investigation): the objective/
+    # target status that existed WHEN THE POLICY CHOSE THIS STEP'S ACTION --
+    # i.e. queried from the live simulator before this step's action was
+    # applied, never inferred retrospectively from the post-action
+    # transition above. This answers "was FINISH already the correct
+    # action at this decision?", a different question from
+    # objective_satisfied/objective_became_satisfied (which describe the
+    # state AFTER this step's action). Diagnostic simulator truth only --
+    # never fed to the policy as an input; see
+    # marla.environment.action_compatibility/visible_facts for what the
+    # policy is actually allowed to see.
+    objective_satisfied_before_action: bool = False
+    sensitive_targets_remaining_before_action: int | None = None
+    sensitive_targets_with_root_before_action: int | None = None
+    # Observable subnet-exploration progress (spec sections 3-24), decision-
+    # time, visible-only (built from marla.environment.visible_facts
+    # .VisibleNetworkExploration -- known subnets = have >=1 visible host;
+    # scanned = successful SubnetScan at least once). known_subnets_total
+    # is the size of the KNOWN set, never the true scenario subnet count.
+    known_subnets_total_before_action: int = 0
+    known_subnets_scanned_before_action: int = 0
+    known_exploration_frontier_remaining_before_action: bool = False
+    # Visible-only "are all currently-confirmed-sensitive targets already
+    # rooted" (None when no sensitive target is visible yet -- see
+    # all_visible_sensitive_targets_rooted's own docstring for why that
+    # must never collapse into True). Used for the frontier-conditional
+    # FINISH diagnostic (P(FINISH | visible targets complete, frontier=...)),
+    # which is deliberately a DIFFERENT question from the true-objective
+    # one above (objective_satisfied_before_action).
+    all_visible_sensitive_targets_rooted_before_action: bool | None = None
+    has_visible_sensitive_target_before_action: bool = False
     state_delta: StateDelta = field(default_factory=lambda: StateDelta(0, 0, 0, 0, AccessGain.NONE))
     # Set after collection, once the rollout's total step count is known
     # (mirrors EpisodeSummary.rollout below) -- None only for a StepRecord
@@ -116,6 +167,16 @@ class StepRecord:
     # a unit test).
     global_environment_step: int | None = None
     rollout: int | None = None
+    # Multi-environment PPO collection (spec: the 2048-transition, 4-
+    # independent-environment-stream ablation) -- which of N independent
+    # environment streams this record came from, purely for diagnostic/
+    # reporting purposes (spec section 41's per-environment metrics).
+    # None for every single-environment run (the default, unchanged
+    # behavior) -- never read by GAE, chunking, or PPO update logic,
+    # which all key exclusively on `episode_id` (see
+    # RolloutCollector.__init__'s `episode_id_offset` for how episode_id
+    # stays globally unique across streams without this field's help).
+    env_index: int | None = None
 
     # Assisted-variant fields; left at defaults in the baseline.
     sampled_query: bool = False
@@ -231,7 +292,31 @@ class RolloutCollector:
         stop_event: asyncio.Event | None = None,
         deterministic: bool = False,
         overrides: EvaluationOverrides | None = None,
+        episode_id_offset: int = 0,
+        env_index: int | None = None,
     ) -> None:
+        """``episode_id_offset``/``env_index``: multi-environment PPO
+        collection support (spec: the 2048-transition, 4-independent-
+        environment-stream ablation). Both default to values that make
+        this collector byte-identical to before they existed:
+        ``episode_id_offset=0`` means episode IDs start at 1 exactly as
+        always; ``env_index=None`` leaves ``StepRecord.env_index`` unset
+        on every record this collector produces. When multiple
+        ``RolloutCollector`` instances are combined into one PPO batch
+        (see ``learning.rollout.env_seed_and_episode_offset`` and
+        ``learning.trainer.run_training_loop``'s multi-env branch), each
+        instance is given a DISTINCT, non-overlapping
+        ``episode_id_offset`` so ``episode_id`` remains a globally unique
+        episode identifier across every stream in the combined batch --
+        this is what lets every existing "group by episode_id" code path
+        (GAE-adjacent chunking, decision-row building, the value-
+        calibration/probe state-selection tooling) keep working completely
+        UNCHANGED on a multi-env batch, with zero risk of two different
+        environments' episode 1 being confused for one another.
+        ``env_index`` is purely a diagnostic/reporting field (per-
+        environment metrics, spec section 41) -- no GAE, chunking, or PPO
+        logic ever reads it.
+        """
         if consultation_enabled and consult_fn is None:
             raise ValueError("consult_fn is required when consultation_enabled=True")
 
@@ -252,8 +337,10 @@ class RolloutCollector:
         # -- see marla.evaluation.overrides for what each field does.
         self._overrides = overrides
         self._fallback_rng = random.Random(overrides.fallback_rng_seed) if overrides is not None else None
+        self._episode_id_offset = episode_id_offset
+        self._env_index = env_index
 
-        self._episode_id = 0
+        self._episode_id = episode_id_offset
         self._state: EnvironmentState | None = None
         self._rstate: RecurrentState | None = None
         self._episode_seed = 0
@@ -318,8 +405,49 @@ class RolloutCollector:
             assert state is not None and rstate is not None
 
             legal_actions = self._adapter.legal_actions(state)
-            graph_obs = self._adapter.to_pyg_data(state)
-            step_out = self._policy.step(graph_obs, legal_actions, rstate)
+            graph_obs = self._adapter.to_pyg_data(
+                state, include_subnet_scan_feature=self._policy.visible_subnet_exploration_enabled
+            )
+            # Computed once, here, from the live pre-action state -- passed
+            # explicitly into policy.step() and stored verbatim on this
+            # step's StepRecord, so PPO replay reuses the identical tensor
+            # rather than recomputing it later (spec section 11; the
+            # simulator must never be called again during replay).
+            facts_by_target = extract_visible_host_facts(state)
+            compatibility_matrix = compute_compatibility_matrix(legal_actions, facts_by_target)
+            # Visible-only global progress summary (FINISH-learnability
+            # investigation, spec section 18; extended with observable
+            # subnet-exploration progress) -- computed from the exact same
+            # state as compatibility_matrix above, passed explicitly into
+            # policy.step() and stored verbatim on this step's StepRecord,
+            # for the same replay-consistency reason. assemble_visible_progress
+            # only includes each component the policy was actually
+            # constructed with (spec: disabling a component removes it
+            # from the input, never just zeroes it).
+            exploration = extract_visible_network_exploration(state)
+            visible_progress = assemble_visible_progress(
+                facts_by_target, exploration,
+                self._policy.visible_target_progress_enabled, self._policy.visible_subnet_exploration_enabled,
+            )
+            # FINISH diagnostic: the objective/target status AT THE MOMENT
+            # the policy is about to decide, queried from the live
+            # simulator before this step's action is applied below -- never
+            # inferred after the fact from the resulting transition. This
+            # is diagnostic simulator truth (for decisions.csv only), not a
+            # policy input: nothing here is passed into policy.step().
+            objective_satisfied_before_action = self._adapter.objective_satisfied()
+            sensitive_targets_total_before, sensitive_targets_remaining_before = self._adapter.sensitive_target_status()
+            # Exploration diagnostics (spec sections 21-24) -- built from
+            # the SAME VisibleNetworkExploration used for the policy input
+            # above (never a second interpretation), plus the visible-only
+            # "are all currently-visible sensitive targets rooted" flag
+            # used for the frontier-conditional FINISH diagnostic.
+            known_subnets_total_before_action = len(exploration.known_subnets)
+            known_subnets_scanned_before_action = len(exploration.successfully_scanned_subnets)
+            known_exploration_frontier_remaining_before_action = exploration.known_exploration_frontier_remaining
+            all_visible_sensitive_targets_rooted_before_action = all_visible_sensitive_targets_rooted(facts_by_target)
+            has_visible_sensitive_target_before_action = any(f.is_sensitive_target for f in facts_by_target.values())
+            step_out = self._policy.step(graph_obs, legal_actions, rstate, compatibility_matrix, visible_progress)
 
             decision = await self._decide(legal_actions, step_out, state)
             action_index = decision["action_index"]
@@ -358,6 +486,8 @@ class RolloutCollector:
                 episode_id=self._episode_id,
                 environment_step=self._episode_steps,
                 observation_id=f"observation-{self._episode_id}-{self._episode_steps}",
+                compatibility_features=compatibility_matrix,
+                visible_progress=visible_progress,
                 graph_data=graph_obs.data,
                 node_key_to_index=graph_obs.node_key_to_index,
                 legal_action_descriptors=legal_actions,
@@ -397,7 +527,18 @@ class RolloutCollector:
                 sensitive_targets_total=sensitive_targets_total,
                 sensitive_targets_with_root=sensitive_targets_total - sensitive_targets_remaining,
                 sensitive_targets_remaining=sensitive_targets_remaining,
+                objective_satisfied_before_action=objective_satisfied_before_action,
+                sensitive_targets_remaining_before_action=sensitive_targets_remaining_before,
+                sensitive_targets_with_root_before_action=(
+                    sensitive_targets_total_before - sensitive_targets_remaining_before
+                ),
+                known_subnets_total_before_action=known_subnets_total_before_action,
+                known_subnets_scanned_before_action=known_subnets_scanned_before_action,
+                known_exploration_frontier_remaining_before_action=known_exploration_frontier_remaining_before_action,
+                all_visible_sensitive_targets_rooted_before_action=all_visible_sensitive_targets_rooted_before_action,
+                has_visible_sensitive_target_before_action=has_visible_sensitive_target_before_action,
                 state_delta=state_delta,
+                env_index=self._env_index,
             )
             records.append(record)
 
@@ -643,9 +784,18 @@ class RolloutCollector:
         assert next_state is not None
         next_rstate = self._policy.advance_recurrent_state(step_out, action_index, training_reward, query=False)
         next_legal = self._adapter.legal_actions(next_state)
-        next_graph_obs = self._adapter.to_pyg_data(next_state)
+        next_graph_obs = self._adapter.to_pyg_data(
+            next_state, include_subnet_scan_feature=self._policy.visible_subnet_exploration_enabled
+        )
+        next_facts = extract_visible_host_facts(next_state)
+        next_compatibility = compute_compatibility_matrix(next_legal, next_facts)
+        next_exploration = extract_visible_network_exploration(next_state)
+        next_visible_progress = assemble_visible_progress(
+            next_facts, next_exploration,
+            self._policy.visible_target_progress_enabled, self._policy.visible_subnet_exploration_enabled,
+        )
         with torch.no_grad():
-            probe = self._policy.step(next_graph_obs, next_legal, next_rstate)
+            probe = self._policy.step(next_graph_obs, next_legal, next_rstate, next_compatibility, next_visible_progress)
         return float(probe.value)
 
 
@@ -653,6 +803,40 @@ class RolloutCollector:
 # small int from experiment.seed) so a deterministic evaluation pass never
 # regenerates a scenario instance a training episode already used.
 EVAL_SEED_OFFSET = 1_000_000_000
+
+# Multi-environment PPO collection (spec: the 2048-transition, 4-
+# independent-environment-stream ablation). Each of `num_envs` independent
+# RolloutCollector instances needs (a) a distinct, non-overlapping
+# base_seed range so no two streams' episodes ever reuse the same
+# NASimEmu scenario-generation seed, and (b) a distinct, non-overlapping
+# episode_id range so `episode_id` remains a globally unique episode
+# identifier once all streams' records are combined into one PPO batch
+# (see RolloutCollector.__init__'s own docstring). Both strides are kept
+# far above any realistic per-stream episode count in a single collection
+# window (mirrors EVAL_SEED_OFFSET's own reasoning above) -- deterministic,
+# documented, reproducible.
+ENV_SEED_STRIDE = 10_000_000
+EPISODE_ID_STRIDE = 10_000_000
+
+
+def env_base_seed(training_seed: int, env_index: int) -> int:
+    """The ``base_seed`` one of ``num_envs`` independent RolloutCollector
+    streams should use (spec section 14). Env 0 always gets exactly
+    ``training_seed`` -- so a single-environment run (``num_envs=1``)
+    uses the SAME base_seed the pre-multi-env ``RolloutCollector`` always
+    used, byte-identical (spec section 6). Every other stream gets a
+    distinct, non-overlapping range.
+    """
+    return training_seed + env_index * ENV_SEED_STRIDE
+
+
+def env_episode_id_offset(env_index: int) -> int:
+    """The ``episode_id_offset`` one of ``num_envs`` independent
+    RolloutCollector streams should use. Env 0 always gets 0 (episode IDs
+    start at 1, exactly the pre-multi-env convention -- spec section 6),
+    every other stream gets a distinct, non-overlapping range.
+    """
+    return env_index * EPISODE_ID_STRIDE
 
 
 async def run_evaluation_episodes(

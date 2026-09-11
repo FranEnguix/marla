@@ -8,7 +8,7 @@ fail fast instead of being silently ignored.
 
 from __future__ import annotations
 
-from typing import Literal
+from typing import Annotated, Literal, Union
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
@@ -92,15 +92,106 @@ class ActionEncoderConfig(MarlaBaseModel):
 class RecurrentConfig(MarlaBaseModel):
     hidden_size: int = Field(gt=0)
     sequence_length: int = Field(gt=0)
+    # Architecture ablation switches (spec: v2 / v3-target / v3-full), never
+    # divergent codebases -- see marla.environment.visible_facts and
+    # RecurrentPolicy's own docstring. Defaults preserve the FINISH-
+    # diagnostics phase's existing v3-target behavior (target progress on,
+    # exploration progress off) for every config that doesn't mention
+    # these explicitly.
+    visible_target_progress: bool = True
+    visible_subnet_exploration: bool = False
+
+
+class ConstantSchedulerConfig(MarlaBaseModel):
+    """No learning-rate scheduler: the optimizer's ``learning_rate`` is used
+    unchanged for the entire run. Implemented as a real (no-op)
+    ``torch.optim.lr_scheduler.LambdaLR`` under the hood -- see
+    ``learning/lr_scheduler.py`` -- so every run has a uniform
+    schedule/checkpoint code path, "constant" is simply the schedule whose
+    multiplier is always 1.0, not a special ``None`` case threaded through
+    training and checkpointing.
+    """
+
+    type: Literal["constant"] = "constant"
+
+
+class LinearSchedulerConfig(MarlaBaseModel):
+    """Linear decay from the optimizer's ``learning_rate`` down to
+    ``end_factor * learning_rate``, reaching exactly ``end_factor`` at the
+    final PPO update of the run (``torch.optim.lr_scheduler.LinearLR``,
+    ``start_factor=1.0``; horizon derived from the actual number of PPO
+    updates the run will perform -- see ``learning/lr_scheduler.py``, spec
+    section 8). No default: the old implicit "decays to exactly 0" behavior
+    is no longer assumed -- every config using this schedule must say what
+    fraction of the initial rate it decays to.
+    """
+
+    type: Literal["linear"] = "linear"
+    end_factor: float = Field(ge=0, le=1)
+
+
+class CosineSchedulerConfig(MarlaBaseModel):
+    """Cosine annealing from the optimizer's ``learning_rate`` down to
+    ``eta_min``, reaching ``eta_min`` exactly at the final PPO update
+    (``torch.optim.lr_scheduler.CosineAnnealingLR``; horizon derived the
+    same way as ``linear``, above).
+    """
+
+    type: Literal["cosine"] = "cosine"
+    eta_min: float = Field(ge=0, default=0.0)
+
+
+class StepSchedulerConfig(MarlaBaseModel):
+    """Multiplicative decay by ``gamma`` every ``step_size`` PPO updates
+    (``torch.optim.lr_scheduler.StepLR``). ``step_size`` is in PPO updates,
+    not environment steps or optimizer minibatch steps -- see
+    "Scheduler stepping semantics" in ``learning/lr_scheduler.py``.
+    """
+
+    type: Literal["step"] = "step"
+    step_size: int = Field(gt=0)
+    gamma: float = Field(gt=0, le=1)
+
+
+class ExponentialSchedulerConfig(MarlaBaseModel):
+    """Multiplicative decay by ``gamma`` every PPO update
+    (``torch.optim.lr_scheduler.ExponentialLR``).
+    """
+
+    type: Literal["exponential"] = "exponential"
+    gamma: float = Field(gt=0, le=1)
+
+
+SchedulerConfig = Annotated[
+    Union[
+        ConstantSchedulerConfig,
+        LinearSchedulerConfig,
+        CosineSchedulerConfig,
+        StepSchedulerConfig,
+        ExponentialSchedulerConfig,
+    ],
+    Field(discriminator="type"),
+]
 
 
 class OptimizerConfig(MarlaBaseModel):
     """Only Adam is supported in this release -- an unrecognized ``type``
     is rejected outright (Pydantic's ``Literal`` does this for free) rather
     than silently falling back to some other optimizer.
+
+    ``learning_rate`` and ``scheduler`` live here (not on ``PPOConfig``)
+    because they are optimizer-level concerns, not PPO-algorithm concerns
+    -- and because a scheduler wraps a specific optimizer instance, keeping
+    them adjacent in both the YAML and this model avoids splitting one
+    conceptual decision across two unrelated config sections. Both are
+    REQUIRED, with no default for ``scheduler``: spec section 6 requires
+    every experiment config to state its schedule explicitly rather than
+    silently inheriting a hidden default (``marla init`` templates set an
+    explicit value; there is no config-wide fallback).
     """
 
     type: Literal["adam"] = "adam"
+    learning_rate: float = Field(gt=0)
     # Matches the Adam paper's numerical-stability term added inside the
     # denominator, not a learning-rate-like quantity -- torch's default
     # (1e-8) is tuned for supervised learning with typically well-scaled
@@ -108,6 +199,7 @@ class OptimizerConfig(MarlaBaseModel):
     # slightly larger eps (1e-5, the same value used by OpenAI Baselines /
     # CleanRL's PPO implementations) improves numerical stability there.
     eps: float = Field(default=1.0e-5, gt=0)
+    scheduler: SchedulerConfig
 
 
 class PPOConfig(MarlaBaseModel):
@@ -115,7 +207,13 @@ class PPOConfig(MarlaBaseModel):
     # training run should stop; kept explicit rather than defaulted since
     # it materially affects reproducibility/comparability between runs.
     total_environment_steps: int = Field(gt=0)
-    rollout_steps: int = Field(gt=0)
+    # Environment transitions collected per PPO update, PER independent
+    # environment stream (see `num_envs` below). For `num_envs=1`, "per
+    # stream" and "total per update" are the same number -- the canonical
+    # research baseline uses num_envs=4, so most current configs collect
+    # `num_envs * steps_per_env` transitions per update; see
+    # `effective_batch_size` below.
+    steps_per_env: int = Field(gt=0)
     epochs: int = Field(gt=0)
     minibatch_sequences: int = Field(gt=0)
     gamma: float = Field(gt=0, le=1)
@@ -125,17 +223,57 @@ class PPOConfig(MarlaBaseModel):
     query_entropy_coefficient: float = Field(ge=0)
     action_entropy_coefficient: float = Field(ge=0)
     max_grad_norm: float = Field(gt=0)
-    learning_rate: float = Field(gt=0)
-    # "constant": learning_rate is used unchanged for the whole run (prior
-    # behavior, still supported for reproducing older experiments).
-    # "linear": decays linearly from learning_rate to 0 over
-    # total_environment_steps (see learning/lr_schedule.py for exact
-    # semantics). Defaults to "linear" for new/generated configs; older
-    # YAML omitting this field also gets "linear" on load (spec section 16
-    # requires this field to have a default, not that the default match
-    # historical behavior -- "constant" remains one explicit value away).
-    learning_rate_schedule: Literal["constant", "linear"] = "linear"
-    optimizer: OptimizerConfig = Field(default_factory=OptimizerConfig)
+    optimizer: OptimizerConfig
+    # Experimental (spec: the State-N critic-calibration collapse
+    # investigation) -- number of EXTRA value-head-only optimizer passes
+    # run immediately after the normal ``epochs``-pass actor+critic PPO
+    # update completes, using the exact same rollout/GAE return targets
+    # (never Monte Carlo/oracle data). Every non-critic parameter is
+    # frozen during these passes (see learning.ppo.critic_refinement_update
+    # for the exact isolation mechanism) -- the actor and shared backbone
+    # never change during this phase. Default 0 is an exact behavioral
+    # no-op: every existing config/checkpoint is unaffected. Never
+    # overloads `epochs`, which remains the actor+critic joint-update
+    # count unchanged.
+    critic_refinement_epochs: int = Field(ge=0, default=0)
+    # Number of INDEPENDENT environment streams collected, under the SAME
+    # frozen policy parameters, before one PPO update runs. Effective
+    # transitions per PPO update = `num_envs * steps_per_env` (see
+    # `effective_batch_size` below). The provisional canonical research
+    # baseline is num_envs=4 (see research/EXPERIMENT_PLAN.md); num_envs=1
+    # collapses to a single-stream collector with no other behavioral
+    # change. Each stream gets its own NasimEmuAdapter, its own
+    # recurrent-hidden-state chain, and its own deterministically-derived
+    # environment-reset seed range (see
+    # `marla.learning.rollout.env_base_seed`) -- never a slice of one
+    # continuous simulator trajectory. GAE is computed independently per
+    # stream (never across a stream boundary) before the resulting
+    # advantages/returns are combined for one shared PPO update -- see
+    # `marla.learning.trainer.run_training_loop`'s multi-env branch.
+    num_envs: int = Field(ge=1, default=1)
+
+
+def effective_batch_size(ppo_config: "PPOConfig") -> int:
+    """Total environment transitions collected (across every independent
+    environment stream) before one PPO update runs -- ``num_envs *
+    steps_per_env``. For ``num_envs=1`` this is exactly ``steps_per_env``.
+    """
+    return ppo_config.num_envs * ppo_config.steps_per_env
+
+
+def compute_num_rollouts(ppo_config: "PPOConfig") -> int:
+    """``ceil(total_environment_steps / effective_batch_size)`` -- the
+    single source of truth for how many collect/PPO-update cycles a
+    training run needs, used by ``cli.py``, ``learning/trainer.py``'s
+    scheduler-horizon derivation, and every research driver script.
+    ``total_environment_steps`` is a GLOBAL budget across every
+    environment stream, never per-stream -- for ``num_envs=4`` this must
+    NOT be computed as if only one stream's steps counted, which would
+    silently run 4x the intended total.
+    """
+    import math
+
+    return math.ceil(ppo_config.total_environment_steps / effective_batch_size(ppo_config))
 
 
 class PolicyConfig(MarlaBaseModel):
@@ -198,9 +336,22 @@ class PlanMakerAgentConfig(MarlaBaseModel):
     knowledge: PlanMakerKnowledgeConfig
 
 
+class ResourceMonitoringConfig(MarlaBaseModel):
+    """CPU/RAM/GPU telemetry (:mod:`marla.monitoring.resources`), sampled
+    on a background thread throughout training/evaluation. Enabled by
+    default -- the sampling overhead is small (measured; see
+    ``research/RESEARCH_READINESS.md``) and computational cost is now a
+    first-class research metric, not an opt-in extra.
+    """
+
+    enabled: bool = True
+    sampling_interval_seconds: float = Field(default=1.0, gt=0)
+
+
 class MetricsConfig(MarlaBaseModel):
     output_directory: str = "runs"
     record_decisions: bool = True
+    resource_monitoring: ResourceMonitoringConfig = Field(default_factory=ResourceMonitoringConfig)
     # Periodic deterministic (greedy) evaluation episodes, run with the
     # current policy weights between rollouts (an EvalCallback-style pass,
     # not a genuine held-out generalization test -- MARLA's config has a
@@ -215,6 +366,37 @@ class MetricsConfig(MarlaBaseModel):
 
 class ReproducibilityConfig(MarlaBaseModel):
     deterministic_torch: bool = True
+
+
+class CarbonConfig(MarlaBaseModel):
+    """Per-agent energy/CO2-equivalent emissions tracking
+    (:mod:`marla.monitoring.carbon`, CodeCarbon-backed). ``enabled``
+    defaults to ``False`` (unlike ``metrics.resource_monitoring``, which
+    defaults on): CodeCarbon is an OPTIONAL dependency (the ``carbon``
+    extra), not a hard one like ``psutil`` -- defaulting this on would
+    make every existing config/test suddenly require it installed. The
+    research HPO study configs (spec: Optuna PPO tuning) turn this on
+    explicitly.
+    """
+
+    enabled: bool = False
+    # "process" isolates CPU/RAM estimates to this process (matching "one
+    # agent = one MARLA run"); GPU power is still measured at device
+    # level regardless of tracking_mode (CodeCarbon/NVML limitation, not
+    # a MARLA one) -- see monitoring/carbon.py's module docstring. This is
+    # exactly why HPO agents must run strictly sequentially on one device,
+    # never concurrently: see learning/optuna_study.py's n_jobs=1.
+    tracking_mode: Literal["process", "machine"] = "process"
+    measure_power_secs: float = Field(default=1.0, gt=0)
+    # Explicit carbon-location overrides (spec section 8): when ANY of
+    # these is set, an OfflineEmissionsTracker is built with them instead
+    # of CodeCarbon's own online geo-IP-based auto-resolution. None of
+    # these being set does NOT mean "no location" -- it means "let
+    # CodeCarbon auto-resolve it", which is the default, normal path.
+    country_iso_code: str | None = None
+    region: str | None = None
+    cloud_provider: str | None = None
+    cloud_region: str | None = None
 
 
 class Config(MarlaBaseModel):
@@ -232,6 +414,7 @@ class Config(MarlaBaseModel):
     agents: list[PlanMakerAgentConfig] = Field(default_factory=list)
     metrics: MetricsConfig = Field(default_factory=MetricsConfig)
     reproducibility: ReproducibilityConfig = Field(default_factory=ReproducibilityConfig)
+    carbon: CarbonConfig = Field(default_factory=CarbonConfig)
 
     @model_validator(mode="after")
     def _check_schema_version(self) -> "Config":
@@ -247,6 +430,23 @@ class Config(MarlaBaseModel):
         if self.execution.mode == "distributed" and not self.experiment.run_id:
             raise ValueError(
                 "experiment.run_id is mandatory when execution.mode == 'distributed'"
+            )
+        return self
+
+    @model_validator(mode="after")
+    def _check_multi_env_requires_local_execution(self) -> "Config":
+        # runtime/distributed.py's process-per-agent design constructs a
+        # single NasimEmuAdapter and has no notion of multiple independent
+        # environment streams (spec: the 2048-transition, 4-independent-
+        # environment-stream ablation is a LOCAL-mode-only experiment).
+        # Rejected explicitly here rather than silently under-collecting
+        # (num_rollouts would already assume num_envs streams per update,
+        # but only one adapter would ever be built) if this combination is
+        # ever attempted.
+        if self.policy.ppo.num_envs > 1 and self.execution.mode != "local":
+            raise ValueError(
+                f"policy.ppo.num_envs={self.policy.ppo.num_envs} > 1 requires execution.mode == 'local' -- "
+                "the multi-environment collector is not implemented for distributed mode."
             )
         return self
 

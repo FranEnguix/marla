@@ -119,10 +119,125 @@ Run directory contents
     anything stored (``sensitive_targets_total``, ``sensitive_targets_with_root``,
     ``sensitive_targets_remaining`` -- USER access does not count as
     "with root"; feeds ``objective.premature_finish_penalty_per_remaining_target``);
-    and, for the assisted variant only (``null`` in the baseline): whether/how this step was
+    action/target compatibility (see :mod:`marla.environment.action_compatibility`
+    -- the same helper drives the action encoder's own input features, so
+    these can never drift from what the policy actually saw):
+    ``selected_action_known_service_match``/``selected_action_known_process_match``/
+    ``selected_action_known_os_match``/``selected_action_known_os_mismatch``
+    (``null``, never a misleading ``False``, whenever the selected action
+    has no such requirement at all), ``selected_action_visible_preconditions_status``
+    (``confirmed_compatible``/``contradicted``/``unknown``/``not_applicable``),
+    and the compatible-action probability mass the current policy places
+    on ``confirmed_compatible`` actions before/after any consultation
+    (``base_compatible_action_probability_mass``/
+    ``final_compatible_action_probability_mass`` -- identical to each
+    other for the baseline variant, since no advice ever perturbs the
+    logits there); FINISH diagnostics -- see the labeled note below for
+    which of these are diagnostic simulator truth vs. agent-visible
+    quantities (``objective_satisfied_before_action``,
+    ``sensitive_targets_remaining_before_action``,
+    ``sensitive_targets_with_root_before_action``,
+    ``base_finish_probability``/``final_finish_probability``,
+    ``base_finish_rank``/``final_finish_rank`` -- 1 = highest
+    probability/logit, ties broken by legal-action order --
+    ``base_finish_is_argmax``/``final_finish_is_argmax``,
+    ``finish_selected``); and, for the assisted variant only (``null`` in the baseline): whether/how this step was
     queried, the request/response status and latency, base vs. Plan Maker
     vs. final top action, ``beta``/``alpha``, and whether accepted advice
     changed the top action.
+
+    .. important::
+
+       ``objective_satisfied_before_action`` is a **different question**
+       from ``objective_satisfied``/``objective_became_satisfied`` above,
+       not a duplicate: the latter two describe the simulator state
+       *after* this step's action was applied; ``objective_satisfied_before_action``
+       (and its paired ``sensitive_targets_remaining_before_action``/
+       ``sensitive_targets_with_root_before_action``) describe the state
+       that existed **when the policy chose this step's action** --
+       queried from the live simulator immediately before that action was
+       applied, never inferred retrospectively from the transition. This
+       is the field to condition on when asking "was FINISH the correct
+       choice at this decision?" (see ``finish_probability_by_objective_state.png``
+       below), and it is what the rollouts.csv aggregates below split on.
+
+       These decision-time fields, like ``sensitive_targets_total``/
+       ``sensitive_targets_with_root``/``sensitive_targets_remaining``
+       themselves, are **diagnostic simulator truth**: a direct query of
+       NASimEmu's real, fully-observable state, recorded here purely for
+       evaluator/debug/scientific-reporting purposes. None of it is fed to
+       the policy as a neural input -- persisting a diagnostic label in
+       this CSV is not the same thing as using it for a decision. What the
+       policy is actually allowed to see is defined entirely by
+       :mod:`marla.environment.visible_facts`/
+       :mod:`marla.environment.action_compatibility`, independent of
+       anything recorded here.
+
+       The recurrent policy *does* receive one new, genuinely visible
+       global-progress input as of ``POLICY_REPRESENTATION_VERSION`` 3
+       (the FINISH-learnability investigation, ``research/diagnostics/ppo_learnability/README.md``):
+       :func:`marla.environment.visible_facts.compute_visible_progress`, a
+       3-dimensional ``[has_visible_sensitive_target,
+       fraction_visible_sensitive_targets_with_root,
+       any_visible_sensitive_target_without_root]`` summary fed into
+       ``RecurrentCore``'s ``x_t`` alongside the graph embedding. Built
+       exclusively from confirmed-visible facts (a host's true sensitivity
+       is revealed by NASimEmu's own observation model upon a successful
+       exploit against it, never assumed) -- see that function's own
+       docstring and ``tests/test_visible_progress.py`` for the exact
+       anti-leak argument. This is *not* diagnostic-only like the fields
+       above; it is a real (if intentionally narrow) policy input, kept
+       separate from ``objective_satisfied_before_action`` and friends.
+
+       As of ``POLICY_REPRESENTATION_VERSION`` 4 (the subnet-exploration
+       investigation) there is a **second**, independently-ablatable
+       visible-only progress signal alongside the target-progress one
+       above: **observable subnet exploration progress**, gated by
+       ``policy.recurrent.visible_subnet_exploration`` (default ``False``;
+       ``visible_target_progress`` defaults ``True``, preserving version-3
+       behavior unless a config opts in). Three terms, all defined purely
+       from what the policy has actually discovered/attempted --  never
+       from NASimEmu's true, hidden topology:
+
+       - A **known subnet** is any subnet containing at least one
+         currently-visible host (``EnvironmentState.host_addresses``); an
+         undiscovered subnet is not "known unscanned," it simply does not
+         exist in this vocabulary at all.
+       - A known subnet is **successfully scanned** once a ``SubnetScan``
+         action *originating from a host in it* has returned
+         ``info["success"] == True`` at any point in the episode --
+         tracked by MARLA itself (``EnvironmentState.successfully_scanned_subnets``,
+         reset every episode), because NASimEmu's own ``subnet_graph`` is
+         updated on every attempted scan regardless of success and so
+         cannot answer this question. A successful scan that discovers
+         zero new subnets still counts; a failed/rejected/precondition-failed
+         scan never does.
+       - The **known exploration frontier** is the set of known subnets not
+         yet successfully scanned; ``known_exploration_frontier_remaining``
+         is true iff that set is non-empty. Deliberately not called
+         "network fully explored" when false -- that would overclaim: a
+         false frontier flag means only that every *currently known*
+         subnet has been scanned, not that every *true* subnet has been
+         found. This is a strictly narrower, honest claim.
+
+       These are computed once by :class:`marla.environment.visible_facts.VisibleNetworkExploration`
+       and reused verbatim by the per-subnet-node GraphSAGE feature
+       (``subnet_scan_completed``, the 13th node feature, never set on a
+       host node and never encoding the subnet's own ID), the 2-dimensional
+       recurrent-policy vector (``[fraction_known_subnets_scanned,
+       any_known_subnet_unscanned]``, appended after target progress, never
+       duplicating it), the decision/rollout metrics below, and
+       :func:`marla.environment.observation_summary.build_observation_summary`'s
+       Plan Maker-visible ``network_exploration`` block -- one authoritative
+       source, not four independent reimplementations. Deliberately *not*
+       one fixed feature per subnet (no ``subnet_1_scanned``,
+       ``subnet_2_scanned``, ...): that would make the representation's
+       width depend on scenario size, defeating the point of a
+       fixed-width, scenario-independent progress summary. See
+       ``tests/test_subnet_exploration.py`` for the anti-leak arguments
+       (an unknown subnet has zero representational influence, proven by
+       direct construction, not just by inspection) and the exact dynamic-
+       discovery sequence this is built against.
 
 ``rollouts.csv``
     One row per completed rollout: ``environment_steps_total`` (the main
@@ -133,6 +248,60 @@ Run directory contents
     wall-clock timing (``collection_seconds``, ``optimization_seconds``,
     ``evaluation_seconds``). Every rollout-level aggregate lives here
     exactly once -- ``updates.csv`` no longer repeats them per minibatch.
+    Also: this rollout's mean compatible-action probability mass
+    (``mean_base_compatible_action_probability_mass``/
+    ``mean_final_compatible_action_probability_mass``) and the fraction of
+    decisions whose selected action's ``visible_preconditions_status`` was
+    each of the four values (``selected_confirmed_compatible_rate``,
+    ``selected_contradicted_rate``, ``selected_unknown_rate``,
+    ``selected_not_applicable_rate`` -- one shared denominator, every
+    decision in the rollout, so these four always sum to 1.0), built
+    directly from that rollout's own ``decisions.csv`` rows rather than
+    recomputed from ``records`` a second time. The same three rates are
+    also reported with an **applicable-actions-only** denominator
+    (``selected_confirmed_compatible_rate_applicable_actions``,
+    ``selected_contradicted_rate_applicable_actions``,
+    ``selected_unknown_rate_applicable_actions``) that excludes
+    ``not_applicable`` selections (scans/FINISH) from the denominator
+    entirely rather than folding them in -- these three sum to 1.0 over
+    *applicable* decisions only. Both denominators are kept; neither
+    silently replaces the other.
+
+    FINISH diagnostics, partitioned by ``objective_satisfied_before_action``
+    (the decision-time truth, not the post-action field --
+    see decisions.csv's note above): ``mean_base_finish_probability_objective_reached``/
+    ``mean_base_finish_probability_objective_not_reached`` (and the
+    ``final_`` equivalents), ``base_finish_argmax_rate_objective_reached``/
+    ``_objective_not_reached`` (and ``final_``), and
+    ``finish_selected_rate_objective_reached``/``_objective_not_reached``.
+    Each ``_objective_reached``/``_objective_not_reached`` pair shares that
+    partition's own denominator (how many decisions in the rollout fell on
+    that side of the split); a partition with zero decisions this rollout
+    is ``null``, never ``0.0``.
+
+    Subnet-exploration aggregates (all computed from the visible-only
+    ``VisibleNetworkExploration`` facts described above, never true
+    topology): ``mean_fraction_known_subnets_scanned``,
+    ``mean_known_subnets_unscanned``, ``known_frontier_remaining_rate``
+    (fraction of this rollout's decisions where a known, unscanned subnet
+    still existed). Also two FINISH-conditional pairs restricted to
+    decisions where ``has_visible_sensitive_target_before_action`` is true
+    **and** ``all_visible_sensitive_targets_rooted_before_action`` is true
+    (i.e. every *currently visible* sensitive target already has ROOT --
+    "no visible sensitive target at all" is never folded into "complete"):
+    ``mean_finish_probability_visible_complete_frontier_remaining`` and
+    ``mean_finish_probability_visible_complete_no_frontier``, splitting
+    that subset by ``known_exploration_frontier_remaining_before_action``.
+    Their difference is :math:`\Delta_{\text{frontier}}` (no-frontier minus
+    frontier-remaining) -- the main evidence for whether representing the
+    exploration frontier helps FINISH discrimination, kept conceptually
+    separate from :math:`\Delta_{\text{objective}}` (``mean_base_finish_probability_objective_reached``
+    minus ``..._objective_not_reached`` above, using true hidden objective
+    state): :math:`\Delta_{\text{frontier}}` asks "does the policy's FINISH
+    decision track *what it has itself observed*", :math:`\Delta_{\text{objective}}`
+    asks "does that observable reasoning actually correlate with the real,
+    hidden, correct stopping point". A partition with zero qualifying
+    decisions this rollout is ``null``.
 
 ``updates.csv``
     One row per PPO minibatch update: ``update``, ``rollout``, ``epoch``,
@@ -237,6 +406,69 @@ Is the RL policy learning?
     NASimEmu discovers more hosts within an episode, so the normalized
     version is what's actually comparable across different points in an
     episode or across episodes.
+
+``compatible_action_probability.png``
+    :math:`P(\text{action compatible with observed facts})` -- the mean
+    policy probability mass placed on actions whose
+    ``visible_preconditions_status`` is ``confirmed_compatible``
+    (:mod:`marla.environment.action_compatibility`), over training
+    environment steps. This is the direct evidence that the action/target
+    compatibility fix is not just representable but actually *used*: it
+    should rise as the actor learns to prefer confirmed-compatible actions
+    over ones it cannot yet confirm are safe. Base and final-policy series
+    both plotted (they coincide exactly for the baseline/PPO_ONLY variant,
+    since no advice ever perturbs the logits there). Absent for a run
+    written before these ``rollouts.csv`` columns existed.
+
+``finish_probability_by_objective_state.png``
+    :math:`P(\text{FINISH})`, conditioned on ``objective_satisfied_before_action``
+    (was the true objective already satisfied *when the policy chose this
+    step's action* -- decision-time truth, never the post-action field),
+    over training environment steps. This is the direct, measured answer
+    to "once MARLA's policy has already reached the true objective, does
+    it assign high probability to FINISH?" -- never inferred indirectly
+    from ``successful_finish_rate``. The ideal learned shape:
+    :math:`P(\text{FINISH}\mid\text{objective reached}) \to 1` while
+    :math:`P(\text{FINISH}\mid\text{objective not reached}) \to 0`. Base
+    and final-policy series both plotted when they differ (assisted
+    variant); for PPO_ONLY they coincide exactly. Absent for a run written
+    before these ``rollouts.csv`` columns existed.
+
+``finish_probability_by_remaining_targets.png``
+    :math:`P(\text{FINISH})` (base policy) as a function of the number of
+    true sensitive targets still missing ROOT *at decision time*
+    (``sensitive_targets_remaining_before_action``) -- a diagnostic plot,
+    not a paper result. Expected qualitative shape: ``remaining = 0`` ->
+    high FINISH probability, ``remaining > 0`` -> low. A remaining-target
+    count with too few observations this run is omitted rather than
+    plotted as a fabricated stable estimate. Absent for a run written
+    before these ``decisions.csv`` columns existed.
+
+``finish_probability_by_visible_completion_and_frontier.png``
+    :math:`P(\text{FINISH})` (base policy), restricted to decisions where
+    every *currently visible* sensitive target already has ROOT, split by
+    ``known_exploration_frontier_remaining_before_action`` -- "targets
+    complete, exploration frontier remains" (orange) vs. "targets
+    complete, no known frontier remains" (green), over training
+    environment steps. Unlike ``finish_probability_by_objective_state.png``
+    above, this conditions entirely on what the policy has *itself*
+    observed, never on hidden simulator truth. The desirable shape is the
+    no-frontier curve rising above the frontier-remaining curve (a growing
+    :math:`\Delta_{\text{frontier}}`, see ``rollouts.csv`` above) --
+    evidence the policy is learning to treat "nothing known left to
+    explore" as part of what makes FINISH justified, not merely "every
+    visible target is rooted." Skipped cleanly (no file written) for a run
+    whose ``rollouts.csv`` predates these columns, or where neither
+    partition ever had a qualifying decision.
+
+``known_subnet_exploration_progress.png``
+    ``mean_fraction_known_subnets_scanned`` and, when present,
+    ``known_frontier_remaining_rate``, over training environment steps --
+    a training-health diagnostic for the exploration representation
+    itself (is the policy actually driving the known frontier toward
+    zero, or is exploration effectively stalled), not a claim about true
+    network coverage. y-axis fixed to ``[0, 1]``. Skipped cleanly for a
+    run written before these ``rollouts.csv`` columns existed.
 
 Is the learned policy successful and efficient?
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -344,10 +576,11 @@ Is PPO training numerically stable?
     it alongside KL and task performance.
 
 ``learning_rate.png``
-    Actual learning rate over PPO updates, reflecting whichever schedule is
-    configured (``policy.ppo.learning_rate_schedule``, see
-    :doc:`configuration`) -- a flat line for ``constant``, monotonically
-    decreasing toward zero for ``linear``. Titled explicitly as constant
+    Actual learning rate over PPO updates, reflecting whichever scheduler
+    is configured (``policy.ppo.optimizer.scheduler``, see
+    :doc:`configuration` and :mod:`marla.learning.lr_scheduler`) -- flat
+    for ``constant``, monotonically decreasing for ``linear``/``cosine``/
+    ``exponential``, stepped for ``step``. Titled explicitly as constant
     when every value is identical, so that remains visible rather than
     assumed.
 
@@ -366,6 +599,21 @@ Is PPO training numerically stable?
     (``return_target``), with a y=x reference line -- how well-calibrated
     the critic is, complementing ``ppo_losses.png``'s explained-variance
     summary statistic with the actual point cloud.
+
+``resource_cpu_over_time.png`` / ``resource_ram_over_time.png`` / ``resource_gpu_over_time.png`` / ``resource_gpu_memory_over_time.png``
+    CPU/RAM/GPU telemetry from ``resources.csv``
+    (:mod:`marla.monitoring.resources`), x-axis is wall-clock seconds
+    since this run's own first sample (resource samples are on a fixed
+    ~1s cadence, not aligned to rollout/environment-step boundaries).
+    CPU and RAM plots overlay process- and system-level series; the GPU
+    utilization plot color-codes points by training phase
+    (``rollout_collection``/``ppo_update``/``evaluation``) when available.
+    All four are skipped entirely (not present, not empty) when
+    ``metrics.resource_monitoring.enabled: false`` or the run predates
+    this feature; the GPU plots are additionally skipped on a CPU-only
+    machine with no NVML/CUDA data to show. See :doc:`configuration`'s
+    ``resource_monitoring`` section and
+    ``research/RESEARCH_READINESS.md`` for measured sampling overhead.
 
 ``reward_vs_credit_assignment.png``
     Immediate ``training_reward`` vs. the credit PPO actually assigned

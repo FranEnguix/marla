@@ -19,6 +19,7 @@ from torch_geometric.utils import softmax as scatter_softmax
 from marla.config.models import PolicyConfig
 from marla.environment.actions import ActionDescriptor
 from marla.environment.graph import NODE_FEATURE_DIM, GraphObservation
+from marla.environment.visible_facts import visible_progress_dim
 from marla.learning.action_encoder import ActionEncoder
 from marla.learning.advice import (
     AdvisedOutput,
@@ -74,6 +75,14 @@ class RecurrentPolicy(nn.Module):
         ae_cfg = policy_config.action_encoder
         rc_cfg = policy_config.recurrent
         self.consultation_enabled = consultation_enabled
+        # Architecture-ablation flags (spec: v2/v3-target/v3-full) -- read
+        # once at construction time and exposed here so rollout collection
+        # (which has no other access to policy_config) can assemble the
+        # matching-width visible-progress tensor and decide whether
+        # to_pyg_data should include the subnet-scan graph feature,
+        # without duplicating this decision anywhere else.
+        self.visible_target_progress_enabled = rc_cfg.visible_target_progress
+        self.visible_subnet_exploration_enabled = rc_cfg.visible_subnet_exploration
 
         self.graph_encoder = GraphEncoder(node_feature_dim, ge_cfg.hidden_size, ge_cfg.layers)
         self.action_encoder = ActionEncoder(
@@ -85,6 +94,9 @@ class RecurrentPolicy(nn.Module):
             graph_embedding_size=ge_cfg.hidden_size,
             action_embedding_size=ae_cfg.hidden_size,
             hidden_size=rc_cfg.hidden_size,
+            visible_progress_dim=visible_progress_dim(
+                self.visible_target_progress_enabled, self.visible_subnet_exploration_enabled
+            ),
         )
         self.base_scorer = BaseActionScorer(
             recurrent_hidden_size=rc_cfg.hidden_size,
@@ -123,7 +135,23 @@ class RecurrentPolicy(nn.Module):
         graph_observation: GraphObservation,
         legal_actions: list[ActionDescriptor],
         recurrent_state: RecurrentState,
+        compatibility_matrix: Tensor,
+        visible_progress: Tensor,
     ) -> PolicyStepOutput:
+        """``compatibility_matrix``: ``(len(legal_actions), COMPATIBILITY_FEATURE_DIM)``,
+        the fixed-width action/target compatibility features (spec section
+        5) in the same order as ``legal_actions`` -- computed once by the
+        caller (:mod:`marla.environment.action_compatibility`) and passed
+        in explicitly, never recomputed here, so rollout collection and
+        PPO replay are structurally forced to use the identical tensor for
+        a given stored transition (spec section 11).
+
+        ``visible_progress``: ``(VISIBLE_PROGRESS_DIM,)``, the compact
+        visible-only global objective-progress summary (see
+        :func:`marla.environment.visible_facts.compute_visible_progress`)
+        -- likewise computed once by the caller and passed in explicitly,
+        never recomputed here, for the same replay-consistency reason.
+        """
         if not legal_actions:
             raise ValueError("legal_actions must include at least FINISH")
 
@@ -132,7 +160,7 @@ class RecurrentPolicy(nn.Module):
 
         node_embeddings, graph_embedding = self.graph_encoder(data)
         action_embeddings = self.action_encoder.encode_descriptors(
-            legal_actions, node_embeddings, graph_observation.node_key_to_index, device
+            legal_actions, node_embeddings, graph_observation.node_key_to_index, device, compatibility_matrix
         )
 
         previous_reward = torch.tensor(
@@ -143,6 +171,7 @@ class RecurrentPolicy(nn.Module):
         )
         z = self.recurrent_core(
             graph_embedding,
+            visible_progress.unsqueeze(0).to(device),
             recurrent_state.previous_action_embedding.unsqueeze(0).to(device),
             previous_reward,
             previous_query,

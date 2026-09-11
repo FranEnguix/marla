@@ -30,11 +30,18 @@ def test_example_configs_use_the_default_recurrent_sequence_length(fixture_name,
 def test_example_configs_point_at_the_default_scenario(fixture_name, request):
     config_path = request.getfixturevalue(fixture_name)
     config = load_config(config_path)
-    # MARLA's own repaired, pre-validated copy -- not the original NASimEmu
+    # MARLA's own repaired, pre-validated copy, named via the portable
+    # marla:// scheme (marla.scenarios.uri) -- not the original NASimEmu
     # scenario (marla scenario check proves that one is not universally
-    # solvable; see src/marla/scenarios/solvable/README.md).
-    assert config.environment.scenario.endswith("sm_entry_user_three_subnets.solvable.v2.yaml")
-    assert "scenarios/solvable/" in config.environment.scenario
+    # solvable; see src/marla/scenarios/solvable/README.md) and never a
+    # materialized, machine-specific filesystem path.
+    assert config.environment.scenario == "marla://sm_entry_user_three_subnets.solvable.v2.yaml"
+
+    from marla.scenarios.uri import resolve_scenario_reference
+
+    resolved = resolve_scenario_reference(config.environment.scenario, config_path.parent)
+    assert resolved.endswith("sm_entry_user_three_subnets.solvable.v2.yaml")
+    assert "scenarios/solvable/" in resolved
 
 
 @pytest.mark.parametrize("fixture_name", ["baseline_config_path", "assisted_config_path"])
@@ -43,7 +50,7 @@ def test_example_configs_use_adam_eps_1e5_and_linear_schedule(fixture_name, requ
     config = load_config(config_path)
     assert config.policy.ppo.optimizer.type == "adam"
     assert config.policy.ppo.optimizer.eps == pytest.approx(1.0e-5)
-    assert config.policy.ppo.learning_rate_schedule == "linear"
+    assert config.policy.ppo.optimizer.scheduler.type == "linear"
 
 
 def test_missing_file_raises(tmp_path):

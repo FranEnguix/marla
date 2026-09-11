@@ -67,3 +67,34 @@ def solvable_scenario_path(name: str) -> Path:
             f"No MARLA-owned solvable scenario named {name!r}. Available: {available}"
         )
     return path
+
+
+def diagnostic_scenarios_dir() -> Path:
+    """Directory containing MARLA's small, deterministic, hand-authored
+    micro-scenarios used to prove the action/target compatibility
+    representation fix (:mod:`marla.environment.action_compatibility`)
+    actually removes the aliasing problem it targets, and for cheap
+    diagnostic PPO learnability runs (``research/diagnostics/``). These
+    are deliberately not part of :func:`solvable_scenarios_dir` --
+    tiny, purpose-built fixtures, not scenarios meant for real AAMAS
+    training/evaluation.
+    """
+    return Path(str(resources.files("marla.scenarios") / "diagnostic"))
+
+
+def diagnostic_scenario_path(name: str) -> Path:
+    """Resolve one committed diagnostic micro-scenario by filename, e.g.
+    ``"micro_a_direct_root.v2.yaml"``.
+
+    Raises
+    ------
+    FileNotFoundError
+        If no such file exists under :func:`diagnostic_scenarios_dir`.
+    """
+    path = diagnostic_scenarios_dir() / name
+    if not path.is_file():
+        available = sorted(p.name for p in diagnostic_scenarios_dir().glob("*.yaml"))
+        raise FileNotFoundError(
+            f"No MARLA-owned diagnostic scenario named {name!r}. Available: {available}"
+        )
+    return path

@@ -92,6 +92,7 @@ class OrchestratorLifecycleBehaviour(OneShotBehaviour):
                 eval_every_rollouts=agent.config.metrics.eval_every_rollouts,
                 initial_environment_steps=agent.initial_environment_steps,
                 initial_update_count=agent.initial_update_count,
+                initial_scheduler_state=agent.initial_scheduler_state,
                 config=agent.config,
                 run_dir=agent.run_dir,
             )
@@ -261,7 +262,7 @@ class RLOrchestratorAgent(Agent):
         config: Config,
         policy: RecurrentPolicy,
         optimizer: torch.optim.Optimizer,
-        adapter: NasimEmuAdapter,
+        adapter: NasimEmuAdapter | list[NasimEmuAdapter],
         device: torch.device,
         seed: int,
         num_rollouts: int,
@@ -271,6 +272,7 @@ class RLOrchestratorAgent(Agent):
         stop_event: asyncio.Event | None = None,
         initial_environment_steps: int = 0,
         initial_update_count: int = 0,
+        initial_scheduler_state: dict | None = None,
         run_dir: Path | None = None,
     ):
         super().__init__(jid, password)
@@ -294,6 +296,7 @@ class RLOrchestratorAgent(Agent):
         # change.
         self.initial_environment_steps = initial_environment_steps
         self.initial_update_count = initial_update_count
+        self.initial_scheduler_state = initial_scheduler_state
 
         self.consultation_enabled = config.consultation.mode == "learned"
         self.consultation_cost = config.consultation.cost

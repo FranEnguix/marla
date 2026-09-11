@@ -60,6 +60,9 @@ Top level
    * - ``reproducibility``
      - see `reproducibility`_
      - Has defaults.
+   * - ``carbon``
+     - see `carbon`_
+     - Has defaults; ``enabled: false`` unless turned on explicitly.
 
 experiment
 ~~~~~~~~~~
@@ -101,10 +104,23 @@ environment
 ~~~~~~~~~~~
 
 - ``mode``: ``simulation`` (only supported value).
-- ``scenario`` (str, required): a NASimEmu scenario. A value ending in
-  ``.yaml`` is a path to a static scenario file (resolved relative to the
-  config file's directory if not absolute); any other string is the name
-  of a procedurally generated benchmark NASimEmu resolves at runtime.
+- ``scenario`` (str, required): a NASimEmu scenario, in one of three forms
+  (see :mod:`marla.scenarios.uri`):
+
+  - ``marla://<filename>``, e.g.
+    ``marla://sm_entry_user_three_subnets.solvable.v2.yaml`` -- a
+    MARLA-owned, pre-validated scenario packaged with MARLA itself.
+    Resolves identically regardless of the current working directory, the
+    config file's location, or how MARLA is installed (source checkout,
+    editable install, or a built wheel) -- never relative to a filesystem
+    path. This is what ``marla init`` and every ``examples/``/
+    ``research/aamas2027/configs/`` config use, and what a saved run
+    directory's ``config.yaml`` keeps (never rewritten to a materialized
+    path).
+  - A value ending in ``.yaml`` -- a path to a static scenario file,
+    resolved relative to the config file's directory if not absolute.
+  - Any other string -- the name of a procedurally generated benchmark
+    NASimEmu resolves at runtime.
 - ``max_episode_steps`` (int > 0, required): episode truncation limit.
   NASimEmu itself never internally terminates a non-FINISH action (see
   :mod:`marla.environment.nasimemu_adapter`), so this is the only thing
@@ -152,13 +168,49 @@ policy
   - ``sequence_length`` (int > 0): max steps per truncated-BPTT chunk
     during PPO replay (see :mod:`marla.learning.ppo`); a chunk never spans
     an episode boundary regardless of this value.
+  - ``visible_target_progress`` (bool, default ``True``): feed the
+    3-dimensional visible-only sensitive-target-progress summary
+    (:func:`marla.environment.visible_facts.compute_target_progress`) into
+    the recurrent core alongside the graph embedding. See :doc:`metrics`'s
+    ``decisions.csv`` section for the exact definition and anti-leak
+    argument.
+  - ``visible_subnet_exploration`` (bool, default ``False``): feed the
+    2-dimensional visible-only known-subnet-exploration summary
+    (``[fraction_known_subnets_scanned, any_known_subnet_unscanned]``,
+    :func:`marla.environment.visible_facts.compute_exploration_progress`)
+    into the recurrent core, appended after target progress, **and**
+    include the per-subnet-node ``subnet_scan_completed`` GraphSAGE
+    feature -- the same flag gates both, so disabling it never leaves the
+    exploration signal reachable through the graph embedding either. Off
+    by default to keep existing configs/checkpoints at version-3-equivalent
+    behavior; see :doc:`metrics` for the full definitions and
+    ``research/diagnostics/ppo_learnability/run_representation_ablation.py``
+    for the v2/v3-target/v3-full ablation this flag, together with
+    ``visible_target_progress``, exists to make possible. Changing either
+    flag changes the recurrent core's/GraphSAGE's input width, so a saved
+    checkpoint's flags must match the loading policy's exactly
+    (:func:`marla.learning.checkpoint.load_checkpoint` rejects a mismatch
+    before touching any state).
 - ``ppo``:
 
-  - ``total_environment_steps`` (int > 0): overall training budget; the
-    number of rollouts run is ``ceil(total_environment_steps / rollout_steps)``.
-  - ``rollout_steps`` (int > 0): environment steps collected per
-    rollout/PPO-update cycle.
-  - ``epochs`` (int > 0): PPO passes over each collected rollout.
+  - ``total_environment_steps`` (int > 0): overall training budget, a
+    GLOBAL count across every environment stream (see ``num_envs``
+    below) -- the number of PPO updates run is
+    ``ceil(total_environment_steps / (num_envs * steps_per_env))``.
+  - ``num_envs`` (int >= 1, default ``1``): number of INDEPENDENT
+    environment streams collected, under the same frozen policy, before
+    one PPO update runs. Each stream gets its own environment instance,
+    its own recurrent-hidden-state chain, and its own deterministically-
+    derived RNG seed range; GAE is computed independently per stream
+    before combining. ``num_envs=1`` is a single-stream collector with no
+    other behavioral change. See
+    ``research/diagnostics/multi_env_ablation/README.md`` for why
+    ``num_envs=4`` is the current provisional research baseline, and
+    :mod:`marla.learning.rollout` for the exact seed-derivation scheme.
+  - ``steps_per_env`` (int > 0): environment transitions collected per
+    PPO update, PER environment stream -- the effective batch size across
+    all streams is ``num_envs * steps_per_env``.
+  - ``epochs`` (int > 0): PPO passes over each collected batch.
   - ``minibatch_sequences`` (int > 0): sequence chunks per gradient step.
   - ``gamma`` (0 < float <= 1): discount factor.
   - ``gae_lambda`` (0 <= float <= 1): GAE lambda.
@@ -169,27 +221,63 @@ policy
   - ``action_entropy_coefficient`` (float >= 0): entropy bonus weight for
     the action distribution.
   - ``max_grad_norm`` (float > 0): gradient clipping norm.
-  - ``learning_rate`` (float > 0): Adam's initial learning rate.
-  - ``learning_rate_schedule`` (``constant`` \| ``linear``, default
-    ``linear``): ``constant`` keeps ``learning_rate`` unchanged for the
-    whole run. ``linear`` decays it linearly to ``0`` as
-    ``completed_environment_steps / total_environment_steps`` goes from
-    ``0`` to ``1`` (clamped, so it never goes negative), evaluated once
-    per rollout rather than once per PPO minibatch -- see
-    :mod:`marla.learning.lr_schedule`. Older YAML omitting this field still
-    loads (it defaults to ``linear``, same as new configs). The actual
-    current rate is always recorded per update in ``updates.csv`` and
-    plotted in ``marla summarize``'s ``learning_rate.png`` (:doc:`metrics`).
   - ``optimizer``: only ``adam`` is supported -- an unrecognized ``type``
     is rejected rather than silently falling back to something else.
+    ``learning_rate`` and ``scheduler`` live here (not directly under
+    ``ppo``) since they are optimizer-level, not PPO-algorithm-level,
+    concerns.
 
     - ``type``: ``adam`` (only supported value; never AdamW).
+    - ``learning_rate`` (float > 0, required): Adam's initial learning
+      rate.
     - ``eps`` (float > 0, default ``1.0e-5``): Adam's numerical-stability
       denominator term. Larger than torch's default (``1e-8``): PPO's
       advantage-scaled policy gradient is noisier than typical
       supervised-learning gradients, and this value (also used by OpenAI
-      Baselines / CleanRL's PPO) improves numerical stability. Older YAML
-      omitting ``optimizer`` entirely still loads with this default.
+      Baselines / CleanRL's PPO) improves numerical stability.
+    - ``scheduler`` (required, no default -- every config must state its
+      schedule explicitly): a PyTorch-native LR scheduler
+      (:mod:`marla.learning.lr_scheduler`), stepped exactly once per
+      COMPLETED PPO update (never per minibatch/epoch). Horizon-dependent
+      types (``linear``/``cosine``) derive their horizon from
+      ``ceil(total_environment_steps / (num_envs * steps_per_env)) - 1``
+      -- the actual number of ``.step()`` calls the run will make, so the
+      schedule reaches its endpoint exactly at the final PPO update
+      regardless of batch size. Supported ``type`` values:
+
+      - ``constant``: no scheduler -- the optimizer's ``learning_rate`` is
+        used unchanged for the whole run.
+      - ``linear``: decays from ``learning_rate`` to
+        ``end_factor * learning_rate`` (required field, ``0 <= end_factor
+        <= 1``), reaching ``end_factor`` exactly at the final update.
+      - ``cosine``: cosine annealing from ``learning_rate`` down to
+        ``eta_min`` (default ``0.0``), reaching it exactly at the final
+        update.
+      - ``step``: multiplies by ``gamma`` (required, ``0 < gamma <= 1``)
+        every ``step_size`` (required, int > 0) PPO updates.
+      - ``exponential``: multiplies by ``gamma`` (required,
+        ``0 < gamma <= 1``) every PPO update.
+
+      The actual current rate, scheduler type, and scheduler step count
+      are recorded per update in ``updates.csv`` (``learning_rate``/
+      ``scheduler_type``/``scheduler_step`` columns) and the rate is
+      plotted in ``marla summarize``'s ``learning_rate.png``
+      (:doc:`metrics`). Scheduler state (not just the optimizer's) is
+      saved in every checkpoint and restored exactly on
+      ``marla run --resume``.
+  - ``critic_refinement_epochs`` (int >= 0, default ``0``): experimental.
+    Extra value-head-only PPO passes run immediately AFTER the normal
+    ``epochs``-pass actor+critic update, using the SAME rollout/GAE return
+    targets (never Monte Carlo, oracle, or future-trajectory data) -- see
+    :func:`marla.learning.ppo.critic_refinement`. Every parameter except
+    the critic head's own two tensors is frozen for the duration of these
+    extra passes, so the actor and shared backbone (``GraphEncoder``/
+    ``ActionEncoder``/``RecurrentCore``) never change during refinement --
+    only ``Critic.value_head`` does. Does not overload ``epochs``, which
+    remains the actor+critic joint-update count, unchanged. Default ``0``
+    is an exact behavioral no-op: every existing config/checkpoint is
+    unaffected, and this remains ``0`` in every production/paper config
+    unless a future experiment justifies changing it.
 
 consultation
 ~~~~~~~~~~~~
@@ -267,12 +355,61 @@ metrics
   :func:`marla.learning.rollout.run_evaluation_episodes`.
 - ``eval_every_rollouts`` (int > 0, default ``1``): run the evaluation pass
   every this-many rollouts (only meaningful when ``eval_episodes > 0``).
+- ``resource_monitoring``: CPU/RAM/GPU telemetry
+  (:mod:`marla.monitoring.resources`), enabled by default -- computational
+  cost is a first-class research metric, not an opt-in extra.
+
+  - ``enabled`` (bool, default ``true``).
+  - ``sampling_interval_seconds`` (float > 0, default ``1.0``): how often
+    the background sampling thread records CPU/RAM/GPU usage, tagged with
+    the training loop's current phase (``rollout_collection`` /
+    ``ppo_update`` / ``evaluation``). Measured overhead at the default
+    interval is small (~2% wall-clock on a short CPU smoke workload; see
+    ``research/RESEARCH_READINESS.md``). Writes ``resources.csv`` (one row
+    per sample) and ``resource_summary.json`` (phase-level mean/p95/max)
+    into the run directory.
 
 reproducibility
 ~~~~~~~~~~~~~~~~
 
 - ``deterministic_torch`` (bool, default ``true``): reserved for wiring up
   ``torch.use_deterministic_algorithms`` and related settings.
+
+carbon
+~~~~~~
+
+Per-agent energy/CO2-equivalent emissions tracking
+(:mod:`marla.monitoring.carbon`), backed by `CodeCarbon
+<https://github.com/mlco2/codecarbon>`_ -- an OPTIONAL dependency (the
+``carbon`` extra, ``pip install -e ".[carbon]"``); ``marla run`` fails
+loudly and specifically at startup if ``carbon.enabled: true`` but
+CodeCarbon isn't installed, rather than silently skipping tracking.
+
+- ``enabled`` (bool, default ``false``): unlike
+  ``metrics.resource_monitoring``, this defaults OFF, since CodeCarbon is
+  an optional dependency and every existing config should keep working
+  without it installed.
+- ``tracking_mode``: ``"process"`` (default) or ``"machine"`` -- isolates
+  CPU/RAM energy estimates to the MARLA process vs. the whole machine.
+  **GPU power is always measured at the device level regardless of this
+  setting** (an NVML limitation, not a MARLA one) -- run agents strictly
+  sequentially, never concurrently, on a shared GPU if you need correct
+  per-agent carbon attribution.
+- ``measure_power_secs`` (float > 0, default ``1.0``): CodeCarbon's own
+  background hardware-power sampling interval.
+- ``country_iso_code`` / ``region`` / ``cloud_provider`` / ``cloud_region``
+  (str, optional): when ANY of these is set, tracking uses an offline
+  tracker with exactly this location, no network call. Leaving all four
+  unset does *not* mean "no location" -- it means "let CodeCarbon
+  auto-resolve it via a one-time geo-IP lookup", which is the normal,
+  default path. This lookup is unrelated to emissions-data upload: MARLA
+  never uploads any emissions data anywhere, regardless of this setting
+  (CSV-only local output; see :doc:`metrics`).
+
+Every number CodeCarbon (and MARLA's own carbon summary) reports is a
+**best-effort estimate of CO2-equivalent emissions**, not an exact
+physical measurement -- see :doc:`metrics` for units, per-agent output
+files, and how it's surfaced in ``marla summarize``.
 
 Device resolution
 ------------------

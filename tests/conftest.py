@@ -45,7 +45,7 @@ def minimal_config_dict(scenario_path: str) -> dict:
                 "recurrent": {"hidden_size": 32, "sequence_length": 8},
                 "ppo": {
                     "total_environment_steps": 1000,
-                    "rollout_steps": 64,
+                    "steps_per_env": 64,
                     "epochs": 2,
                     "minibatch_sequences": 2,
                     "gamma": 0.99,
@@ -55,7 +55,11 @@ def minimal_config_dict(scenario_path: str) -> dict:
                     "query_entropy_coefficient": 0.01,
                     "action_entropy_coefficient": 0.01,
                     "max_grad_norm": 0.5,
-                    "learning_rate": 0.0003,
+                    "optimizer": {
+                        "type": "adam",
+                        "learning_rate": 0.0003,
+                        "scheduler": {"type": "constant"},
+                    },
                 },
             },
             "consultation": {"mode": "disabled"},

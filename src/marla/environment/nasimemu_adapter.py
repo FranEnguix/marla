@@ -16,7 +16,7 @@ from nasimemu.env import NASimEmuEnv
 from nasimemu.nasim.envs.host_vector import HostVector
 from nasimemu.nasim.envs.utils import AccessLevel
 
-from marla.environment.actions import ActionDescriptor, build_legal_actions, resolve_action_target
+from marla.environment.actions import ActionDescriptor, build_legal_actions, parse_host_target_key, resolve_action_target
 from marla.environment.finish import compute_finish_reward
 from marla.environment.graph import GraphObservation, build_graph_observation
 
@@ -30,6 +30,14 @@ class EnvironmentState:
     host_addresses: list[tuple[int, int]]
     subnet_graph: set[tuple[int, int]] = field(default_factory=set)
     step_idx: int = 0
+    # MARLA-owned episode state (spec: NASimEmu's subnet_graph alone can't
+    # distinguish "known subnet never scanned" from "known subnet scanned
+    # successfully but discovered nothing new" -- a successful SubnetScan
+    # that finds no new subnet leaves subnet_graph unchanged). Populated by
+    # NasimEmuAdapter.step()/reset(), never derived from subnet_graph. See
+    # marla.environment.visible_facts.VisibleNetworkExploration for the
+    # visible-only summary built from this.
+    successfully_scanned_subnets: frozenset[int] = frozenset()
 
 
 @dataclass(frozen=True)
@@ -68,6 +76,8 @@ class NasimEmuAdapter:
             fully_obs=False,
             augment_with_action=False,
         )
+        # MARLA-owned, reset every episode (see EnvironmentState.successfully_scanned_subnets).
+        self._successfully_scanned_subnets: set[int] = set()
 
     @property
     def max_episode_steps(self) -> int:
@@ -101,14 +111,26 @@ class NasimEmuAdapter:
             random.seed(seed)
             np.random.seed(seed)
 
+        self._successfully_scanned_subnets = set()
         raw_observation = self._env.reset()
         return self._make_state(raw_observation)
 
     def legal_actions(self, state: EnvironmentState) -> list[ActionDescriptor]:
         return build_legal_actions(self._env, state.host_addresses)
 
-    def to_pyg_data(self, state: EnvironmentState) -> GraphObservation:
-        return build_graph_observation(state.host_rows, state.host_addresses, state.subnet_graph)
+    def to_pyg_data(self, state: EnvironmentState, include_subnet_scan_feature: bool) -> GraphObservation:
+        """``include_subnet_scan_feature``: whether the per-subnet-node
+        ``subnet_scan_completed`` feature (spec: observable subnet-
+        exploration progress) carries its real value or is omitted
+        (always 0) -- required, not defaulted, so every call site
+        consciously matches the policy's own
+        ``visible_subnet_exploration_enabled`` flag. This is what keeps
+        the v2/v3-target/v3-full ablation valid: a "v3-target" policy
+        must never receive the exploration signal indirectly through
+        GraphSAGE either.
+        """
+        scanned = state.successfully_scanned_subnets if include_subnet_scan_feature else frozenset()
+        return build_graph_observation(state.host_rows, state.host_addresses, state.subnet_graph, scanned)
 
     def objective_satisfied(self) -> bool:
         """All sensitive/value hosts compromised (NASimEmu's native goal).
@@ -181,6 +203,19 @@ class NasimEmuAdapter:
         # that invariant so a future NASimEmu upgrade can't silently break it.
         assert not done, "unexpected internal termination from a non-FINISH action"
 
+        # Observable subnet-exploration tracking (spec: "attempted scan !=
+        # successful scan"; a successful scan that discovers zero new
+        # subnets must still count). info["success"] is NASimEmu's own
+        # true per-action success signal (nasim.envs.action.ActionResult
+        # .info()) -- never inferred from whether subnet_graph changed,
+        # which a successful-but-nothing-new scan would leave unchanged.
+        # SubnetScan targets a host but the result belongs to that host's
+        # *subnet* (spec section 14) -- never the newly-discovered one.
+        if action.action_type == "subnet_scan" and info.get("success"):
+            assert action.target_key is not None
+            origin_subnet, _origin_host = parse_host_target_key(action.target_key)
+            self._successfully_scanned_subnets.add(origin_subnet)
+
         new_state = self._make_state(raw_observation)
         truncated = new_state.step_idx >= self._max_episode_steps
 
@@ -238,4 +273,5 @@ class NasimEmuAdapter:
             host_addresses=host_addresses,
             subnet_graph=set(self._env.subnet_graph),
             step_idx=self._env.step_idx,
+            successfully_scanned_subnets=frozenset(self._successfully_scanned_subnets),
         )

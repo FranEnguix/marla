@@ -20,6 +20,7 @@ import torch
 from marla.config.models import Config
 from marla.environment.nasimemu_adapter import NasimEmuAdapter
 from marla.learning.trainer import build_policy_and_optimizer
+from marla.scenarios.uri import resolve_scenario_reference
 
 logger = logging.getLogger(__name__)
 
@@ -29,13 +30,18 @@ class LocalRunError(Exception):
 
 
 def resolve_scenario_path(config: Config, config_dir: Path) -> str:
-    scenario = config.environment.scenario
-    if scenario.endswith(".yaml"):
-        path = Path(scenario)
-        if not path.is_absolute():
-            path = (config_dir / path).resolve()
-        return str(path)
-    return scenario
+    """Resolves ``config.environment.scenario`` to whatever a
+    ``NasimEmuAdapter`` actually needs: a real filesystem path for a
+    ``marla://...`` reference (see :mod:`marla.scenarios.uri`) or a
+    ``.yaml`` filesystem path, or the reference unchanged for a NASimEmu
+    named/procedural scenario. This is the one place ``marla run`` (local
+    and, via this function, distributed mode) turns a persisted config's
+    scenario reference into something NASimEmu can load -- the config
+    itself, on disk, keeps whatever reference it had (a ``marla://`` URI
+    is never rewritten to the resolved path it happened to materialize to
+    on this machine).
+    """
+    return resolve_scenario_reference(config.environment.scenario, config_dir)
 
 
 def resolve_password(password_env: str | None, alias: str) -> str:
@@ -105,6 +111,7 @@ async def _build_and_run(
 
     initial_environment_steps = 0
     initial_update_count = 0
+    initial_scheduler_state: dict | None = None
     resumed_seed = config.experiment.seed
     if resume_from is not None:
         metadata = load_checkpoint(
@@ -112,22 +119,32 @@ async def _build_and_run(
         )
         initial_environment_steps = metadata.environment_steps
         initial_update_count = metadata.update_count
+        initial_scheduler_state = metadata.scheduler_state_dict
         if metadata.next_episode_seed is not None:
             resumed_seed = metadata.next_episode_seed
         print(
             f"Resumed from {resume_from}: {initial_environment_steps} environment step(s) / "
             f"{initial_update_count} update(s) already done, continuing episode seeds from "
-            f"{resumed_seed}, RNG state restored: {metadata.rng_state_restored}",
+            f"{resumed_seed}, RNG state restored: {metadata.rng_state_restored}, "
+            f"LR scheduler ({metadata.scheduler_type}) restored from step {metadata.scheduler_state_dict.get('last_epoch') if metadata.scheduler_state_dict else 'n/a'}",
             flush=True,
         )
 
-    adapter = NasimEmuAdapter(
-        scenario=scenario_path,
-        max_episode_steps=config.environment.max_episode_steps,
-        completion_reward=config.objective.completion_reward,
-        premature_finish_penalty=config.objective.premature_finish_penalty,
-        premature_finish_penalty_per_remaining_target=config.objective.premature_finish_penalty_per_remaining_target,
-    )
+    # One independent NasimEmuAdapter per environment stream (spec: the
+    # 2048-transition, 4-independent-environment-stream ablation) --
+    # num_envs=1 (every existing config) builds exactly one, matching
+    # pre-multi-env behavior exactly (never a slice of one shared adapter).
+    adapters = [
+        NasimEmuAdapter(
+            scenario=scenario_path,
+            max_episode_steps=config.environment.max_episode_steps,
+            completion_reward=config.objective.completion_reward,
+            premature_finish_penalty=config.objective.premature_finish_penalty,
+            premature_finish_penalty_per_remaining_target=config.objective.premature_finish_penalty_per_remaining_target,
+        )
+        for _ in range(config.policy.ppo.num_envs)
+    ]
+    adapter = adapters if len(adapters) > 1 else adapters[0]
 
     required_participants: dict[str, str] = {}
     support_agents = []
@@ -194,6 +211,7 @@ async def _build_and_run(
         num_rollouts=num_rollouts,
         initial_environment_steps=initial_environment_steps,
         initial_update_count=initial_update_count,
+        initial_scheduler_state=initial_scheduler_state,
         required_participants=required_participants,
         gatekeeper_alias=config.gatekeeper.alias if config.gatekeeper else None,
         gatekeeper_jid=config.gatekeeper.jid if config.gatekeeper else None,

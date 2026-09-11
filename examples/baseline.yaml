@@ -74,7 +74,7 @@ environment:
   # exploitable services and no compatible privilege escalation to ROOT).
   # `marla run` refuses to start against an unsolvable scenario; using the
   # original file here would fail preflight immediately.
-  scenario: ../src/marla/scenarios/solvable/sm_entry_user_three_subnets.solvable.v2.yaml
+  scenario: marla://sm_entry_user_three_subnets.solvable.v2.yaml
   # Episode truncation limit. NASimEmu itself never internally ends an
   # episode on a non-FINISH action (there is no environment step_limit
   # configured -- MARLA enforces this itself), so this is the only thing
@@ -102,10 +102,13 @@ policy:
     sequence_length: 64  # max steps per truncated-BPTT chunk during PPO replay;
                           # a chunk never spans an episode boundary regardless
   ppo:
-    # Number of rollouts run is
-    # ceil(total_environment_steps / rollout_steps) = ceil(10000/512) = 20.
+    # Number of PPO updates run is
+    # ceil(total_environment_steps / (num_envs * steps_per_env)) = ceil(10000/512) = 20.
+    # num_envs defaults to 1 (not set here) -- a single environment stream;
+    # see research/configs/ for the provisional 4-environment-stream
+    # research baseline (research/EXPERIMENT_PLAN.md).
     total_environment_steps: 10000
-    rollout_steps: 512        # environment steps collected per rollout/PPO-update cycle
+    steps_per_env: 512        # environment transitions collected per stream per PPO update
     epochs: 4                 # PPO passes over each collected rollout
     minibatch_sequences: 8    # sequence chunks per gradient step
     gamma: 0.99                # discount factor, 0 < gamma <= 1
@@ -118,20 +121,23 @@ policy:
     query_entropy_coefficient: 0.01
     action_entropy_coefficient: 0.01  # action-distribution entropy bonus weight, >= 0
     max_grad_norm: 0.5                 # gradient clipping norm, > 0
-    learning_rate: 0.0003               # Adam's initial learning rate
-    # linear: decays learning_rate linearly to 0 as training progresses
-    # (progress = completed environment steps / total_environment_steps),
-    # evaluated once per rollout. constant keeps learning_rate unchanged
-    # for the whole run (the old, pre-schedule behavior).
-    learning_rate_schedule: linear
     optimizer:
       type: adam  # only supported value -- not AdamW
+      learning_rate: 0.0003  # Adam's initial learning rate
       # Adam's numerical-stability term (denominator epsilon), not a
       # learning-rate-like quantity. Larger than torch's default (1e-8):
       # PPO's advantage-scaled policy gradient is noisier than typical
       # supervised-learning gradients, and this value (also used by OpenAI
       # Baselines / CleanRL's PPO) improves numerical stability there.
       eps: 1.0e-5
+      # Every scheduler.step() happens once per completed PPO update (not
+      # per minibatch). Types: constant | linear | cosine | step |
+      # exponential -- see docs/configuration.rst. "linear" here is this
+      # example's own pick, not (yet) a scientifically frozen choice for
+      # MARLA research runs -- see research/EXPERIMENT_PLAN.md's Stage 1.
+      scheduler:
+        type: linear
+        end_factor: 0.0  # decays to exactly 0 by the final PPO update
 
 consultation:
   # disabled: no Gatekeeper, no Plan Maker may be configured below (both

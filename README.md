@@ -16,16 +16,70 @@ reference, architecture, CLI, and metrics/plots) -- build it locally with
 pip install -e ".[dev]"
 ```
 
+Optional extras: `local-lm` (a real local Plan Maker model), `gpu` (NVML
+GPU utilization/memory telemetry), `carbon` (CodeCarbon energy/CO2eq
+tracking), `optuna` (persistent hyperparameter studies), `docs` (build the
+Sphinx docs locally). Combine as needed, e.g.
+`pip install -e ".[dev,gpu,carbon,optuna]"`.
+
 ## CLI
 
 ```bash
 marla --help
+marla init [DIRECTORY]                          # generate starter configs
 marla validate experiment.yaml
-marla run experiment.yaml
+marla run experiment.yaml [--resume CHECKPOINT]
 marla summarize runs/<experiment-name>/<run-id>
+marla scenario check|repair SCENARIO
+marla optimize study.yaml                        # requires the `optuna` extra
+marla study status|summarize study.yaml
 marla version
 python -m marla --help
 ```
+
+See `docs/cli.rst` for every command's full reference.
+
+## Training, evaluation, and scenarios
+
+An experiment is one YAML file (`examples/baseline.yaml` for PPO-only,
+`examples/assisted.yaml` for the Plan-Maker-advised variant); `marla run`
+validates it, runs a scenario solvability preflight, then trains. Scenarios
+are referenced by a `marla://<name>.yaml` URI (packaged, pre-validated,
+resolves the same regardless of install method or working directory), a
+filesystem path, or a NASimEmu-generated benchmark name -- see
+`docs/configuration.rst`'s `environment` section and
+`docs/scenario_solvability.rst`.
+
+`policy.ppo.num_envs` collects multiple independent environment streams
+per PPO update (multi-environment rollout collection); `policy.ppo.optimizer.scheduler`
+configures a PyTorch-native learning-rate schedule (`constant`/`linear`/
+`cosine`/`step`/`exponential`), stepped once per completed PPO update and
+saved/restored exactly across `marla run --resume`. Both are documented in
+full in `docs/configuration.rst`'s `policy` section.
+
+`metrics.eval_episodes`/`eval_every_rollouts` run periodic deterministic
+evaluation episodes between training rollouts, at zero cost when disabled
+(`eval_episodes: 0`, the default). `marla summarize RUN_DIRECTORY` prints
+the run's aggregate statistics and writes every plot to `RUN_DIRECTORY/plots/`
+-- see `docs/metrics.rst` for what each plot/CSV column means.
+
+## Resource and carbon telemetry
+
+`metrics.resource_monitoring` (on by default) records CPU/RAM/GPU usage
+throughout every run (`resources.csv`, `resource_summary.json`). The
+optional `carbon` config block adds per-run estimated energy (kWh) and
+CO2-equivalent emissions tracking via [CodeCarbon](https://github.com/mlco2/codecarbon)
+(local CSV output only -- nothing is ever uploaded to CodeCarbon's hosted
+API); `marla summarize` prints an energy/CO2eq line when it was enabled
+for that run. See `docs/configuration.rst`'s `metrics`/`carbon` sections.
+
+## Hyperparameter studies
+
+`marla optimize study.yaml` runs (or resumes) a persistent, SQLite-backed
+Optuna hyperparameter study -- safe to interrupt and rerun without losing
+progress or re-running completed trials. `marla study status`/`marla study
+summarize` inspect a study without running anything. Requires the
+`optuna` extra. See `docs/cli.rst`'s Optuna commands section.
 
 ## Known limitation: embedded XMPP server flakiness in assisted mode
 

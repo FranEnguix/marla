@@ -6,7 +6,9 @@ import pytest
 import torch
 
 from marla.config.loader import load_config, parse_config
+from marla.environment.action_compatibility import COMPATIBILITY_FEATURE_DIM
 from marla.environment.nasimemu_adapter import NasimEmuAdapter
+from marla.environment.visible_facts import VISIBLE_PROGRESS_DIM
 from marla.learning.gae import compute_gae
 from marla.learning.ppo import build_sequence_chunks, optimize
 from marla.learning.recurrent_policy import RecurrentPolicy
@@ -20,6 +22,8 @@ def _fake_record(episode_id: int) -> StepRecord:
     return StepRecord(
         run_id="r", episode_id=episode_id, environment_step=0, observation_id="o",
         graph_data=None, node_key_to_index={}, legal_action_descriptors=[],
+        compatibility_features=torch.zeros((0, COMPATIBILITY_FEATURE_DIM)),
+        visible_progress=torch.zeros(VISIBLE_PROGRESS_DIM),
         initial_gru_hidden_state=torch.zeros(2), previous_action_embedding=torch.zeros(2),
         previous_training_reward=0.0, previous_query=False,
         base_logits=torch.zeros(1), final_logits=torch.zeros(1), selected_action_index=0,
@@ -48,7 +52,7 @@ def test_build_sequence_chunks_respects_max_length():
 def _tiny_config():
     config = load_config(REPO_ROOT / "examples" / "baseline.yaml")
     data = config.model_dump()
-    data["policy"]["ppo"]["rollout_steps"] = 16
+    data["policy"]["ppo"]["steps_per_env"] = 16
     data["policy"]["ppo"]["epochs"] = 1
     data["policy"]["ppo"]["minibatch_sequences"] = 2
     data["policy"]["recurrent"]["sequence_length"] = 4
@@ -60,7 +64,7 @@ async def test_ppo_update_changes_trainable_parameters():
     config = _tiny_config()
     torch.manual_seed(0)
     policy = RecurrentPolicy(config.policy)
-    optimizer = torch.optim.Adam(policy.parameters(), lr=config.policy.ppo.learning_rate)
+    optimizer = torch.optim.Adam(policy.parameters(), lr=config.policy.ppo.optimizer.learning_rate)
 
     adapter = NasimEmuAdapter(
         scenario=SMALL_SCENARIO,
@@ -69,7 +73,7 @@ async def test_ppo_update_changes_trainable_parameters():
         premature_finish_penalty=config.objective.premature_finish_penalty,
     )
     collector = RolloutCollector(adapter, policy, run_id="test-run", base_seed=1)
-    records, _summaries = await collector.collect(config.policy.ppo.rollout_steps)
+    records, _summaries = await collector.collect(config.policy.ppo.steps_per_env)
 
     rewards = [r.training_reward for r in records]
     values = [r.critic_value for r in records]
@@ -96,6 +100,8 @@ async def test_ppo_update_changes_trainable_parameters():
     assert len(metrics) > 0
     for m in metrics:
         for key, value in m.items():
+            if value is None:
+                continue  # empty-denominator diagnostic (e.g. no FINISH this minibatch), not a numerical fault
             assert torch.isfinite(torch.tensor(value)), f"{key} is not finite: {value}"
 
 
@@ -133,7 +139,7 @@ async def test_assisted_ppo_update_changes_parameters_without_reinvoking_plan_ma
 
     torch.manual_seed(0)
     policy = RecurrentPolicy(config.policy, consultation_enabled=True)
-    optimizer = torch.optim.Adam(policy.parameters(), lr=config.policy.ppo.learning_rate)
+    optimizer = torch.optim.Adam(policy.parameters(), lr=config.policy.ppo.optimizer.learning_rate)
 
     adapter = NasimEmuAdapter(
         scenario=SMALL_SCENARIO,
@@ -157,7 +163,7 @@ async def test_assisted_ppo_update_changes_parameters_without_reinvoking_plan_ma
         adapter, policy, run_id="test-run", base_seed=1,
         consultation_enabled=True, consultation_cost=config.consultation.cost, consult_fn=fake_consult,
     )
-    records, _summaries = await collector.collect(config.policy.ppo.rollout_steps)
+    records, _summaries = await collector.collect(config.policy.ppo.steps_per_env)
     calls_during_collection = call_count
     assert calls_during_collection >= 0  # may legitimately be 0 if the gate never queried this seed
 
@@ -188,4 +194,89 @@ async def test_assisted_ppo_update_changes_parameters_without_reinvoking_plan_ma
     assert len(metrics) > 0
     for m in metrics:
         for key, value in m.items():
+            if value is None:
+                continue  # empty-denominator diagnostic (e.g. no FINISH this minibatch), not a numerical fault
             assert torch.isfinite(torch.tensor(value)), f"{key} is not finite: {value}"
+
+
+@pytest.mark.asyncio
+async def test_ppo_replay_reuses_stored_compatibility_features_verbatim(monkeypatch):
+    """Spec section 11/32: PPO replay must feed the encoder EXACTLY the
+    compatibility tensor stored at collection time -- never recompute it
+    (there is no live simulator state to recompute it from during replay
+    anyway, but this proves the plumbing, not just the absence of a
+    simulator call).
+    """
+    from marla.learning import action_encoder as action_encoder_module
+    from marla.learning.ppo import build_sequence_chunks, _replay_chunk
+
+    config = _tiny_config()
+    torch.manual_seed(0)
+    policy = RecurrentPolicy(config.policy)
+    adapter = NasimEmuAdapter(
+        scenario=SMALL_SCENARIO,
+        max_episode_steps=config.environment.max_episode_steps,
+        completion_reward=config.objective.completion_reward,
+        premature_finish_penalty=config.objective.premature_finish_penalty,
+    )
+    collector = RolloutCollector(adapter, policy, run_id="test-run", base_seed=1)
+    records, _summaries = await collector.collect(8)
+    assert all(r.compatibility_features.shape[1] == COMPATIBILITY_FEATURE_DIM for r in records)
+
+    # Deliberately corrupt one record's stored tensor to a recognizable,
+    # impossible-to-recompute-by-accident sentinel value -- if replay ever
+    # recomputed compatibility from scratch instead of reusing this, the
+    # sentinel would never reach the encoder and the captured tensor below
+    # would not match it.
+    sentinel = torch.full_like(records[0].compatibility_features, 7.0)
+    records[0].compatibility_features = sentinel
+
+    captured: list[torch.Tensor] = []
+    real_encode = action_encoder_module.ActionEncoder.encode_descriptors
+
+    def spy(self, descriptors, node_embeddings, node_key_to_index, device, compatibility_matrix):
+        captured.append(compatibility_matrix.clone())
+        return real_encode(self, descriptors, node_embeddings, node_key_to_index, device, compatibility_matrix)
+
+    monkeypatch.setattr(action_encoder_module.ActionEncoder, "encode_descriptors", spy)
+
+    chunks = build_sequence_chunks(records, [0.0] * len(records), [0.0] * len(records), sequence_length=8)
+    _replay_chunk(policy, chunks[0], torch.device("cpu"), consultation_cost=0.0)
+
+    assert torch.equal(captured[0], sentinel)
+    for record, seen in zip(chunks[0].records, captured):
+        assert torch.equal(seen, record.compatibility_features)
+
+
+@pytest.mark.asyncio
+async def test_optimize_raises_training_diverged_error_on_nan_returns():
+    """NaN/Inf safety (research-readiness audit): a corrupted `returns`
+    tensor (e.g. from an upstream GAE/reward bug) must make optimize()
+    fail loudly with a specific, named exception -- never silently take an
+    optimizer step on poisoned data and keep going.
+    """
+    from marla.learning.ppo import TrainingDivergedError
+
+    config = _tiny_config()
+    torch.manual_seed(0)
+    policy = RecurrentPolicy(config.policy)
+    optimizer = torch.optim.Adam(policy.parameters(), lr=config.policy.ppo.optimizer.learning_rate)
+
+    adapter = NasimEmuAdapter(
+        scenario=SMALL_SCENARIO,
+        max_episode_steps=config.environment.max_episode_steps,
+        completion_reward=config.objective.completion_reward,
+        premature_finish_penalty=config.objective.premature_finish_penalty,
+    )
+    collector = RolloutCollector(adapter, policy, run_id="test-run", base_seed=1)
+    records, _summaries = await collector.collect(config.policy.ppo.steps_per_env)
+
+    advantages = [0.0] * len(records)
+    returns = [float("nan")] * len(records)
+
+    with pytest.raises(TrainingDivergedError):
+        optimize(
+            policy, optimizer, records, advantages, returns, config.policy.ppo,
+            config.policy.recurrent.sequence_length, config.policy.ppo.minibatch_sequences,
+            torch.device("cpu"), random.Random(0),
+        )

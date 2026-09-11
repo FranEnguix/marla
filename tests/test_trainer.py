@@ -18,7 +18,7 @@ SMALL_SCENARIO = str((REPO_ROOT / "NASimEmu/scenarios/sm_entry_dmz_one_subnet.v2
 def _tiny_config():
     config = load_config(REPO_ROOT / "examples" / "baseline.yaml")
     data = config.model_dump()
-    data["policy"]["ppo"]["rollout_steps"] = 12
+    data["policy"]["ppo"]["steps_per_env"] = 12
     data["policy"]["ppo"]["epochs"] = 1
     data["policy"]["ppo"]["minibatch_sequences"] = 2
     data["policy"]["recurrent"]["sequence_length"] = 4
@@ -36,13 +36,16 @@ def test_build_policy_and_optimizer_uses_adam_with_the_configured_eps():
     assert not isinstance(optimizer, torch.optim.AdamW)
     assert optimizer.param_groups[0]["eps"] == config.policy.ppo.optimizer.eps
     assert optimizer.param_groups[0]["eps"] == pytest.approx(1.0e-5)
-    assert optimizer.param_groups[0]["lr"] == config.policy.ppo.learning_rate
+    assert optimizer.param_groups[0]["lr"] == config.policy.ppo.optimizer.learning_rate
 
 
 def test_build_policy_and_optimizer_uses_an_overridden_eps():
     config = _tiny_config()
     data = config.model_dump()
-    data["policy"]["ppo"]["optimizer"] = {"type": "adam", "eps": 1.0e-3}
+    data["policy"]["ppo"]["optimizer"] = {
+        "type": "adam", "learning_rate": data["policy"]["ppo"]["optimizer"]["learning_rate"],
+        "eps": 1.0e-3, "scheduler": {"type": "constant"},
+    }
     config = parse_config(data)
     _policy, optimizer = build_policy_and_optimizer(config, torch.device("cpu"))
     assert optimizer.param_groups[0]["eps"] == pytest.approx(1.0e-3)
@@ -107,14 +110,32 @@ async def test_baseline_smoke_run_cpu_small_scenario():
     assert result.environment_steps == 24
     assert len(result.episode_summaries) >= 1
     assert len(result.update_metrics) > 0
+    # These are legitimately None whenever this minibatch happened to
+    # contain zero occurrences of the underlying category (e.g. no FINISH
+    # action at all, or no premature-FINISH specifically) -- see
+    # learning/ppo.py's own "... if values else None" conditionals. A tiny
+    # 2-rollout/12-step smoke run has no guarantee every category is
+    # populated, so these are data-dependent, not a diagnostic that must
+    # always fire.
+    NULLABLE_UPDATE_FIELDS = {
+        "mean_raw_advantage_finish", "max_raw_advantage_finish", "min_raw_advantage_finish",
+        "mean_raw_advantage_non_finish", "max_raw_advantage_non_finish",
+        "mean_raw_advantage_successful_finish", "mean_raw_advantage_premature_finish",
+        "finish_advantage_z_max", "max_raw_advantage_state_N_finish", "max_normalized_advantage_state_N_finish",
+        "mean_raw_advantage_state_N_finish", "mean_normalized_advantage_state_N_finish",
+    }
     for m in result.update_metrics:
         # Rollout-level aggregates that can legitimately be None/NaN in
         # baseline mode (no consultations) now live in rollouts.csv instead
-        # (see result.rollout_rows) -- every field left on an individual
-        # update dict is a required PPO diagnostic and must be finite.
+        # (see result.rollout_rows) -- every OTHER field left on an
+        # individual update dict is a required PPO diagnostic and must be
+        # finite.
         for key, value in m.items():
+            if key in NULLABLE_UPDATE_FIELDS and value is None:
+                continue
             assert value is not None, key
-            assert torch.isfinite(torch.tensor(value)), key
+            if isinstance(value, (int, float)):
+                assert torch.isfinite(torch.tensor(value)), key
 
     assert len(result.rollout_rows) > 0
     for row in result.rollout_rows:
@@ -158,6 +179,61 @@ async def test_run_baseline_training_rejects_assisted_config():
     assisted_config = parse_config(data)
     with pytest.raises(ValueError):
         await run_baseline_training(assisted_config, SMALL_SCENARIO, num_rollouts=1)
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_a_mid_training_exception_still_stops_resource_and_carbon_tracking_and_flushes_partial_data(
+    tmp_path, monkeypatch
+):
+    """Regression: a mid-loop exception (e.g. the NaN/Inf fail-fast assert
+    inside ``optimize()``) must not leave ``ResourceMonitor``'s background
+    thread or CodeCarbon's tracker running past ``run_training_loop``'s
+    return, and must not silently discard the real partial resource/carbon
+    data already collected before the failure -- see run_training_loop's
+    ``except Exception`` cleanup block. The original exception must still
+    propagate unchanged (never swallowed by cleanup).
+    """
+    config = _tiny_config()
+    data = config.model_dump()
+    data["carbon"] = {"enabled": True}
+    config = parse_config(data)
+    run_dir = tmp_path / "run"
+
+    from marla.learning import trainer as trainer_module
+
+    call_count = {"n": 0}
+    real_optimize = trainer_module.optimize
+
+    def _fail_on_first_call(*args, **kwargs):
+        call_count["n"] += 1
+        if call_count["n"] == 1:
+            raise RuntimeError("injected failure for exception-cleanup regression test")
+        return real_optimize(*args, **kwargs)
+
+    monkeypatch.setattr(trainer_module, "optimize", _fail_on_first_call)
+
+    with pytest.raises(RuntimeError, match="injected failure"):
+        await run_baseline_training(config, SMALL_SCENARIO, num_rollouts=3, seed=1, run_dir=run_dir)
+
+    # The background resource-sampling thread must be gone, not leaked.
+    import threading
+
+    assert not any(t.name == "marla-resource-monitor" for t in threading.enumerate())
+
+    resource_summary_path = run_dir / "resource_summary.json"
+    assert resource_summary_path.is_file(), "resource_summary.json must be flushed even on a mid-training failure"
+
+    carbon_summary_path = run_dir / "carbon" / "carbon_summary.json"
+    assert carbon_summary_path.is_file(), "carbon_summary.json must be flushed even on a mid-training failure"
+    import json
+
+    carbon_summary = json.loads(carbon_summary_path.read_text(encoding="utf-8"))
+    assert carbon_summary["enabled"] is True
+    # Real, nonzero: collection for rollout 1 genuinely happened before the
+    # injected failure, so CodeCarbon had real elapsed time to measure.
+    assert carbon_summary["duration_seconds"] is not None
+    assert carbon_summary["duration_seconds"] >= 0.0
 
 
 @pytest.mark.integration
@@ -208,14 +284,14 @@ async def test_run_baseline_training_tags_every_episode_with_its_rollout():
 async def test_linear_schedule_decreases_the_actual_learning_rate_used_by_updates():
     config = _tiny_config()
     data = config.model_dump()
-    data["policy"]["ppo"]["learning_rate_schedule"] = "linear"
+    data["policy"]["ppo"]["optimizer"]["scheduler"] = {"type": "linear", "end_factor": 0.0}
     data["policy"]["ppo"]["total_environment_steps"] = 48  # 4 rollouts of 12 steps
     config = parse_config(data)
 
     result = await run_baseline_training(config, SMALL_SCENARIO, num_rollouts=4, seed=1)
 
     rates = [m["learning_rate"] for m in result.update_metrics]
-    assert rates[0] == pytest.approx(config.policy.ppo.learning_rate)  # first rollout starts at the full rate
+    assert rates[0] == pytest.approx(config.policy.ppo.optimizer.learning_rate)  # first rollout starts at the full rate
     assert rates[-1] < rates[0]  # decays over the run
     assert all(r >= 0.0 for r in rates)
 
@@ -225,14 +301,14 @@ async def test_linear_schedule_decreases_the_actual_learning_rate_used_by_update
 async def test_constant_schedule_keeps_the_learning_rate_flat():
     config = _tiny_config()
     data = config.model_dump()
-    data["policy"]["ppo"]["learning_rate_schedule"] = "constant"
+    data["policy"]["ppo"]["optimizer"]["scheduler"] = {"type": "constant"}
     config = parse_config(data)
 
     result = await run_baseline_training(config, SMALL_SCENARIO, num_rollouts=3, seed=1)
 
     rates = [m["learning_rate"] for m in result.update_metrics]
     assert rates  # sanity: at least one update happened
-    assert all(rate == pytest.approx(config.policy.ppo.learning_rate) for rate in rates)
+    assert all(rate == pytest.approx(config.policy.ppo.optimizer.learning_rate) for rate in rates)
 
 
 @pytest.mark.integration

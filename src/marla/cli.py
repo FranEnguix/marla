@@ -16,13 +16,15 @@ import typer
 
 from marla import __version__
 from marla.config.loader import ConfigError, load_config
-from marla.config.models import Config
+from marla.config.models import Config, effective_batch_size
 from marla.config.templates import render_templates
 from marla.runtime.device import DeviceResolutionError, resolve_device
 from marla.scenario.models import SolvabilityStatus
 from marla.scenario.preflight import preflight_check
+from marla.optuna_cli import register_optimize_command, study_app
 from marla.scenario_cli import format_preflight_failure, scenario_app
-from marla.scenarios import solvable_scenario_path
+from marla.scenarios.uri import MARLA_SCENARIO_URI_PREFIX
+from marla.utils.formatting import format_quantity
 from marla.utils.python_version import UnsupportedPythonVersionError, check_python_version
 
 app = typer.Typer(
@@ -32,6 +34,8 @@ app = typer.Typer(
     no_args_is_help=True,
 )
 app.add_typer(scenario_app, name="scenario")
+app.add_typer(study_app, name="study")
+register_optimize_command(app)
 
 
 @app.callback()
@@ -119,13 +123,14 @@ def init(
 
     # Always the MARLA-owned, pre-validated scenario (spec: "do not
     # generate configs that immediately fail MARLA's own preflight
-    # validation") -- part of the installed package itself (see
-    # marla.scenarios), so this resolves correctly regardless of the
-    # user's current directory or whether a separate NASimEmu/ checkout is
-    # nearby, unlike the old NASimEmu/scenarios/ filesystem search this
-    # replaced (which, even when it found something, found the original
-    # *unsolvable* sm_entry_user_three_subnets.v2.yaml).
-    scenario_value = str(solvable_scenario_path("sm_entry_user_three_subnets.solvable.v2.yaml"))
+    # validation"), named through the portable marla:// scheme (see
+    # marla.scenarios.uri) rather than a materialized filesystem path --
+    # the generated config keeps working unchanged no matter where it's
+    # later copied to or which MARLA install (checkout, editable install,
+    # wheel) runs it, unlike the old NASimEmu/scenarios/ filesystem search
+    # this replaced (which, even when it found something, found the
+    # original *unsolvable* sm_entry_user_three_subnets.v2.yaml).
+    scenario_value = f"{MARLA_SCENARIO_URI_PREFIX}sm_entry_user_three_subnets.solvable.v2.yaml"
 
     directory.mkdir(parents=True, exist_ok=True)
     for name, content in render_templates(scenario_value).items():
@@ -263,15 +268,22 @@ def run(
                     fg=typer.colors.RED, err=True,
                 )
                 raise typer.Exit(code=1)
-        num_rollouts = math.ceil((ppo.total_environment_steps - already_done) / ppo.rollout_steps)
+        # total_environment_steps is a GLOBAL budget across every
+        # independent environment stream, never per-stream -- for
+        # num_envs=4 this must count 4*steps_per_env transitions per
+        # collection cycle, not just steps_per_env (which would silently
+        # run 4x the intended total). effective_batch_size(ppo) ==
+        # ppo.steps_per_env exactly when num_envs=1.
+        batch_size = effective_batch_size(ppo)
+        num_rollouts = math.ceil((ppo.total_environment_steps - already_done) / batch_size)
         if resume is not None:
             typer.echo(
                 f"Resuming from {resume} ({already_done} environment step(s) already done): "
-                f"{num_rollouts} more rollout(s) of {ppo.rollout_steps} steps each "
+                f"{num_rollouts} more rollout(s) of {batch_size} steps each "
                 f"(target: {ppo.total_environment_steps})."
             )
         else:
-            typer.echo(f"Starting local {config.consultation.mode} run: {num_rollouts} rollout(s) of {ppo.rollout_steps} steps each.")
+            typer.echo(f"Starting local {config.consultation.mode} run: {num_rollouts} rollout(s) of {batch_size} steps each.")
         start_time = datetime.now(timezone.utc)
         # Spec section 2: resolved config, provisional metadata.json, and
         # every metrics CSV's header row exist before a single environment
@@ -317,7 +329,7 @@ def run(
 
     run_dir = resolve_run_dir(config)
     ppo = config.policy.ppo
-    num_rollouts = math.ceil(ppo.total_environment_steps / ppo.rollout_steps)
+    num_rollouts = math.ceil(ppo.total_environment_steps / effective_batch_size(ppo))
     assert selected_aliases is not None  # enforced above: distributed mode requires --agent
     owns_orchestrator = config.rl_orchestrator.alias in selected_aliases
     typer.echo(f"Starting distributed process for agents: {selected_aliases}")
@@ -414,8 +426,12 @@ def summarize(
         typer.echo(f"  scenario: {metadata['scenario']}")
         typer.echo(f"  device: requested={metadata['device_requested']} resolved={metadata['device_resolved']}")
 
+    # _fmt is a bare-number alias of format_quantity (unit="") -- every
+    # call below that appends a unit suffix uses format_quantity directly
+    # so the suffix is only ever glued onto an actual number, never onto
+    # the literal string "n/a" (see marla.utils.formatting's docstring).
     def _fmt(value, digits: int = 3) -> str:
-        return "n/a" if value is None else f"{value:.{digits}f}" if isinstance(value, float) else str(value)
+        return format_quantity(value, digits=digits)
 
     typer.echo(f"  episodes: {summary['episode_count']}")
     # Reported separately, never collapsed into one number (spec section
@@ -433,13 +449,13 @@ def summarize(
             f"timeout rate: {_fmt(summary.get('timeout_rate'))}"
         )
     typer.echo(f"  mean benchmark return: {_fmt(summary['mean_benchmark_return'])}")
-    typer.echo(f"  mean episode duration: {_fmt(summary['mean_episode_duration_seconds'])}s")
+    typer.echo(f"  mean episode duration: {format_quantity(summary['mean_episode_duration_seconds'], 's')}")
     typer.echo(f"  total consultations: {summary['total_consultations']}")
     if summary.get("queries_per_successful_episode") is not None:
         typer.echo(f"  queries per successful episode: {_fmt(summary['queries_per_successful_episode'])}")
-    typer.echo(f"  mean Plan Maker latency: {_fmt(summary['mean_plan_maker_latency_ms'])}ms")
+    typer.echo(f"  mean Plan Maker latency: {format_quantity(summary['mean_plan_maker_latency_ms'], 'ms')}")
     if summary.get("p95_plan_maker_latency_ms") is not None:
-        typer.echo(f"  p95 Plan Maker latency: {_fmt(summary['p95_plan_maker_latency_ms'])}ms")
+        typer.echo(f"  p95 Plan Maker latency: {format_quantity(summary['p95_plan_maker_latency_ms'], 'ms')}")
     typer.echo(f"  schema rejection rate: {_fmt(summary['schema_rejection_rate'])}")
     if summary.get("advice_acceptance_rate") is not None:
         typer.echo(f"  advice acceptance rate: {_fmt(summary['advice_acceptance_rate'])}")
@@ -454,8 +470,18 @@ def summarize(
         typer.echo(f"  mean eval return: {_fmt(summary.get('mean_eval_return'))}")
     typer.echo(
         f"  total training: {summary['total_training_environment_steps']} steps, "
-        f"{_fmt(summary['total_training_seconds'], 1)}s"
+        f"{format_quantity(summary['total_training_seconds'], 's', digits=1)}"
     )
+
+    carbon_summary_path = run_or_directory / "carbon" / "carbon_summary.json"
+    if carbon_summary_path.is_file():
+        carbon = json.loads(carbon_summary_path.read_text(encoding="utf-8"))
+        if carbon.get("enabled"):
+            typer.echo(
+                f"  energy consumed: {format_quantity(carbon.get('energy_consumed_kwh'), ' kWh', digits=6)}  "
+                f"estimated CO2eq: {format_quantity(carbon.get('emissions_kg_co2eq'), ' kg', digits=6)}"
+                "  (CodeCarbon best-effort estimate, not an exact physical measurement)"
+            )
 
     plots_dir = run_or_directory / "plots"
     written = generate_plots(run_or_directory, plots_dir)

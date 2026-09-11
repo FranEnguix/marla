@@ -54,7 +54,7 @@ policy:
     # learn something, fast enough to finish in well under a minute on CPU.
     # Scale these up (see examples/baseline.yaml) for a real research run.
     total_environment_steps: 1280
-    rollout_steps: 128
+    steps_per_env: 128
     epochs: 2
     minibatch_sequences: 4
     gamma: 0.99
@@ -64,11 +64,16 @@ policy:
     query_entropy_coefficient: 0.01
     action_entropy_coefficient: 0.01
     max_grad_norm: 0.5
-    learning_rate: 0.0003
-    learning_rate_schedule: linear
     optimizer:
       type: adam
+      learning_rate: 0.0003
       eps: 1.0e-5
+      # Explicit by design (never a silent default): see
+      # research/EXPERIMENT_PLAN.md's Stage 1 for why "linear" is not yet
+      # a scientifically frozen choice, just this quickstart's own pick.
+      scheduler:
+        type: linear
+        end_factor: 0.0
 
 consultation:
   mode: disabled
@@ -142,7 +147,7 @@ policy:
     # total step count directly bounds how many of those a quickstart run
     # can rack up.
     total_environment_steps: 384
-    rollout_steps: 128
+    steps_per_env: 128
     epochs: 2
     minibatch_sequences: 4
     gamma: 0.99
@@ -152,11 +157,13 @@ policy:
     query_entropy_coefficient: 0.01
     action_entropy_coefficient: 0.01
     max_grad_norm: 0.5
-    learning_rate: 0.0003
-    learning_rate_schedule: linear
     optimizer:
       type: adam
+      learning_rate: 0.0003
       eps: 1.0e-5
+      scheduler:
+        type: linear
+        end_factor: 0.0
 
 consultation:
   mode: learned

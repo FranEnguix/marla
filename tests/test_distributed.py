@@ -86,7 +86,7 @@ def _write_tiny_distributed_baseline_config(tmp_path: Path, run_id: str) -> Path
     data["rl_orchestrator"]["jid"] = "rl-orchestrator@localhost"
     data["environment"]["scenario"] = SMALL_SCENARIO
     data["policy"]["ppo"]["total_environment_steps"] = 8
-    data["policy"]["ppo"]["rollout_steps"] = 8
+    data["policy"]["ppo"]["steps_per_env"] = 8
     data["policy"]["ppo"]["epochs"] = 1
     data["policy"]["ppo"]["minibatch_sequences"] = 2
     data["policy"]["recurrent"]["sequence_length"] = 4
@@ -124,7 +124,7 @@ def _write_tiny_distributed_assisted_config(tmp_path: Path, run_id: str) -> Path
     data["environment"]["scenario"] = SMALL_SCENARIO
     data["environment"]["max_episode_steps"] = 5
     data["policy"]["ppo"]["total_environment_steps"] = 8
-    data["policy"]["ppo"]["rollout_steps"] = 8
+    data["policy"]["ppo"]["steps_per_env"] = 8
     data["policy"]["ppo"]["epochs"] = 1
     data["policy"]["ppo"]["minibatch_sequences"] = 2
     data["policy"]["recurrent"]["sequence_length"] = 4

@@ -5,7 +5,19 @@ from __future__ import annotations
 import subprocess
 import sys
 
-_TRACKED_MODULES = ("torch", "torch_geometric", "spade", "pydantic", "typer", "nasimemu")
+# codecarbon/optuna are optional extras (the `carbon`/`optuna` groups) --
+# "not installed" is the correct, expected value for a plain platform
+# install that never opted into either, not an error.
+_TRACKED_MODULES = (
+    "torch",
+    "torch_geometric",
+    "spade",
+    "pydantic",
+    "typer",
+    "nasimemu",
+    "codecarbon",
+    "optuna",
+)
 
 
 def collect_dependency_versions() -> dict[str, str]:

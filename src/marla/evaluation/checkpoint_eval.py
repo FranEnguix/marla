@@ -36,6 +36,7 @@ from marla.learning.recurrent_policy import RecurrentPolicy
 from marla.learning.rollout import ConsultFn, EpisodeSummary, RolloutCollector, StepRecord
 from marla.messaging.schemas import AdvisoryObjective
 from marla.runtime.device import DeviceRequest, resolve_device
+from marla.scenarios.uri import resolve_scenario_reference
 
 
 @dataclass
@@ -133,7 +134,13 @@ async def evaluate_checkpoint(
             config, consultation_enabled, resolved_device.torch_device, checkpoint_path=run_dir / "checkpoint.pt"
         )
 
-    target_scenario = scenario_path or config.environment.scenario
+    # config.yaml's own scenario is resolved relative to run_dir (where it
+    # was saved); an explicit scenario_path override (e.g. an OOD scenario)
+    # is resolved relative to the current working directory, matching how
+    # a bare filesystem path on the CLI is normally interpreted.
+    target_scenario = resolve_scenario_reference(
+        scenario_path or config.environment.scenario, config_dir=run_dir if scenario_path is None else Path.cwd()
+    )
     adapter = NasimEmuAdapter(
         scenario=target_scenario,
         max_episode_steps=config.environment.max_episode_steps,

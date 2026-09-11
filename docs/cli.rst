@@ -58,6 +58,14 @@ Runs an experiment.
   continuation and RNG-state restoration are both best-effort: absent for
   an old checkpoint, in which case episode seeds restart from
   ``experiment.seed`` and the RNG stream is unseeded from that point).
+  This is separate from *representation* compatibility, which is not
+  best-effort: every checkpoint records the policy architecture's
+  ``policy_representation_version`` (:mod:`marla.learning.action_encoder`)
+  at save time, and loading one saved under a different version (e.g. one
+  saved before the action/target compatibility features existed) raises
+  :class:`marla.learning.checkpoint.PolicyRepresentationMismatchError`
+  loudly, before any weights are touched, rather than silently partially
+  loading a shape-incompatible ``ActionEncoder``.
 
 Before any agent -- RL Orchestrator, Gatekeeper, Plan Maker, or the
 embedded XMPP server -- is started, ``marla run`` resolves the configured
@@ -94,12 +102,17 @@ writes every artifact with ``status: stopped_by_user``); a second
 
 .. code-block:: text
 
-   marla scenario check SCENARIO_PATH [--objective capture_target] [--json] [--verbose]
+   marla scenario check SCENARIO [--objective capture_target] [--json] [--verbose]
 
 Runs the same universal solvability analysis ``marla run`` uses as its
 preflight, standalone, without loading a MARLA experiment config or
 starting anything. Useful to check a scenario before writing a config
 against it, or in CI.
+
+``SCENARIO`` accepts either a filesystem path or a ``marla://<filename>``
+reference (see :mod:`marla.scenarios.uri`), resolved through the same
+authoritative resolver ``marla run``'s preflight uses -- e.g. ``marla
+scenario check marla://sm_entry_user_three_subnets.solvable.v2.yaml``.
 
 Prints scenario format/version, the objective checked against (defaults to
 MARLA's current ``capture_target`` semantics -- there is no other objective
@@ -125,9 +138,12 @@ never depends on any particular text formatting, only on this typed result.
 
 .. code-block:: text
 
-   marla scenario repair SCENARIO_PATH [--output PATH] [--overwrite]
+   marla scenario repair SCENARIO [--output PATH] [--overwrite]
 
-Analyzes ``SCENARIO_PATH``; if it is already universally solvable, reports
+``SCENARIO`` accepts a filesystem path or a ``marla://<filename>``
+reference, resolved the same way ``marla scenario check`` does.
+
+Analyzes ``SCENARIO``; if it is already universally solvable, reports
 that no repair is needed and does nothing. Otherwise, derives and applies
 the smallest structural change needed (see :ref:`repair-policy`), writes a
 **new** file -- by default ``<name>.solvable.v2.yaml`` next to the source,
@@ -172,5 +188,74 @@ artifacts and (re)writes the ``plots/`` directory.
    marla version
 
 Prints MARLA's own version and the resolved versions of its key
-dependencies (torch, torch_geometric, spade, pydantic, typer, nasimemu) --
-the same information recorded in every run's ``metadata.json``.
+dependencies (torch, torch_geometric, spade, pydantic, typer, nasimemu,
+codecarbon, optuna -- ``"not installed"`` for the latter two if the
+``carbon``/``optuna`` extras weren't installed) -- the same information
+recorded in every run's ``metadata.json``.
+
+``marla optimize``
+---------------------
+
+.. code-block:: text
+
+   marla optimize STUDY_CONFIG_PATH
+
+Requires the ``optuna`` extra (``pip install -e ".[optuna]"``). Runs (or
+resumes) a persistent Optuna hyperparameter study against a *study config*
+YAML -- a separate format from a normal MARLA experiment config (see
+:mod:`marla.optuna_study.config`), naming a base experiment config for
+every fixed parameter plus study-level settings:
+
+- ``study_name`` / ``storage`` (an Optuna RDB storage URL, e.g.
+  ``sqlite:///study.db`` -- relative paths resolve against the study
+  config file's own directory).
+- ``sampler_seed`` / ``n_startup_trials``: TPE sampler configuration.
+  ``sampler_seed`` must not be a paper seed (101/202/303).
+- ``n_completed_trials_target``: the study runs until this many trials
+  reach Optuna's ``COMPLETE`` state (failed/pruned trials never count).
+- ``base_config``: the MARLA experiment config supplying every fixed
+  (non-tuned) hyperparameter.
+- ``tuning_seeds`` / ``holdout_seed``: every trial is evaluated on ALL
+  ``tuning_seeds``; ``holdout_seed`` must be disjoint from them and from
+  the paper seeds, and is never touched by the study itself.
+- ``tuning_total_environment_steps`` / ``finalist_total_environment_steps``:
+  training horizon during the search vs. for a fresh, non-resumed
+  finalist confirmation run.
+- ``runs_root``: where per-trial run directories are written.
+- ``max_consecutive_infrastructure_failures`` (default ``5``): the study
+  stops (rather than retrying indefinitely) after this many consecutive
+  trials fail for the same infrastructure reason. An infrastructure
+  failure is never silently converted into a numerical objective value.
+
+Safe to interrupt (:kbd:`Ctrl+C`, a process kill, or a host restart) and
+rerun with the same study config -- Optuna's SQLite-backed persistence
+(``load_if_exists=True``) resumes the same study, re-running only what
+never reached ``COMPLETE``, never starting a fresh study by accident.
+Runs strictly sequentially (``n_jobs=1``): required both for GPU-carbon
+attribution (see the ``carbon`` config's tracking-mode caveat in
+:doc:`configuration`) and for reproducible timing.
+
+``marla study status``
+--------------------------
+
+.. code-block:: text
+
+   marla study status STUDY_CONFIG_PATH
+
+Prints how many trials are ``COMPLETE``/``FAIL``/``RUNNING``/``WAITING``
+in the study named by ``STUDY_CONFIG_PATH``, and progress toward
+``n_completed_trials_target``, without running anything. Safe to call at
+any time, including while ``marla optimize`` is running elsewhere.
+
+``marla study summarize``
+-----------------------------
+
+.. code-block:: text
+
+   marla study summarize STUDY_CONFIG_PATH
+
+Prints a compact one-row-per-trial comparison table: state, stability,
+worst-seed/mean ROOT AUC, the sampled hyperparameters, and per-trial
+carbon/energy/wall-clock totals. A trial that never reached ``COMPLETE``
+prints only its state, with a pointer to inspect its stored attributes
+for the reason.

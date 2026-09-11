@@ -484,3 +484,113 @@ def test_sm_entry_user_three_subnets_v2_repair_yields_proven_solvable(tmp_path):
     assert outcome.after.status.value == "proven_solvable"
     # Original untouched.
     assert load_scenario_spec(src).raw_content == src.read_text(encoding="utf-8")
+
+
+# --- Explicit host_configurations + sensitive_hosts probability (bug fix) --
+# Before this fix, StaticHostSpec.is_sensitive was unconditionally False
+# for a V2 scenario using an explicit (non-`_random`) host_configurations
+# dict, regardless of what sensitive_hosts declared -- silently producing
+# a vacuous objective (0 sensitive hosts, trivially "solvable") for any
+# such scenario. Every A-E test above worked around this by manually
+# `replace()`-ing is_sensitive after parsing (with sensitive_hosts left at
+# 0.0 everywhere) -- these tests instead exercise the parser's own
+# inference directly, the way a real hand-authored scenario file would.
+
+
+def test_explicit_host_config_sensitivity_inferred_from_probability_one(tmp_path):
+    content = _two_subnet_scenario(
+        host_configs_yaml=dedent(
+            """\
+              (1, 0):
+                os: linux
+                services: [21_linux_proftpd]
+                processes: []
+              (1, 1):
+                os: linux
+                services: [21_linux_proftpd]
+                processes: []
+              (2, 0):
+                os: linux
+                services: [21_linux_proftpd, 3306_any_mysql]
+                processes: []
+              (2, 1):
+                os: linux
+                services: [21_linux_proftpd]
+                processes: []
+            """
+        ),
+        sensitive_hosts_yaml="  1: 0.\n  2: 1.\n",  # every host in subnet 2 is sensitive
+    )
+    path = _write(tmp_path, content)
+    spec = load_scenario_spec(path)
+
+    assert spec.static_hosts[(2, 0)].is_sensitive is True
+    assert spec.static_hosts[(2, 1)].is_sensitive is True
+    assert spec.static_hosts[(1, 0)].is_sensitive is False
+    assert spec.static_hosts[(1, 1)].is_sensitive is False
+
+
+def test_explicit_host_config_sensitivity_probability_zero_is_never_sensitive(tmp_path):
+    content = _two_subnet_scenario(
+        host_configs_yaml=dedent(
+            """\
+              (1, 0):
+                os: linux
+                services: [21_linux_proftpd]
+                processes: []
+              (1, 1):
+                os: linux
+                services: [21_linux_proftpd]
+                processes: []
+              (2, 0):
+                os: linux
+                services: [21_linux_proftpd]
+                processes: []
+              (2, 1):
+                os: linux
+                services: [21_linux_proftpd]
+                processes: []
+            """
+        ),
+        sensitive_hosts_yaml="  1: 0.\n  2: 0.\n",
+    )
+    path = _write(tmp_path, content)
+    spec = load_scenario_spec(path)
+
+    assert all(not h.is_sensitive for h in spec.static_hosts.values())
+
+
+def test_explicit_host_config_with_fractional_sensitive_probability_is_rejected(tmp_path):
+    """A fractional probability combined with explicit (fixed-identity)
+    host_configurations means sensitive-host *placement* would still be
+    randomized per-episode even though every host's OS/services/processes
+    are fixed -- a shape the static-host solvability path cannot
+    represent (it would either over- or under-count sensitive hosts
+    silently). Must fail loudly, not guess.
+    """
+    content = _two_subnet_scenario(
+        host_configs_yaml=dedent(
+            """\
+              (1, 0):
+                os: linux
+                services: [21_linux_proftpd]
+                processes: []
+              (1, 1):
+                os: linux
+                services: [21_linux_proftpd]
+                processes: []
+              (2, 0):
+                os: linux
+                services: [21_linux_proftpd]
+                processes: []
+              (2, 1):
+                os: linux
+                services: [21_linux_proftpd]
+                processes: []
+            """
+        ),
+        sensitive_hosts_yaml="  1: 0.\n  2: 0.5\n",
+    )
+    path = _write(tmp_path, content)
+    with pytest.raises(ValueError, match="fractional"):
+        load_scenario_spec(path)

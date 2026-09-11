@@ -26,7 +26,7 @@ def _write_tiny_baseline_config(tmp_path: Path, run_id: str) -> Path:
     # 12-step rollout window collected below.
     data["environment"]["max_episode_steps"] = 5
     data["policy"]["ppo"]["total_environment_steps"] = 12
-    data["policy"]["ppo"]["rollout_steps"] = 12
+    data["policy"]["ppo"]["steps_per_env"] = 12
     data["policy"]["ppo"]["epochs"] = 1
     data["policy"]["ppo"]["minibatch_sequences"] = 2
     data["policy"]["recurrent"]["sequence_length"] = 4

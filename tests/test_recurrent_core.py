@@ -1,10 +1,14 @@
 import torch
 
+from marla.environment.visible_facts import VISIBLE_PROGRESS_DIM
 from marla.learning.recurrent_core import RecurrentCore
 
 
 def make_core():
-    return RecurrentCore(graph_embedding_size=6, action_embedding_size=4, hidden_size=8)
+    return RecurrentCore(
+        graph_embedding_size=6, action_embedding_size=4, hidden_size=8,
+        visible_progress_dim=VISIBLE_PROGRESS_DIM,
+    )
 
 
 def test_initial_hidden_state_is_zero():
@@ -26,12 +30,13 @@ def test_forward_shape_batched():
     core = make_core()
     batch = 3
     graph_emb = torch.randn(batch, 6)
+    visible_progress = torch.randn(batch, VISIBLE_PROGRESS_DIM)
     prev_action_emb = torch.randn(batch, 4)
     prev_reward = torch.zeros(batch)
     prev_query = torch.zeros(batch)
     prev_hidden = torch.zeros(batch, 8)
 
-    z = core(graph_emb, prev_action_emb, prev_reward, prev_query, prev_hidden)
+    z = core(graph_emb, visible_progress, prev_action_emb, prev_reward, prev_query, prev_hidden)
     assert z.shape == (batch, 8)
     assert torch.isfinite(z).all()
 
@@ -45,7 +50,7 @@ def test_gru_reset_produces_identical_state_regardless_of_prior_episode():
     # simulate an arbitrary number of steps within a (discarded) episode
     z = z0_a.clone()
     for _ in range(5):
-        z = core(torch.randn(1, 6), torch.randn(1, 4), torch.ones(1), torch.ones(1), z)
+        z = core(torch.randn(1, 6), torch.randn(1, VISIBLE_PROGRESS_DIM), torch.randn(1, 4), torch.ones(1), torch.ones(1), z)
 
     # starting a new episode must give back exactly the same initial state
     z0_b = core.initial_hidden_state(1, torch.device("cpu"))

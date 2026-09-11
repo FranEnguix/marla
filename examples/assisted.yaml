@@ -65,7 +65,7 @@ environment:
   # MARLA's own repaired, pre-validated copy -- see baseline.yaml's comment
   # on this exact field for why (the original NASimEmu scenario is not
   # universally solvable and would fail `marla run`'s preflight check).
-  scenario: ../src/marla/scenarios/solvable/sm_entry_user_three_subnets.solvable.v2.yaml
+  scenario: marla://sm_entry_user_three_subnets.solvable.v2.yaml
   max_episode_steps: 100
 
 objective:
@@ -94,7 +94,7 @@ policy:
   ppo:
     # Identical to baseline.yaml's ppo block, for a fair comparison.
     total_environment_steps: 10000
-    rollout_steps: 512
+    steps_per_env: 512
     epochs: 4
     minibatch_sequences: 8
     gamma: 0.99
@@ -109,11 +109,13 @@ policy:
     query_entropy_coefficient: 0.01
     action_entropy_coefficient: 0.01
     max_grad_norm: 0.5
-    learning_rate: 0.0003
-    learning_rate_schedule: linear  # see baseline.yaml's comment
     optimizer:
       type: adam
+      learning_rate: 0.0003
       eps: 1.0e-5  # see baseline.yaml's comment
+      scheduler:  # see baseline.yaml's comment
+        type: linear
+        end_factor: 0.0
 
 consultation:
   # learned: requires exactly one `gatekeeper:` and one `agents[]` entry

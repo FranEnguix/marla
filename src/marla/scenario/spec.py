@@ -251,6 +251,30 @@ def _parse_v2_spec(path: Path, raw: dict, raw_content: str) -> ScenarioSpec:
 
     static_hosts = None
     if not randomized:
+        # Sensitivity for an explicit-host V2 scenario is subnet-probability
+        # -based (`sensitive_hosts`, the same key `_random` uses), not
+        # address-based -- there is no separate per-host sensitivity field
+        # in host_configurations itself. A probability of exactly 1.0 or
+        # 0.0 is fully deterministic regardless of host_configurations
+        # being explicit (every/no host in that subnet is sensitive, in
+        # every realization); anything strictly between the two means
+        # sensitive-host *placement* is still randomized even though the
+        # host identities (OS/services/processes) are fixed -- a shape
+        # _check_static's fixed-host-set reasoning cannot represent (it
+        # would either over- or under-count sensitive hosts silently), so
+        # that combination is rejected loudly here instead.
+        subnets_by_id = {s.id: s for s in subnets}
+        for s in subnets:
+            if s.id != 0 and 0.0 < s.sensitive_prob < 1.0:
+                raise ValueError(
+                    f"Scenario {path}: explicit host_configurations combined with a fractional "
+                    f"sensitive_hosts probability ({s.sensitive_prob}) for subnet {s.id} is not "
+                    "supported -- sensitive-host placement would still be randomized per-episode "
+                    "even though every host's identity is fixed, which the static-host solvability "
+                    "path cannot represent. Use host_configurations: _random, or a sensitive_hosts "
+                    "probability of exactly 0.0 or 1.0 for every subnet."
+                )
+
         static_hosts = {}
         for addr_key, cfg in host_cfgs.items():
             addr = eval(addr_key) if isinstance(addr_key, str) else tuple(addr_key)
@@ -264,7 +288,7 @@ def _parse_v2_spec(path: Path, raw: dict, raw_content: str) -> ScenarioSpec:
                 services=frozenset(cfg.get("services", [])),
                 processes=frozenset(_none_if_tilde(p) for p in cfg.get("processes", [])),
                 firewall=fw,
-                is_sensitive=False,  # sensitivity for explicit-host V2 is address-based; resolved by caller if needed
+                is_sensitive=subnets_by_id[tuple(addr)[0]].sensitive_prob >= 1.0,
             )
 
     return ScenarioSpec(

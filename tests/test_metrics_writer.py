@@ -11,6 +11,8 @@ import torch
 import yaml
 
 from marla.config.loader import config_hash, load_config
+from marla.environment.action_compatibility import COMPATIBILITY_FEATURE_DIM
+from marla.environment.visible_facts import VISIBLE_PROGRESS_DIM
 from marla.environment.actions import ActionDescriptor
 from marla.learning.checkpoint import load_checkpoint
 from marla.learning.rollout import StepRecord
@@ -25,7 +27,7 @@ SMALL_SCENARIO = str((REPO_ROOT / "NASimEmu/scenarios/sm_entry_dmz_one_subnet.v2
 def _tiny_config():
     config = load_config(REPO_ROOT / "examples" / "baseline.yaml")
     data = config.model_dump()
-    data["policy"]["ppo"]["rollout_steps"] = 12
+    data["policy"]["ppo"]["steps_per_env"] = 12
     data["policy"]["ppo"]["epochs"] = 1
     data["policy"]["ppo"]["minibatch_sequences"] = 2
     data["policy"]["recurrent"]["sequence_length"] = 4
@@ -152,6 +154,37 @@ def test_decisions_csv_has_one_row_per_step_with_derived_fields(written_run_dir)
     assert "artifact_path" not in row
 
 
+def test_decisions_csv_compatibility_fields_are_present_and_well_formed(written_run_dir):
+    """Spec sections 14-15/17: base/final compatible-action probability mass
+    must be in [0,1] and, for PPO_ONLY (no consultation), identical --
+    there is no advice to make base_logits/final_logits diverge. Match/
+    mismatch fields must be null (never a misleading False) whenever the
+    selected action carries no such requirement at all.
+    """
+    from marla.environment.action_compatibility import CompatibilityStatus
+
+    run_dir, _config, _result = written_run_dir
+    rows = _read_csv(run_dir / "decisions.csv")
+    assert rows
+    valid_statuses = {s.value for s in CompatibilityStatus}
+    for row in rows:
+        assert row["selected_action_visible_preconditions_status"] in valid_statuses
+        base_mass = float(row["base_compatible_action_probability_mass"])
+        final_mass = float(row["final_compatible_action_probability_mass"])
+        assert 0.0 <= base_mass <= 1.0
+        assert 0.0 <= final_mass <= 1.0
+        # PPO_ONLY (baseline, no consultation): base and final logits are
+        # never modified by advice, so these must match exactly.
+        assert base_mass == pytest.approx(final_mass)
+        for field in (
+            "selected_action_known_service_match",
+            "selected_action_known_process_match",
+            "selected_action_known_os_match",
+            "selected_action_known_os_mismatch",
+        ):
+            assert row[field] in {"", "True", "False"}
+
+
 def test_decision_row_persists_sensitive_target_counts_and_finish_reward():
     """A direct, isolated check that build_decision_rows/_decision_row --
     the code path shared by both the incremental and single-shot writers --
@@ -164,6 +197,8 @@ def test_decision_row_persists_sensitive_target_counts_and_finish_reward():
     record = StepRecord(
         run_id="r", episode_id=1, environment_step=0, observation_id="o",
         graph_data=None, node_key_to_index={}, legal_action_descriptors=[finish_action],
+        compatibility_features=torch.zeros((1, COMPATIBILITY_FEATURE_DIM)),
+        visible_progress=torch.zeros(VISIBLE_PROGRESS_DIM),
         initial_gru_hidden_state=torch.zeros(2), previous_action_embedding=torch.zeros(2),
         previous_training_reward=0.0, previous_query=False,
         base_logits=torch.zeros(1), final_logits=torch.zeros(1), selected_action_index=0,
@@ -237,6 +272,28 @@ def test_rollouts_csv_has_one_row_per_rollout_with_expected_columns(written_run_
         assert row["mean_nasimemu_reward"] == row["mean_training_reward"]
         float(row["collection_seconds"])
         float(row["optimization_seconds"])
+
+
+def test_rollouts_csv_compatible_action_aggregates_are_well_formed(written_run_dir):
+    """Spec section 19: the four selected-status rates share one
+    denominator (every decision in the rollout) and must sum to 1.0; the
+    probability-mass means must be in [0,1]."""
+    run_dir, _config, _result = written_run_dir
+    rows = _read_csv(run_dir / "rollouts.csv")
+    assert rows
+    for row in rows:
+        mean_base = float(row["mean_base_compatible_action_probability_mass"])
+        mean_final = float(row["mean_final_compatible_action_probability_mass"])
+        assert 0.0 <= mean_base <= 1.0
+        assert 0.0 <= mean_final <= 1.0
+        rates = [
+            float(row["selected_confirmed_compatible_rate"]),
+            float(row["selected_contradicted_rate"]),
+            float(row["selected_unknown_rate"]),
+            float(row["selected_not_applicable_rate"]),
+        ]
+        assert all(0.0 <= r <= 1.0 for r in rates)
+        assert sum(rates) == pytest.approx(1.0)
 
 
 def test_summary_json_has_required_aggregate_fields(written_run_dir):
@@ -394,7 +451,7 @@ def written_assisted_run_dir(tmp_path):
     data = config.model_dump()
     data["environment"]["scenario"] = SMALL_SCENARIO
     data["environment"]["max_episode_steps"] = 50
-    data["policy"]["ppo"]["rollout_steps"] = 12
+    data["policy"]["ppo"]["steps_per_env"] = 12
     data["policy"]["ppo"]["epochs"] = 1
     data["policy"]["ppo"]["minibatch_sequences"] = 2
     data["policy"]["recurrent"]["sequence_length"] = 4
@@ -402,6 +459,16 @@ def written_assisted_run_dir(tmp_path):
     config = parse_config(data)
 
     device = __import__("torch").device("cpu")
+    # Pre-existing test-isolation gap (research-readiness audit, P2, found
+    # while re-running the integration suite for this phase): without an
+    # explicit seed here, this fixture's query-gate sampling depends on
+    # whatever global torch RNG state a PRECEDING test in the same process
+    # happened to leave behind -- consultation_count can come out all-zero
+    # depending on test execution order, making
+    # test_generate_plots_includes_consultation_plots_for_assisted_runs
+    # order-dependently flaky. Seeding here makes this fixture's own
+    # sampling reproducible regardless of what ran before it.
+    __import__("torch").manual_seed(42)
     policy, optimizer = build_policy_and_optimizer(config, device, consultation_enabled=True)
     adapter = NasimEmuAdapter(
         scenario=SMALL_SCENARIO,

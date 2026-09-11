@@ -11,6 +11,18 @@ undiscovered services, true exploit success probabilities) is encoded.
 The feature width is fixed (:data:`NODE_FEATURE_DIM`) and independent of a
 given scenario's number of distinct services/processes/OSes, so the same
 graph encoder works across scenarios with different vocabularies.
+
+A subnet node's last feature (index 12, ``subnet_scan_completed``) is 1
+iff a ``SubnetScan`` originating from that subnet has *succeeded* at least
+once this episode -- never merely attempted, and never encoding the
+subnet's own ID (see :func:`_subnet_features`,
+``marla.environment.nasimemu_adapter.EnvironmentState.successfully_scanned_subnets``).
+Host nodes never receive this bit. It is threaded through
+``build_graph_observation``'s ``successfully_scanned_subnets`` parameter,
+which the caller (:class:`marla.environment.nasimemu_adapter.NasimEmuAdapter`)
+zeroes out entirely when ``policy.recurrent.visible_subnet_exploration`` is
+disabled, so the ablation flag controls this feature identically to the
+recurrent-policy vector -- see :doc:`/configuration`.
 """
 
 from __future__ import annotations
@@ -25,7 +37,7 @@ from torch_geometric.data import Data
 
 from marla.environment.actions import host_target_key
 
-NODE_FEATURE_DIM = 12
+NODE_FEATURE_DIM = 13
 _VALUE_SCALE = 10.0
 
 
@@ -64,9 +76,15 @@ def _host_features(row: np.ndarray) -> np.ndarray:
     return features
 
 
-def _subnet_features() -> np.ndarray:
+def _subnet_features(subnet_id: int, successfully_scanned_subnets: frozenset[int]) -> np.ndarray:
     features = np.zeros(NODE_FEATURE_DIM, dtype=np.float32)
     features[0] = 1.0  # node_type: subnet
+    # Observable subnet-exploration progress (spec): 1 iff a SubnetScan
+    # from a host in this subnet has *succeeded* at least once this
+    # episode (never merely attempted -- see NasimEmuAdapter.step()'s
+    # tracking of successfully_scanned_subnets, the sole source of truth
+    # here). Never the subnet ID itself -- only this one bit.
+    features[12] = float(subnet_id in successfully_scanned_subnets)
     return features
 
 
@@ -74,6 +92,7 @@ def build_graph_observation(
     host_rows: np.ndarray,
     host_addresses: list[tuple[int, int]],
     subnet_graph: set[tuple[int, int]],
+    successfully_scanned_subnets: frozenset[int] = frozenset(),
 ) -> GraphObservation:
     """Build a graph from visible host rows (``raw_observation[:-1]``).
 
@@ -81,6 +100,13 @@ def build_graph_observation(
     ``subnet_graph`` is the set of ``(from_subnet, to_subnet)`` edges
     discovered so far via subnet scans (tracked by the adapter across an
     episode -- NASimEmu itself does not persist this).
+    ``successfully_scanned_subnets``: which of the subnets that appear as
+    nodes here (i.e. currently known, per ``host_addresses``) have had a
+    successful ``SubnetScan`` -- defaults to empty, which makes every
+    subnet node's ``subnet_scan_completed`` feature read 0 (the safe,
+    inert default for any caller not thinking about this ablation; see
+    ``NasimEmuAdapter.to_pyg_data``'s ``include_subnet_scan_feature`` for
+    where a real caller decides this explicitly).
     """
     num_hosts = len(host_addresses)
 
@@ -92,7 +118,10 @@ def build_graph_observation(
 
     discovered_subnets = sorted({addr[0] for addr in host_addresses})
     subnet_features = (
-        np.stack([_subnet_features() for _ in discovered_subnets], axis=0)
+        np.stack(
+            [_subnet_features(subnet_id, successfully_scanned_subnets) for subnet_id in discovered_subnets],
+            axis=0,
+        )
         if discovered_subnets
         else np.zeros((0, NODE_FEATURE_DIM), dtype=np.float32)
     )

@@ -7,7 +7,7 @@ import torch_geometric
 
 from marla.config.loader import load_config
 from marla.environment.actions import ActionDescriptor
-from marla.environment.graph import GraphObservation
+from marla.environment.graph import NODE_FEATURE_DIM, GraphObservation
 from marla.environment.nasimemu_adapter import EnvironmentState, NasimEmuAdapter, TransitionResult
 from marla.evaluation.overrides import ALWAYS_QUERY, BETA_ONE, BETA_ZERO, NO_QUERY, PLAN_MAKER_ONLY, EvaluationOverrides
 from marla.learning.recurrent_policy import RecurrentPolicy
@@ -442,8 +442,8 @@ def test_same_seed_produces_identical_initial_observation_across_independent_ada
 
     state_a = make_adapter().reset(seed=777)
     state_b = make_adapter().reset(seed=777)
-    graph_a = make_adapter().to_pyg_data(state_a)
-    graph_b = make_adapter().to_pyg_data(state_b)
+    graph_a = make_adapter().to_pyg_data(state_a, include_subnet_scan_feature=True)
+    graph_b = make_adapter().to_pyg_data(state_b, include_subnet_scan_feature=True)
 
     assert torch.equal(graph_a.data.x, graph_b.data.x)
     assert torch.equal(graph_a.data.edge_index, graph_b.data.edge_index)
@@ -504,7 +504,7 @@ class _ScriptedAdapter:
         self._max_steps = max_steps
         self._step_idx = 0
         self._last_step_idx = 0
-        x = torch.zeros((1, 12))
+        x = torch.zeros((1, NODE_FEATURE_DIM))
         edge_index = torch.zeros((2, 0), dtype=torch.long)
         self._data = torch_geometric.data.Data(x=x, edge_index=edge_index)
 
@@ -522,7 +522,7 @@ class _ScriptedAdapter:
     def legal_actions(self, state):
         return [self._actions[min(self._step_idx, len(self._actions) - 1)]]
 
-    def to_pyg_data(self, state):
+    def to_pyg_data(self, state, include_subnet_scan_feature=True):
         return GraphObservation(data=self._data, node_key_to_index={"host-0-0": 0})
 
     def objective_satisfied(self):
@@ -547,17 +547,25 @@ class _ScriptedAdapter:
 
 
 def _scripted_policy():
-    from marla.config.models import ActionEncoderConfig, GraphEncoderConfig, PolicyConfig, PPOConfig, RecurrentConfig
+    from marla.config.models import (
+        ActionEncoderConfig,
+        ConstantSchedulerConfig,
+        GraphEncoderConfig,
+        OptimizerConfig,
+        PolicyConfig,
+        PPOConfig,
+        RecurrentConfig,
+    )
 
     policy_config = PolicyConfig(
         graph_encoder=GraphEncoderConfig(hidden_size=8, layers=1),
         action_encoder=ActionEncoderConfig(hidden_size=8, action_type_embedding_size=4),
         recurrent=RecurrentConfig(hidden_size=8, sequence_length=4),
         ppo=PPOConfig(
-            total_environment_steps=10, rollout_steps=2, epochs=1, minibatch_sequences=1,
+            total_environment_steps=10, steps_per_env=2, epochs=1, minibatch_sequences=1,
             gamma=0.99, gae_lambda=0.95, clip_epsilon=0.2, value_coefficient=0.5,
             query_entropy_coefficient=0.01, action_entropy_coefficient=0.01, max_grad_norm=0.5,
-            learning_rate=0.0003,
+            optimizer=OptimizerConfig(learning_rate=0.0003, scheduler=ConstantSchedulerConfig()),
         ),
     )
     return RecurrentPolicy(policy_config)

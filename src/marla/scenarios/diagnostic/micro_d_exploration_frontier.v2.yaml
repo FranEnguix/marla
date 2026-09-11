@@ -1,0 +1,78 @@
+# Micro D (spec: "observable subnet exploration progress" -- the FINISH/
+# exploration-frontier investigation): a two-subnet chain
+# (internet -> subnet 1 -> subnet 2) where the sensitive target lives in
+# subnet 2, which is NOT directly reachable from the internet -- it only
+# becomes visible once a successful SubnetScan from a compromised host in
+# subnet 1 discovers it. The intended solved trajectory:
+#
+#   exploit subnet 1's host (USER)      -- entry
+#   subnet-scan from subnet 1           -- discovers subnet 2
+#   exploit subnet 2's host (ROOT)      -- direct-root target exploit
+#   subnet-scan from subnet 2           -- completes the known frontier
+#     (deliberately zero-discovery: nothing lies beyond subnet 2 -- see
+#     micro_a_direct_root.v2.yaml's comment for why a successful scan
+#     that finds nothing new must still count as "scanned")
+#   FINISH
+#
+# Distractor actions on both hosts (e_decoy/pe_decoy below) reproduce the
+# same "same-shape action, never actually assigned" trick used by
+# Micro A/B/C -- see those files' comments for exactly why this keeps
+# `_random` fully deterministic despite host_configurations: _random.
+subnets: [1, 1]
+address_space_bounds: (3, 1)
+topology: [[1, 1, 0],
+           [1, 1, 1],
+           [0, 1, 1]]
+subnet_labels:
+  1: entry
+  2: target
+sensitive_hosts:
+  1: 0.
+  2: 1.0
+os:
+  - linux
+services:
+  - 21_linux_ftp             # entry USER exploit -- the only non-sensitive
+                               # linux service, so it is deterministically
+                               # assigned to every linux host (subnets 1 and 2)
+  - 9200_linux_target_svc     # direct-ROOT target exploit -- sensitive,
+                               # deterministically added to subnet 2's host only
+  - 80_other_decoy_svc        # tagged for neither OS above -- never assigned
+sensitive_services:
+  - 9200_linux_target_svc
+processes:
+  - 90_linux_filler_proc      # the only linux process -- deterministically
+                               # assigned to every linux host, unused by any action
+  - 91_other_decoy_proc       # tagged for neither OS above -- never assigned
+exploits:
+  e_linux_user:
+    service: 21_linux_ftp
+    os: linux
+    prob: 1.0
+    cost: 1
+    access: user
+  e_target_root:
+    service: 9200_linux_target_svc
+    os: linux
+    prob: 1.0
+    cost: 1
+    access: root
+  e_decoy:
+    service: 80_other_decoy_svc
+    os: linux
+    prob: 1.0
+    cost: 1
+    access: user
+privilege_escalation:
+  pe_decoy:
+    process: 91_other_decoy_proc
+    os: linux
+    prob: 1.0
+    cost: 1
+    access: root
+service_scan_cost: 1
+os_scan_cost: 1
+subnet_scan_cost: 1
+process_scan_cost: 1
+host_configurations: _random
+firewall: _subnets

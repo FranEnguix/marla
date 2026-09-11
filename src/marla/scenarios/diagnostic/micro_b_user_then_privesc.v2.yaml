@@ -1,0 +1,65 @@
+# Micro B (spec: "Three deterministic micro-scenarios"): a USER exploit
+# followed by a Linux privilege escalation on one Linux target. Exercises
+# the same representation problem as Micro A but for the two-step
+# USER-then-ROOT path, and specifically for privilege_escalation actions:
+# pe_linux_cron (its required process is actually present once process-
+# scanned) vs pe_linux_decoy (a process that never appears on any host in
+# this scenario -- permanently UNKNOWN, never CONTRADICTED). A parallel
+# exploit-level distractor (e_linux_decoy) gives both action types a real
+# distractor, not just one.
+#
+# See micro_a_direct_root.v2.yaml's comment for why `_random` is used
+# (rather than an explicit host_configurations dict) and why it is still
+# fully deterministic here: `os` has one entry, and every OS-filtered
+# service/process pool has exactly one candidate.
+subnets: [1]
+address_space_bounds: (2, 1)
+topology: [[1, 1],
+           [1, 1]]
+subnet_labels:
+  1: target
+sensitive_hosts:
+  1: 1.0
+os:
+  - linux
+services:
+  - 21_linux_ftp             # the real, present service
+  - 10_linux_filler           # non-sensitive filler
+  - 22_windows_distractor_svc  # tagged for an OS not in `os:` above -- never assigned
+sensitive_services:
+  - 21_linux_ftp
+processes:
+  - 90_linux_cron               # the real, present process
+  - 91_windows_distractor_proc  # tagged for an OS not in `os:` above -- never assigned
+exploits:
+  e_linux_user:
+    service: 21_linux_ftp
+    os: linux
+    prob: 1.0
+    cost: 1
+    access: user
+  e_linux_decoy:
+    service: 22_windows_distractor_svc
+    os: linux
+    prob: 1.0
+    cost: 1
+    access: user
+privilege_escalation:
+  pe_linux_cron:
+    process: 90_linux_cron
+    os: linux
+    prob: 1.0
+    cost: 1
+    access: root
+  pe_linux_decoy:
+    process: 91_windows_distractor_proc
+    os: linux
+    prob: 1.0
+    cost: 1
+    access: root
+service_scan_cost: 1
+os_scan_cost: 1
+subnet_scan_cost: 1
+process_scan_cost: 1
+host_configurations: _random
+firewall: _subnets

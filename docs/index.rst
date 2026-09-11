@@ -32,6 +32,9 @@ Where to start
 - Wondering what ``marla summarize`` plots mean? See :doc:`metrics`.
 - Wondering why ``marla run`` refused to start, or what
   ``marla scenario check``/``repair`` do? See :doc:`scenario_solvability`.
+- Want energy/CO2eq tracking or a hyperparameter study? See
+  :doc:`configuration`'s ``carbon`` section and :doc:`cli`'s ``marla
+  optimize``/``marla study`` commands.
 - Digging into a specific module? See the :doc:`api/index`.
 
 .. toctree::

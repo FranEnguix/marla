@@ -1,0 +1,79 @@
+# Micro C (spec: "Three deterministic micro-scenarios"): mixed OS/action
+# discrimination -- one Linux target and one Windows target, both
+# sensitive, requiring genuine per-host, per-OS discrimination rather than
+# a single "always pick this action" shortcut. The Windows host
+# additionally reproduces the exact motivating example from this task's
+# spec: e_elasticsearch (present, reaches ROOT directly) vs e_wp_ninja
+# (a same-shape distractor whose service never appears on any host in
+# this scenario -- permanently UNKNOWN, never CONTRADICTED).
+#
+# See micro_a_direct_root.v2.yaml's comment for why `_random` is used and
+# how per-host service/process pools are engineered to have exactly one
+# candidate each (fully deterministic host *content* regardless of seed).
+# The one thing that genuinely depends on the seed here is *which* of the
+# two hosts gets which OS (`os: random.choice(...)` per host, and this
+# NASimEmu fork has no per-subnet OS override) -- MARLA_DIAGNOSTIC_SEED
+# below is the pinned, verified seed
+# (tests/test_diagnostic_scenarios.py::test_micro_c_has_both_a_linux_and_a_windows_sensitive_target
+# and research/diagnostics/ppo_learnability/ both use it) for which this
+# resolves to exactly one Linux and one Windows host; a *different* seed
+# could in principle realize two hosts of the same OS instead, which
+# would silently defeat this scenario's purpose, so tests always pin the
+# seed rather than trusting an arbitrary one.
+#
+# MARLA_DIAGNOSTIC_SEED = 4
+subnets: [2]
+address_space_bounds: (2, 2)
+topology: [[1, 1],
+           [1, 1]]
+subnet_labels:
+  1: target
+sensitive_hosts:
+  1: 1.0
+os:
+  - linux
+  - windows
+services:
+  - 21_linux_ftp                  # real, present on the Linux host
+  - 10_linux_filler                 # non-sensitive filler (Linux)
+  - 9200_windows_elasticsearch     # real, present on the Windows host
+  - 10_windows_filler               # non-sensitive filler (Windows)
+  - 80_other_wp_ninja_svc           # tagged for neither OS above -- never assigned to any host
+sensitive_services:
+  - 21_linux_ftp
+  - 9200_windows_elasticsearch
+processes:
+  - 90_linux_cron
+  - 90_windows_filler_proc
+exploits:
+  e_linux_user:
+    service: 21_linux_ftp
+    os: linux
+    prob: 1.0
+    cost: 1
+    access: user
+  e_elasticsearch:
+    service: 9200_windows_elasticsearch
+    os: windows
+    prob: 1.0
+    cost: 1
+    access: root
+  e_wp_ninja:
+    service: 80_other_wp_ninja_svc
+    os: windows
+    prob: 1.0
+    cost: 1
+    access: user
+privilege_escalation:
+  pe_linux_root:
+    process: 90_linux_cron
+    os: linux
+    prob: 1.0
+    cost: 1
+    access: root
+service_scan_cost: 1
+os_scan_cost: 1
+subnet_scan_cost: 1
+process_scan_cost: 1
+host_configurations: _random
+firewall: _subnets

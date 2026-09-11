@@ -1,6 +1,17 @@
 """GRU recurrent state (spec section 13).
 
-``z_t = GRUCell(x_t, z_{t-1})`` with ``x_t = [g_t, E(a_{t-1}), r~_{t-1}, q_{t-1}]``.
+``z_t = GRUCell(x_t, z_{t-1})`` with
+``x_t = [g_t, p_t^visible, E(a_{t-1}), r~_{t-1}, q_{t-1}]``. ``p_t^visible``
+(spec: FINISH-learnability investigation, ``VISIBLE_PROGRESS_DIM``-wide --
+see :func:`marla.environment.visible_facts.compute_visible_progress`) is a
+compact, fixed-width, VISIBLE-ONLY summary of global objective progress:
+GraphSAGE deliberately encodes only local/topological host features and
+ActionEncoder only per-action/target relations, so neither carries any
+signal for "how much of the objective is already done" -- this is the one
+place that global summary enters the policy, and it is never derived from
+hidden simulator state (see that function's own docstring for the exact
+anti-leak argument).
+
 At episode start, ``z`` is zero, the previous action is a learned start
 token, and the previous reward/query are zero. All tensors are batch-first
 (``B`` = 1 for single-instance live rollout collection, ``B`` > 1 for PPO
@@ -14,11 +25,16 @@ from torch import Tensor, nn
 
 
 class RecurrentCore(nn.Module):
-    def __init__(self, graph_embedding_size: int, action_embedding_size: int, hidden_size: int):
+    def __init__(
+        self, graph_embedding_size: int, action_embedding_size: int, hidden_size: int, visible_progress_dim: int
+    ):
         super().__init__()
         self.hidden_size = hidden_size
         self.action_embedding_size = action_embedding_size
-        input_size = graph_embedding_size + action_embedding_size + 1 + 1  # + reward + query
+        self.visible_progress_dim = visible_progress_dim
+        input_size = (
+            graph_embedding_size + visible_progress_dim + action_embedding_size + 1 + 1
+        )  # + reward + query
         self.gru_cell = nn.GRUCell(input_size, hidden_size)
         self.start_action_token = nn.Parameter(torch.zeros(action_embedding_size))
         nn.init.normal_(self.start_action_token, std=0.02)
@@ -32,6 +48,7 @@ class RecurrentCore(nn.Module):
     def forward(
         self,
         graph_embedding: Tensor,
+        visible_progress: Tensor,
         previous_action_embedding: Tensor,
         previous_reward: Tensor,
         previous_query: Tensor,
@@ -42,6 +59,7 @@ class RecurrentCore(nn.Module):
         if previous_query.dim() == 1:
             previous_query = previous_query.unsqueeze(-1)
         x = torch.cat(
-            [graph_embedding, previous_action_embedding, previous_reward, previous_query], dim=-1
+            [graph_embedding, visible_progress, previous_action_embedding, previous_reward, previous_query],
+            dim=-1,
         )
         return self.gru_cell(x, previous_hidden)

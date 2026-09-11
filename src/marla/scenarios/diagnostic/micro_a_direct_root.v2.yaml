@@ -1,0 +1,66 @@
+# Micro A (spec: "Three deterministic micro-scenarios"): direct ROOT
+# exploit on one Windows target. The smallest scenario that can prove the
+# action-compatibility fix (marla.environment.action_compatibility) works:
+# ONE target host offers two exploits with the same shape (both require a
+# service and an OS) but only one is actually present on the host once
+# observed -- e_win_root (present: matches the host's real service) vs
+# e_win_decoy (a service that never appears on any host in this scenario,
+# so it must read as UNKNOWN forever, never CONTRADICTED -- absence is
+# never confirmed). A third distractor, pe_decoy, does the same for
+# privilege_escalation's process-match feature.
+#
+# Uses `host_configurations: _random` (the only host-config code path this
+# NASimEmu fork's real loader fully supports for actual gameplay -- an
+# explicit host_configurations dict's YAML-string addresses are never
+# converted to tuples downstream, a pre-existing vendored-library gap, so
+# this task does not use that form for scenarios meant to be played) --
+# but engineered so every random draw has exactly one possible outcome:
+# `os` has a single entry, and each OS-filtered service/process pool has
+# exactly one candidate, so the realized host is identical on every load
+# regardless of seed (verified by
+# tests/test_diagnostic_scenarios.py::test_micro_scenario_deterministic_across_repeated_loads).
+subnets: [1]
+address_space_bounds: (2, 1)
+topology: [[1, 1],
+           [1, 1]]
+subnet_labels:
+  1: target
+sensitive_hosts:
+  1: 1.0
+os:
+  - windows
+services:
+  - 80_windows_iis        # the real, present service
+  - 10_windows_filler      # non-sensitive filler (keeps the sampler non-empty)
+  - 22_linux_distractor_svc  # tagged for an OS not in `os:` above -- never assigned to any host
+sensitive_services:
+  - 80_windows_iis
+processes:
+  - 90_windows_filler_proc
+  - 91_linux_distractor_proc  # tagged for an OS not in `os:` above -- never assigned to any host
+exploits:
+  e_win_root:
+    service: 80_windows_iis
+    os: windows
+    prob: 1.0
+    cost: 1
+    access: root
+  e_win_decoy:
+    service: 22_linux_distractor_svc
+    os: windows
+    prob: 1.0
+    cost: 1
+    access: user
+privilege_escalation:
+  pe_decoy:
+    process: 91_linux_distractor_proc
+    os: windows
+    prob: 1.0
+    cost: 1
+    access: root
+service_scan_cost: 1
+os_scan_cost: 1
+subnet_scan_cost: 1
+process_scan_cost: 1
+host_configurations: _random
+firewall: _subnets
