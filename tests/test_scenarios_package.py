@@ -88,3 +88,21 @@ def test_original_nasimemu_scenario_is_untouched_and_remains_unsolvable():
     spec = load_scenario_spec(original)
     result = check_solvability(spec)
     assert result.status.value == "proven_unsolvable"
+
+
+def test_ood_scenario_path_resolves_correctly():
+    path = solvable_scenario_path("md_entry_user_three_subnets.solvable.v2.yaml")
+    assert path.is_file()
+    assert path.name == "md_entry_user_three_subnets.solvable.v2.yaml"
+
+
+def test_original_ood_nasimemu_scenario_is_untouched_and_remains_unsolvable():
+    """Same provenance check as above, for the medium-network OOD scenario
+    used for generalization evaluation (never for training)."""
+    repo_root = Path(__file__).resolve().parent.parent
+    original = repo_root / "NASimEmu" / "scenarios" / "md_entry_user_three_subnets.v2.yaml"
+    assert original.is_file()
+
+    spec = load_scenario_spec(original)
+    result = check_solvability(spec)
+    assert result.status.value == "proven_unsolvable"
