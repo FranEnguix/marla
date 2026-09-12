@@ -1108,24 +1108,109 @@ def _plot_known_subnet_exploration_progress(rollouts: pd.DataFrame, plots_dir: P
     return [_save(fig, plots_dir / "known_subnet_exploration_progress.png")]
 
 
+def _critic_quality_r_squared(r: pd.Series, v: pd.Series) -> float | None:
+    """Coefficient of determination of $V_t$ against $R_t$ -- ``None`` (not
+    a fabricated 0.0 or a crash) when $R_t$ has zero variance, since R^2 is
+    undefined there (division by zero), not zero."""
+    ss_tot = float(((r - r.mean()) ** 2).sum())
+    if ss_tot == 0.0:
+        return None
+    ss_res = float(((r - v) ** 2).sum())
+    return 1.0 - ss_res / ss_tot
+
+
 def _plot_critic_quality(decisions: pd.DataFrame, plots_dir: Path) -> list[Path]:
     r"""Is the critic well-calibrated? ``critic_value`` ($V_t$, predicted at
-    collection time) vs. ``return_target`` ($R_t$, the GAE-derived target it
-    was trained toward) -- points near the y=x line mean $V_t \approx R_t$.
+    collection time) vs. ``return_target`` ($R_t$).
+
+    $R_t$ is the GAE **training** return target the critic is regressed
+    toward -- ``return_target = gae_advantage + critic_value`` by
+    construction (learning/ppo.py) -- never a Monte Carlo ground-truth
+    policy value, and this plot must not be read as one. Points near the
+    $V_t = R_t$ line mean the critic's prediction matched its own training
+    target at collection time.
+
+    $R_t$ can span a much wider range than $V_t$: under this project's
+    near-1 discount (``gamma`` close to 1) and a scenario with large
+    one-off NASimEmu host-value rewards, GAE correctly propagates a large
+    late reward's credit backward across the preceding trajectory (the
+    same phenomenon reward_vs_credit_assignment.png highlights) -- a wide
+    $R_t$ tail next to a tightly clustered majority is a real signal about
+    this training setup, not a bug, and must never be clipped away to look
+    tidier. Two panels handle this honestly: the full range (density-aware
+    hexbin, since a plain scatter would just be a saturated blob near
+    zero) and a zoomed, robust central-range view so the dense majority's
+    calibration stays readable too. Compact MAE/RMSE/bias/R^2 are printed
+    on the figure itself so calibration quality doesn't require reading
+    source to assess.
     """
     if "critic_value" not in decisions.columns or "return_target" not in decisions.columns:
         return []
-    fig, ax = plt.subplots(figsize=(6, 6))
-    ax.scatter(decisions["return_target"], decisions["critic_value"], s=6, alpha=0.15, color="tab:blue")
-    lo = min(decisions["return_target"].min(), decisions["critic_value"].min())
-    hi = max(decisions["return_target"].max(), decisions["critic_value"].max())
-    ax.plot([lo, hi], [lo, hi], color="black", linestyle="--", linewidth=1, label=r"$V_t = R_t$")
-    ax.set_xlabel(r"Return target $R_t$")
-    ax.set_ylabel(r"Critic value $V_t$")
-    ax.set_title(r"Critic calibration: predicted value $V_t$ vs. GAE return target $R_t$")
-    ax.legend()
-    ax.grid(alpha=0.3)
+    paired = decisions[["critic_value", "return_target"]].dropna()
+    n = len(paired)
+    if n == 0:
+        return []
+    v = paired["critic_value"]
+    r = paired["return_target"]
+
+    fig, (ax_full, ax_zoom) = plt.subplots(1, 2, figsize=(12, 5.8))
+
+    lo = min(r.min(), v.min())
+    hi = max(r.max(), v.max())
+    pad = 0.05 * (hi - lo) if hi > lo else 1.0
+    _hexbin_or_scatter(fig, ax_full, r, v, lo - pad, hi + pad)
+    ax_full.set_xlabel(r"Return target $R_t$")
+    ax_full.set_ylabel(r"Critic value $V_t$")
+    ax_full.set_title("Full range", fontsize=10)
+    ax_full.legend(fontsize=8)
+    ax_full.grid(alpha=0.3)
+
+    # Robust central-range view: zoom to the 5th-95th percentile of R_t,
+    # widened if needed so V_t's own full range is never clipped out of
+    # its own zoom (a well-calibrated critic should never be hidden by
+    # this window).
+    r_lo, r_hi = np.percentile(r, [5, 95]) if n >= 2 else (r.iloc[0], r.iloc[0])
+    zoom_lo = min(r_lo, v.min())
+    zoom_hi = max(r_hi, v.max())
+    zoom_pad = 0.05 * (zoom_hi - zoom_lo) if zoom_hi > zoom_lo else 1.0
+    in_zoom = (r >= zoom_lo) & (r <= zoom_hi)
+    _hexbin_or_scatter(fig, ax_zoom, r[in_zoom], v[in_zoom], zoom_lo - zoom_pad, zoom_hi + zoom_pad)
+    ax_zoom.set_xlabel(r"Return target $R_t$")
+    ax_zoom.set_ylabel(r"Critic value $V_t$")
+    n_excluded = n - int(in_zoom.sum())
+    ax_zoom.set_title(f"Central range (5th-95th pct. of $R_t$)\n{n_excluded} decision(s) outside this view", fontsize=10)
+    ax_zoom.legend(fontsize=8)
+    ax_zoom.grid(alpha=0.3)
+
+    err = v - r
+    mae = float(err.abs().mean())
+    rmse = float(np.sqrt((err**2).mean()))
+    bias = float(err.mean())
+    r2 = _critic_quality_r_squared(r, v)
+    r2_text = f"{r2:.3f}" if r2 is not None else "n/a"
+    fig.suptitle(
+        r"Critic calibration: $V_t$ (predicted) vs. $R_t$ (GAE training return target, not ground truth)"
+        f"\nn={n} decisions   MAE={mae:.3f}   RMSE={rmse:.3f}   bias(V-R)={bias:+.3f}   R^2={r2_text}",
+        fontsize=10,
+    )
+    fig.subplots_adjust(top=0.84)
     return [_save(fig, plots_dir / "critic_quality.png")]
+
+
+def _hexbin_or_scatter(fig, ax, x: pd.Series, y: pd.Series, lo: float, hi: float) -> None:
+    """Density-aware rendering for a critic-calibration panel: hexbin with a
+    log-scaled count (so both a saturated dense cluster and sparse outliers
+    stay visible) once there are enough points to bin meaningfully, else a
+    plain low-alpha scatter (a hexbin over a handful of points is itself
+    misleading -- large, mostly-empty hexagons)."""
+    if len(x) >= 20:
+        hb = ax.hexbin(x, y, gridsize=40, bins="log", cmap="Blues", extent=(lo, hi, lo, hi))
+        fig.colorbar(hb, ax=ax, label="decisions (log scale)")
+    else:
+        ax.scatter(x, y, s=12, alpha=0.5, color="tab:blue")
+    ax.plot([lo, hi], [lo, hi], color="black", linestyle="--", linewidth=1, label=r"$V_t = R_t$")
+    ax.set_xlim(lo, hi)
+    ax.set_ylim(lo, hi)
 
 
 def _plot_reward_vs_credit_assignment(decisions: pd.DataFrame, plots_dir: Path) -> list[Path]:
