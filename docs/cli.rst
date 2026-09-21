@@ -190,18 +190,24 @@ artifacts and (re)writes the ``plots/`` directory.
 Compares wall-clock/resource/energy metrics **across** two or more runs
 (e.g. several seeds of the same configuration) -- never a single run's
 own time series, which stays in ``marla summarize``. Each run contributes
-one scalar per metric (its own total training time, mean CPU%, total
-energy, ...); for each metric with at least one value across the given
-runs, writes one ``compare_<metric>.png`` to ``--output`` (default: a
-``compare_plots/`` directory next to the first run) showing every run's
-own value as a point, plus a mean +/- std marker when 2 or more runs have
-that metric. Never a box-and-whisker plot: this project's runs are
-typically compared in small numbers (e.g. 3 seeds), too few for box-plot
-quartiles to mean anything (see :mod:`marla.metrics.compare_plots`'s own
-docstring). ``--label`` (repeatable, one per run directory, in the same
-order) overrides the default ``<parent-dir>/<run-id>`` label -- useful
-when directory names alone don't say what varies between the runs (e.g.
-different algorithms, not just different seeds).
+one scalar per metric (its own total training time, total process
+CPU-seconds, peak RSS/GPU memory in MiB, total energy, ...); for each
+metric with at least one value across the given runs, writes one
+``compare_<metric>.png`` to ``--output`` (default: a ``compare_plots/``
+directory next to the first run) showing every run's own value as a
+point, plus a mean +/- std marker when 2 or more runs have that metric.
+Never a box-and-whisker plot: this project's runs are typically compared
+in small numbers (e.g. 3 seeds), too few for box-plot quartiles to mean
+anything (see :mod:`marla.metrics.compare_plots`'s own docstring).
+Absolute, dimensionally-correct quantities (wall-clock, CPU-seconds,
+RSS/GPU-memory MiB, energy/CO2eq) are compared first; hardware-relative
+utilization percentages (mean process/GPU %) are generated last, as
+secondary/appendix diagnostics -- see :mod:`marla.monitoring.resources`'s
+module docstring for why a percentage is a poor primary cross-hardware
+comparison unit. ``--label`` (repeatable, one per run directory, in the
+same order) overrides the default ``<parent-dir>/<run-id>`` label --
+useful when directory names alone don't say what varies between the runs
+(e.g. different algorithms, not just different seeds).
 
 ``marla version``
 --------------------

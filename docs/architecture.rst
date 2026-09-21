@@ -169,3 +169,9 @@ mutable store any agent reads or writes outside of that. The Gatekeeper's
 ``pending`` dict and the RL Orchestrator's ``pending`` futures dict are
 each private, transient, per-process correlation state -- not a shared
 resource.
+
+Every message built via :func:`marla.messaging.builders.build_message` is
+also recorded, exactly once, into that run's raw message-event log (see
+:mod:`marla.messaging.telemetry` and :doc:`metrics`'s ``messages.csv``
+section) -- reconstructable communication statistics without adding any
+new shared state of its own.
