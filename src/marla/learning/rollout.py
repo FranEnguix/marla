@@ -477,9 +477,26 @@ class RolloutCollector:
             # is checked again at the top of the loop before the next step.
             stop_requested = self._stop_event is not None and self._stop_event.is_set()
             is_last_in_window = i == num_steps - 1 or stop_requested
+
+            # Computed once, right here, from the ACTUAL sampled_query --
+            # never a second time with a different assumption. Invariant:
+            # this is exactly the RecurrentState normal live continuation
+            # would install for step t+1, regardless of whether t+1 is only
+            # ever consumed by a bootstrap value probe (rollout-cutoff or
+            # time-limit truncation), by normal continuation, or both would
+            # have used it had the episode not ended -- there is no separate
+            # "boundary" recurrent-state path that can drift from this one.
+            # None only when the episode truly ends here (terminated), since
+            # there is no s_{t+1} to build a state for.
+            next_rstate = None
+            if not transition.terminated:
+                next_rstate = self._policy.advance_recurrent_state(
+                    step_out, action_index, training_reward, query=decision["sampled_query"]
+                )
+
             bootstrap_value: float | None = None
             if not transition.terminated and (transition.truncated or is_last_in_window):
-                bootstrap_value = self._bootstrap_value(transition.state, step_out, action_index, training_reward)
+                bootstrap_value = self._bootstrap_value(transition.state, next_rstate)
 
             record = StepRecord(
                 run_id=self._run_id,
@@ -613,9 +630,7 @@ class RolloutCollector:
                     self._start_new_episode()
             else:
                 self._state = transition.state
-                self._rstate = self._policy.advance_recurrent_state(
-                    step_out, action_index, training_reward, query=decision["sampled_query"]
-                )
+                self._rstate = next_rstate
 
             await asyncio.sleep(0)  # cooperative yield: let other local-mode agents run
 
@@ -780,9 +795,17 @@ class RolloutCollector:
             "alpha": float(final_decision.alpha.detach()) if final_decision.alpha is not None else None,
         }
 
-    def _bootstrap_value(self, next_state, step_out, action_index: int, training_reward: float) -> float:
+    def _bootstrap_value(self, next_state, next_rstate) -> float:
+        """V(s_{t+1}) for a rollout-cutoff or time-limit truncation boundary.
+
+        ``next_rstate`` must be the exact same :class:`RecurrentState` normal
+        live continuation would install for t+1 (built by the caller from
+        the actual ``sampled_query`` at t, not reconstructed here with a
+        different assumption) -- there is no separate boundary recurrent-
+        state path, by construction.
+        """
         assert next_state is not None
-        next_rstate = self._policy.advance_recurrent_state(step_out, action_index, training_reward, query=False)
+        assert next_rstate is not None
         next_legal = self._adapter.legal_actions(next_state)
         next_graph_obs = self._adapter.to_pyg_data(
             next_state, include_subnet_scan_feature=self._policy.visible_subnet_exploration_enabled
