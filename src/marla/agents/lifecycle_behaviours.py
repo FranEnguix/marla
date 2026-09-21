@@ -16,6 +16,7 @@ import logging
 from spade.behaviour import CyclicBehaviour
 from spade.template import Template
 
+from marla.messaging import telemetry
 from marla.messaging.builders import build_message, new_id
 from marla.messaging.parsers import MessageValidationError, parse_metadata
 from marla.messaging.schemas import MESSAGE_SCHEMA_VERSION, MessageMetadata, MessageType
@@ -28,6 +29,24 @@ def message_type_template(message_type: MessageType) -> Template:
     template = Template()
     template.set_metadata("message_type", message_type.value)
     return template
+
+
+def record_message_handled(metadata: MessageMetadata) -> None:
+    """Record that the intended MARLA behaviour has accepted this message
+    for processing -- call this once envelope parsing AND
+    request/run correlation have succeeded, never merely because
+    ``self.receive()`` returned a non-``None`` message (see
+    ``marla.messaging.telemetry``'s module docstring for why "delivered"
+    and "handled" are different claims). Every ``run()`` method in this
+    module and in ``agents/gatekeeper.py``/``agents/plan_maker.py``/
+    ``agents/advisory_client.py`` calls this at its own single acceptance
+    point, once it knows it is really going to act on the message."""
+    telemetry.record_handled_if_active(
+        message_id=metadata.message_id,
+        sender_alias=metadata.sender_alias, receiver_alias=metadata.receiver_alias,
+        performative=metadata.performative, message_type=metadata.message_type.value,
+        conversation_id=metadata.conversation_id, request_id=metadata.request_id,
+    )
 
 
 # SPADE's XMPPClient enables XEP-0199 keepalive pings every 55s and
@@ -130,6 +149,7 @@ class ReadyListenerBehaviour(CyclicBehaviour):
                 metadata.run_id, self._run_id,
             )
             return
+        record_message_handled(metadata)
 
         signal = ReadySignal(
             alias=metadata.sender_alias,
@@ -160,6 +180,7 @@ class FailureListenerBehaviour(CyclicBehaviour):
             return
         if metadata.run_id != self._run_id:
             return
+        record_message_handled(metadata)
         reason = message.body or "unspecified"
         await self._events.put(FailureSignal(alias=metadata.sender_alias, reason=reason))
 
@@ -191,6 +212,7 @@ class ReadyCheckResponderBehaviour(CyclicBehaviour):
             return
         if metadata.run_id != self._run_id:
             return
+        record_message_handled(metadata)
 
         reply_metadata = MessageMetadata(
             performative="inform",
@@ -228,6 +250,7 @@ class StopExperimentBehaviour(CyclicBehaviour):
             return
         if metadata.run_id != self._run_id:
             return
+        record_message_handled(metadata)
         logger.info("Received STOP_EXPERIMENT for run %s; stopping agent %s", self._run_id, self.agent.jid)
         expect_peer_disconnect = getattr(self.agent, "expect_peer_disconnect", None)
         if expect_peer_disconnect is not None:

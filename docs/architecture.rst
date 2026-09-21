@@ -171,7 +171,10 @@ each private, transient, per-process correlation state -- not a shared
 resource.
 
 Every message built via :func:`marla.messaging.builders.build_message` is
-also recorded, exactly once, into that run's raw message-event log (see
+also recorded into that run's raw message-event log -- once as a "sent"
+event at build time, and again as a "handled" event if and when the
+intended MARLA behaviour actually accepts it for processing (see
 :mod:`marla.messaging.telemetry` and :doc:`metrics`'s ``messages.csv``
-section) -- reconstructable communication statistics without adding any
-new shared state of its own.
+section for why these are tracked as two separate claims, not one) --
+reconstructable communication statistics without adding any new shared
+state of its own.

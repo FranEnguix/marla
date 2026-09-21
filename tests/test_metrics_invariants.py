@@ -127,11 +127,14 @@ def test_resource_summary_peak_is_never_less_than_mean():
         assert summary["peak_rss_mib"] >= summary["mean_rss_mib"] - 1e-6
 
 
-def test_message_sent_and_received_totals_always_match():
-    """A structural invariant of the one-event-per-message design: total
-    sent across all agents always equals total received across all
-    agents, exactly, for any sequence of messages (every message has
-    exactly one sender and one receiver)."""
+def test_message_sent_and_addressed_totals_always_match():
+    """A structural invariant of the sent-event design: total sent across
+    all agents always equals total addressed-to across all agents,
+    exactly, for any sequence of messages (every message has exactly one
+    sender and one receiver) -- both are groupings of the SAME sent-event
+    stream. This does NOT extend to handled_count_by_agent, which is a
+    genuinely separate event stream that a message may never appear in at
+    all (see test_message_telemetry.py's sent_not_handled coverage)."""
     from marla.messaging import telemetry
     from marla.messaging.builders import build_message
     from marla.messaging.schemas import MessageMetadata, MessageType
@@ -146,7 +149,7 @@ def test_message_sent_and_received_totals_always_match():
         )
         build_message("x@localhost", meta)
     summary = log.summarize()
-    assert sum(summary["sent_count_by_agent"].values()) == sum(summary["received_count_by_agent"].values()) == 7
+    assert sum(summary["sent_count_by_agent"].values()) == sum(summary["addressed_count_by_agent"].values()) == 7
     telemetry.stop_run()
 
 

@@ -55,6 +55,16 @@ class OrchestratorLifecycleBehaviour(OneShotBehaviour):
         agent: RLOrchestratorAgent = self.agent
         conversation_id = new_id("lifecycle")
 
+        # Opens messages.csv's log for the FULL experiment lifecycle --
+        # READY_CHECK/READY handshake, START_EXPERIMENT, training/
+        # evaluation (learning/trainer.py's run_training_loop joins this
+        # same log rather than starting its own), and STOP_EXPERIMENT --
+        # closed in _stop_experiment(), after STOP_EXPERIMENT has had its
+        # grace period to actually be handled by participants.
+        from marla.messaging import telemetry
+
+        telemetry.start_run(agent.run_id)
+
         try:
             if agent.required_participants:
                 await self._wait_for_ready_with_retries(agent, conversation_id)
@@ -165,8 +175,23 @@ class OrchestratorLifecycleBehaviour(OneShotBehaviour):
             # short training run (few steps, small model) can finish and
             # tear down fast enough that the disconnect reaches a
             # participant before the message announcing it does, and gets
-            # mistaken for a real crash.
+            # mistaken for a real crash. This same window is also what lets
+            # each participant's StopExperimentBehaviour record its own
+            # "handled" telemetry event for STOP_EXPERIMENT before the log
+            # closes below.
             await asyncio.sleep(self.STOP_EXPERIMENT_GRACE_SECONDS)
+
+        # Closes the log opened at the top of run() and flushes the final
+        # messages.csv/message_summary.json -- run_training_loop already
+        # wrote its own snapshot at the end of training, but STOP_EXPERIMENT
+        # itself (sent above) and any trailing handled-events happen after
+        # that point, so one more write here is what actually captures them.
+        from marla.messaging import telemetry
+        from marla.metrics.writer import write_message_artifacts
+
+        final_message_log = telemetry.stop_run()
+        if agent.run_dir is not None:
+            write_message_artifacts(agent.run_dir, final_message_log)
 
     async def _wait_for_ready_with_retries(self, agent: "RLOrchestratorAgent", conversation_id: str) -> None:
         """Resend READY_CHECK periodically until every participant is ready.

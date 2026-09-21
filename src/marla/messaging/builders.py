@@ -36,6 +36,13 @@ def build_message(
     harmless placeholder (valid, empty JSON) for messages that carry no
     payload, such as the READY_CHECK/READY/STOP_EXPERIMENT handshake.
     """
+    # Minted fresh for every call -- distinct even across retries that reuse
+    # the same request_id/conversation_id (spec: retries are still distinct
+    # logical messages). This is the correlation key between this message's
+    # "sent" telemetry event and its eventual "handled" event, if any -- see
+    # marla.messaging.telemetry's module docstring.
+    message_id = new_id("msg")
+
     message = Message(to=to_jid)
     message.set_metadata("performative", metadata.performative)
     message.set_metadata("message_type", metadata.message_type.value)
@@ -45,6 +52,7 @@ def build_message(
     message.set_metadata("request_id", metadata.request_id)
     message.set_metadata("sender_alias", metadata.sender_alias)
     message.set_metadata("receiver_alias", metadata.receiver_alias)
+    message.set_metadata("message_id", message_id)
 
     if extra_metadata:
         for key, value in extra_metadata.items():
@@ -53,11 +61,15 @@ def build_message(
     message.thread = metadata.conversation_id
     message.body = json.dumps(payload) if payload is not None else "{}"
 
-    # The one and only instrumentation point for messages.csv (spec: exactly
-    # one event per logical message) -- see marla.messaging.telemetry's
-    # module docstring for the counting rule this enforces. A no-op unless
-    # a run has called telemetry.start_run().
-    telemetry.record_if_active(
+    # The one and only "sent" instrumentation point for messages.csv (spec:
+    # exactly one sent-event per logical message) -- see
+    # marla.messaging.telemetry's module docstring for the counting rule
+    # this enforces. A no-op unless a run has called telemetry.start_run().
+    # The corresponding "handled" event, if any, is recorded separately by
+    # whichever agent behaviour actually accepts this message for
+    # processing (see each behaviour's run() method).
+    telemetry.record_sent_if_active(
+        message_id=message_id,
         sender_alias=metadata.sender_alias, receiver_alias=metadata.receiver_alias,
         performative=metadata.performative, message_type=metadata.message_type.value,
         conversation_id=metadata.conversation_id, request_id=metadata.request_id,

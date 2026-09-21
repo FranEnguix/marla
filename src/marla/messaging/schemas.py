@@ -47,7 +47,19 @@ LIFECYCLE_MESSAGE_TYPES = frozenset(
 
 @dataclass(frozen=True)
 class MessageMetadata:
-    """The envelope fields required on every MARLA SPADE message."""
+    """The envelope fields required on every MARLA SPADE message.
+
+    ``message_id`` is deliberately NOT something callers set when
+    constructing this object to pass into ``build_message()`` -- it always
+    defaults to ``""`` there, since ``build_message()`` mints a fresh one
+    itself for every call (see ``marla.messaging.builders`` and
+    ``marla.messaging.telemetry``'s module docstring for why: it is the
+    correlation key between a message's "sent" and "handled" telemetry
+    events, including across retries that reuse the same ``request_id``).
+    It is only ever meaningful on the ``MessageMetadata`` returned by
+    ``parse_metadata()`` for an actually-received message, where it carries
+    the real value the sender generated.
+    """
 
     performative: str
     message_type: MessageType
@@ -57,6 +69,7 @@ class MessageMetadata:
     request_id: str
     sender_alias: str
     receiver_alias: str
+    message_id: str = ""
 
 
 class MessageValidationError(Exception):

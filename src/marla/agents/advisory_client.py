@@ -18,6 +18,7 @@ from typing import Literal
 
 from spade.behaviour import CyclicBehaviour
 
+from marla.agents.lifecycle_behaviours import record_message_handled
 from marla.messaging.builders import build_message, new_id
 from marla.messaging.parsers import MessageValidationError, parse_json_body, parse_metadata
 from marla.messaging.schemas import (
@@ -66,6 +67,7 @@ class AdvisoryResponseListenerBehaviour(CyclicBehaviour):
         future = self._pending.pop(metadata.request_id, None)
         if future is None or future.done():
             return
+        record_message_handled(metadata)
         future.set_result(body)
 
 

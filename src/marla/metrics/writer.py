@@ -1136,14 +1136,16 @@ _MESSAGES_FIELDS = [f.name for f in dataclasses.fields(MessageEvent)]
 
 
 def write_message_artifacts(run_dir: Path, message_log: "MessageEventLog | None") -> None:
-    """``messages.csv`` (one row per logical MARLA message -- see
-    ``marla.messaging.telemetry``'s module docstring for the exactly-once
-    counting rule) and ``message_summary.json`` (sent/received counts per
-    agent, counts by message type, consultation/retry counts). Same full-
-    overwrite-per-call contract as ``write_resource_artifacts`` above. A
-    no-op when no messages were sent (e.g. the baseline/PPO_ONLY variant,
-    which never constructs a Gatekeeper/Plan Maker at all) or the message
-    log was never started for this run.
+    """``messages.csv`` (one row per "sent" or "handled" message event --
+    see ``marla.messaging.telemetry``'s module docstring for why a message
+    may have one or the other, or both, but never more than one of each)
+    and ``message_summary.json`` (sent/handled/addressed counts per agent
+    and per message type, consultation/retry counts, and
+    ``sent_not_handled_count``). Same full-overwrite-per-call contract as
+    ``write_resource_artifacts`` above. A no-op when no messages were sent
+    (e.g. the baseline/PPO_ONLY variant, which never constructs a
+    Gatekeeper/Plan Maker at all) or the message log was never started for
+    this run.
     """
     if message_log is None or not message_log.events:
         return

@@ -18,6 +18,7 @@ _REQUIRED_METADATA_KEYS = (
     "request_id",
     "sender_alias",
     "receiver_alias",
+    "message_id",
 )
 
 
@@ -43,6 +44,7 @@ def parse_metadata(message: Message) -> MessageMetadata:
         request_id=values["request_id"],
         sender_alias=values["sender_alias"],
         receiver_alias=values["receiver_alias"],
+        message_id=values["message_id"],
     )
 
 

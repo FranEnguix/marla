@@ -22,6 +22,7 @@ from marla.agents.lifecycle_behaviours import (
     disable_reconnect_on_missed_ping,
     make_disconnect_detector,
     message_type_template,
+    record_message_handled,
 )
 from marla.messaging.advisory_validation import AdvisoryValidationError, validate_advisory_response_body
 from marla.messaging.builders import build_message
@@ -70,6 +71,7 @@ class AdvisoryRequestBehaviour(CyclicBehaviour):
         if request.run_id != agent.run_id:
             logger.warning("Dropping advisory request with mismatched run_id: %s", request.run_id)
             return
+        record_message_handled(metadata)
 
         agent.pending[request.request_id] = PendingRequest(
             run_id=request.run_id,
@@ -114,6 +116,7 @@ class AdvisoryResponseBehaviour(CyclicBehaviour):
         if pending is None:
             logger.warning("No pending request for advisory response request_id=%s", metadata.request_id)
             return
+        record_message_handled(metadata)
 
         if metadata.sender_alias != pending.expected_agent_alias:
             error = AdvisoryValidationError(

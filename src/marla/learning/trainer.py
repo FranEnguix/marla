@@ -387,18 +387,25 @@ async def run_training_loop(
     # here too, it just never sees anything ADVISORY_REQUEST-shaped without
     # a Gatekeeper/Plan Maker configured.
     #
-    # KNOWN SCOPE LIMITATION: this window starts/stops around
-    # run_training_loop's OWN duration, not the full agent lifecycle -- the
-    # READY_CHECK/START_EXPERIMENT messages sent immediately BEFORE this
-    # call (and STOP_EXPERIMENT sent immediately after, from
-    # OrchestratorLifecycleBehaviour.run()) are therefore NOT captured
-    # here. This is a deliberate, documented scope choice (not a bug): the
-    # lifecycle handshake is a small, fixed number of messages (len(
-    # required_participants) x 2-3) regardless of run length, dwarfed by
-    # real decision-time consultation volume, and run_training_loop is
-    # also called directly (without any orchestrator agent at all) by
-    # several unit tests, which need their own self-contained start/stop.
-    message_log = telemetry.start_run(run_id)
+    # OWNERSHIP: OrchestratorLifecycleBehaviour.run() (agents/orchestrator.py)
+    # now opens this run's message log itself, BEFORE calling
+    # run_training_loop, specifically to capture the pre-training
+    # READY_CHECK/START_EXPERIMENT handshake -- and closes it only after
+    # STOP_EXPERIMENT has been sent and given its grace period to be
+    # handled by participants. When that has already happened, join the
+    # existing log instead of replacing it (which would silently discard
+    # those lifecycle events) and leave closing it to that outer caller.
+    # run_training_loop is also called directly, with no orchestrator agent
+    # at all, by several unit tests and by run_baseline_training -- those
+    # call sites see no pre-existing active log and continue to own their
+    # own self-contained start/stop exactly as before.
+    existing_message_log = telemetry.get_active()
+    if existing_message_log is not None and existing_message_log.run_id == run_id:
+        message_log = existing_message_log
+        owns_message_log = False
+    else:
+        message_log = telemetry.start_run(run_id)
+        owns_message_log = True
 
     # Per-agent CodeCarbon energy/CO2eq tracking (spec: "one agent = one
     # MARLA run, one config, one seed"). Config-driven, same pattern as
@@ -730,9 +737,10 @@ async def run_training_loop(
         except Exception:
             logger.exception("resource_monitor cleanup failed during exception handling")
         try:
-            stopped_log = telemetry.stop_run()
+            if owns_message_log:
+                telemetry.stop_run()
             if incremental:
-                write_message_artifacts(run_dir, stopped_log)
+                write_message_artifacts(run_dir, message_log)
         except Exception:
             logger.exception("message telemetry cleanup failed during exception handling")
         try:
@@ -755,7 +763,7 @@ async def run_training_loop(
     # invariant visible at the call site too.
     carbon_summary = carbon_tracker.stop()
     result.carbon_summary = carbon_summary
-    final_message_log = telemetry.stop_run()
+    final_message_log = telemetry.stop_run() if owns_message_log else message_log
     if incremental:
         write_resource_artifacts(run_dir, resource_monitor)
         write_message_artifacts(run_dir, final_message_log)

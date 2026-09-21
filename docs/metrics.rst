@@ -400,40 +400,96 @@ Run directory contents
     reader who specifically wants that figure instead.
 
 ``messages.csv`` / ``message_summary.json``
-    One row per logical MARLA inter-agent message (RL Orchestrator <->
-    Gatekeeper <-> Plan Maker), recorded exactly once per message at the
-    single point every message is built (:func:`marla.messaging.builders.build_message`
-    -- see :mod:`marla.messaging.telemetry`'s module docstring for the
-    full counting rule this guarantees). Never raw XMPP transport packets
-    (presence, IQ pings) -- those never pass through this function.
-    Columns: ``sender_alias``/``receiver_alias``, ``performative``,
-    ``message_type`` (``READY_CHECK``/``START_EXPERIMENT``/
-    ``STOP_EXPERIMENT`` lifecycle vs. ``ADVISORY_REQUEST``/
+    Every row is one EVENT for one logical MARLA inter-agent message (RL
+    Orchestrator <-> Gatekeeper <-> Plan Maker) -- never a raw XMPP
+    transport packet (presence, IQ pings), which never passes through
+    :func:`marla.messaging.builders.build_message` at all. A message
+    produces at most two events, distinguished by the ``event_type``
+    column:
+
+    - ``"sent"`` -- recorded exactly once, at the single point every
+      message is built (see :mod:`marla.messaging.telemetry`'s module
+      docstring for the full counting rule). Proves the message was built
+      and addressed to a receiver. **Nothing more.**
+    - ``"handled"`` -- recorded once by the intended MARLA behaviour, at
+      the point it actually accepts the message for processing (after
+      envelope parsing and run/request correlation succeed -- see each
+      agent behaviour's ``run()`` method). Proves a real SPADE behaviour
+      matched and acted on it.
+
+    These are genuinely different claims, and a message is not guaranteed
+    to have both: MARLA has observed real "No behaviour matched for
+    message ..." situations, where a message was sent and addressed but no
+    registered behaviour ever consumed it (in practice, this currently
+    happens for every ``START_EXPERIMENT`` message -- neither the
+    Gatekeeper nor the Plan Maker register a behaviour for it, since
+    neither needs to react to it directly). ``message_summary.json``'s
+    ``sent_not_handled_count`` makes this kind of gap visible rather than
+    silently absorbing it into a single ambiguous "received" figure.
+
+    Every event's ``message_id`` is a UUID minted fresh by
+    ``build_message()`` for that one call -- distinct even across retries
+    that reuse the same ``request_id``/``conversation_id`` (a
+    ``CORRECTION_REQUEST`` retry is still a separate logical message). It
+    is what lets a "sent" event be joined to its "handled" event (if any)
+    after the fact.
+
+    Columns: ``event_type``, ``message_id``, ``sender_alias``/
+    ``receiver_alias``, ``performative``, ``message_type``
+    (``READY_CHECK``/``READY``/``START_EXPERIMENT``/``STOP_EXPERIMENT``/
+    ``EXPERIMENT_FAILED`` lifecycle vs. ``ADVISORY_REQUEST``/
     ``ADVISORY_RESPONSE``/``CORRECTION_REQUEST`` decision-time
     consultation -- always distinguishable by this field),
     ``conversation_id``/``request_id`` for correlation, and
     ``episode_id``/``environment_step`` (populated for decision-time
     messages via the rollout loop's own context, always ``None`` for
-    lifecycle messages, which are not tied to any one decision).
-    ``message_summary.json``'s ``sent_count_by_agent`` /
-    ``received_count_by_agent`` are BOTH derived from this same event
-    list (grouped by sender/receiver respectively) -- never two
-    independently instrumented counters, which is what avoids double-
-    counting or the two figures drifting apart. ``consultation_request_
-    count``/``consultation_response_count`` count MESSAGES (each hop --
-    Orchestrator->Gatekeeper and Gatekeeper->Plan Maker are two separate
-    ADVISORY_REQUEST messages for one logical consultation), not distinct
-    consultations; compare against ``decisions.csv``'s own
-    ``consultation_count``/``queried`` for the distinct-consultation
-    figure. KNOWN SCOPE LIMITATION: capture is scoped to
-    ``learning.trainer.run_training_loop``'s own duration, so the
-    handshake READY_CHECK/START_EXPERIMENT (sent immediately before) and
-    STOP_EXPERIMENT (sent immediately after, from
-    ``OrchestratorLifecycleBehaviour``) are not currently captured -- a
-    small, fixed number of messages regardless of run length, not
-    decision-time volume. Absent entirely (no file written) for the
-    baseline/PPO_ONLY variant if no messages of any kind were sent, and
-    whenever no message telemetry was active for the run.
+    lifecycle messages, which are not tied to any one decision -- this
+    rule applies identically to a message's sent and handled events).
+
+    ``message_summary.json`` fields:
+
+    - ``sent_count_by_agent`` / ``handled_count_by_agent`` -- grouped by
+      sender and by receiver respectively, of the sent-event and
+      handled-event streams respectively. These are two DIFFERENT event
+      streams; do not expect them to sum to the same total.
+    - ``addressed_count_by_agent`` -- sent events grouped by receiver:
+      proves a message was addressed to that agent, never that agent's own
+      behaviour processed it. This replaces the previous, ambiguously
+      named ``received_count_by_agent``, which this module no longer
+      writes.
+    - ``sent_count_by_type`` / ``handled_count_by_type`` -- the same
+      grouping, by ``message_type`` instead of agent.
+    - ``sent_not_handled_count`` -- count of distinct ``message_id``\\ s
+      with a sent event and no corresponding handled event.
+    - ``total_message_count`` (distinct logical messages, i.e. sent
+      events) vs. ``total_event_count`` (sent + handled rows).
+    - ``consultation_request_count``/``consultation_response_count`` count
+      MESSAGES, computed over sent events only (each hop -- Orchestrator->
+      Gatekeeper and Gatekeeper->Plan Maker are two separate
+      ADVISORY_REQUEST messages for one logical consultation), not
+      distinct consultations; compare against ``decisions.csv``'s own
+      ``consultation_count``/``queried`` for the distinct-consultation
+      figure. One consultation therefore always involves multiple
+      messages -- do not conflate a message count with a consultation
+      count anywhere in analysis.
+
+    Capture now spans the FULL experiment lifecycle: the run's message log
+    is opened by ``OrchestratorLifecycleBehaviour.run()`` before the first
+    ``READY_CHECK`` is sent, and closed only after ``STOP_EXPERIMENT`` has
+    been sent and given its grace period to actually be handled by
+    participants -- ``learning.trainer.run_training_loop`` joins this same
+    log for the training/evaluation portion rather than opening its own
+    (it still opens and closes its own, self-contained log when called
+    directly with no orchestrator agent at all, e.g. from unit tests).
+    Absent entirely (no file written) for the baseline/PPO_ONLY variant if
+    no messages of any kind were sent, and whenever no message telemetry
+    was active for the run.
+
+    Only LOGICAL MARLA messages built by MARLA's own code are ever
+    counted here -- never raw XMPP transport packets, and never a
+    network-level delivery acknowledgement (SPADE/pyjabber do not expose
+    one MARLA relies on): "sent" and "handled" are the two claims this
+    module actually measures, not "delivered."
 
 ``summary.json``
     Aggregate statistics computed from the above, without ever holding a

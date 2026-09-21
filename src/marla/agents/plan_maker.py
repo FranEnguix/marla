@@ -22,6 +22,7 @@ from marla.agents.lifecycle_behaviours import (
     disable_reconnect_on_missed_ping,
     message_type_template,
     make_disconnect_detector,
+    record_message_handled,
 )
 from marla.knowledge.retriever import KnowledgeBase, retrieve_rules
 from marla.messaging.builders import build_message
@@ -53,6 +54,7 @@ class AdvisoryRequestHandler(CyclicBehaviour):
         if request.run_id != agent.run_id:
             logger.warning("Dropping advisory request with mismatched run_id: %s", request.run_id)
             return
+        record_message_handled(metadata)
 
         legal_action_types = {action.type for action in request.legal_actions}
         retrieved = retrieve_rules(agent.knowledge_base, request.observation, legal_action_types)
@@ -87,6 +89,7 @@ class CorrectionRequestHandler(CyclicBehaviour):
         if stored is None:
             logger.warning("No stored prompt for correction request_id=%s", metadata.request_id)
             return
+        record_message_handled(metadata)
         original_prompt, legal_action_ids = stored
         legal_action_ids = body.get("legal_action_ids", legal_action_ids)
 
