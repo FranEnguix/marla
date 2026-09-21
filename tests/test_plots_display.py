@@ -246,10 +246,13 @@ def _resources_df(n: int) -> pd.DataFrame:
             "phase": ["rollout_collection"] * n,
             "cpu_process_pct": [50.0 + i for i in range(n)],
             "cpu_system_pct": [10.0 + i for i in range(n)],
-            "ram_rss_mb": [500.0 + i for i in range(n)],
-            "ram_system_used_mb": [2000.0 + i for i in range(n)],
-            "torch_cuda_allocated_mb": [100.0 + i for i in range(n)],
-            "torch_cuda_reserved_mb": [150.0 + i for i in range(n)],
+            "cpu_process_user_seconds": [1.0 + i for i in range(n)],
+            "cpu_process_system_seconds": [0.5 + 0.1 * i for i in range(n)],
+            "cpu_process_total_seconds": [1.5 + 1.1 * i for i in range(n)],
+            "ram_rss_mib": [500.0 + i for i in range(n)],
+            "ram_system_used_mib": [2000.0 + i for i in range(n)],
+            "torch_cuda_allocated_mib": [100.0 + i for i in range(n)],
+            "torch_cuda_reserved_mib": [150.0 + i for i in range(n)],
         }
     )
 
@@ -281,7 +284,7 @@ def test_resource_ram_plot_renders_real_series_at_threshold(tmp_path, monkeypatc
     ax = capture.last_axes[0]
     assert len(ax.lines) >= 1
     assert not any("insufficient" in t.get_text().lower() for t in ax.texts)
-    assert ax.get_ylabel() == "RAM (MB)"
+    assert ax.get_ylabel() == "RAM (MiB)"
 
 
 def test_resource_ram_plot_renders_with_many_points(tmp_path, monkeypatch):

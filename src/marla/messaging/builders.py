@@ -8,6 +8,7 @@ from typing import Any
 
 from spade.message import Message
 
+from marla.messaging import telemetry
 from marla.messaging.schemas import MessageMetadata
 
 
@@ -51,5 +52,15 @@ def build_message(
 
     message.thread = metadata.conversation_id
     message.body = json.dumps(payload) if payload is not None else "{}"
+
+    # The one and only instrumentation point for messages.csv (spec: exactly
+    # one event per logical message) -- see marla.messaging.telemetry's
+    # module docstring for the counting rule this enforces. A no-op unless
+    # a run has called telemetry.start_run().
+    telemetry.record_if_active(
+        sender_alias=metadata.sender_alias, receiver_alias=metadata.receiver_alias,
+        performative=metadata.performative, message_type=metadata.message_type.value,
+        conversation_id=metadata.conversation_id, request_id=metadata.request_id,
+    )
 
     return message

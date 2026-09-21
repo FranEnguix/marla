@@ -16,16 +16,24 @@ from marla.metrics.compare_plots import (
 )
 
 
-def _write_run(tmp_path, name: str, *, total_training_seconds=None, cpu_mean=None, energy_kwh=None, carbon_enabled=True):
+def _write_run(
+    tmp_path, name: str, *, total_training_seconds=None, cpu_mean=None, energy_kwh=None, carbon_enabled=True,
+    peak_rss_mib=None, cpu_total_seconds=None,
+):
     run_dir = tmp_path / name
     run_dir.mkdir()
     if total_training_seconds is not None:
         (run_dir / "summary.json").write_text(json.dumps({"total_training_seconds": total_training_seconds}), encoding="utf-8")
-    if cpu_mean is not None:
-        (run_dir / "resource_summary.json").write_text(
-            json.dumps({"overall": {"cpu_process_pct": {"mean": cpu_mean, "p95": cpu_mean, "max": cpu_mean}}}),
-            encoding="utf-8",
-        )
+    if cpu_mean is not None or peak_rss_mib is not None or cpu_total_seconds is not None:
+        resource_summary = {"overall": {}}
+        if cpu_mean is not None:
+            resource_summary["overall"]["cpu_process_pct"] = {"mean": cpu_mean, "p95": cpu_mean, "max": cpu_mean}
+        if peak_rss_mib is not None:
+            resource_summary["peak_rss_mib"] = peak_rss_mib
+            resource_summary["mean_rss_mib"] = peak_rss_mib * 0.8
+        if cpu_total_seconds is not None:
+            resource_summary["process_cpu_total_seconds"] = cpu_total_seconds
+        (run_dir / "resource_summary.json").write_text(json.dumps(resource_summary), encoding="utf-8")
     if energy_kwh is not None:
         carbon_dir = run_dir / "carbon"
         carbon_dir.mkdir()
@@ -43,6 +51,44 @@ def test_load_run_metrics_reads_all_three_sources(tmp_path):
     assert m.cpu_process_pct_mean == 42.0
     assert m.energy_kwh == 0.01
     assert m.co2eq_kg == pytest.approx(0.00035)
+
+
+def test_load_run_metrics_reads_absolute_units_as_primary_fields(tmp_path):
+    """Absolute quantities (RSS MiB, CPU-seconds) are the primary
+    reporting fields -- read directly as top-level resource_summary.json
+    keys, distinct from the secondary cpu_process_pct_mean percentage."""
+    run_dir = _write_run(tmp_path, "seed1", peak_rss_mib=2048.0, cpu_total_seconds=305.5, cpu_mean=42.0)
+    m = load_run_metrics(run_dir)
+    assert m.peak_rss_mib == 2048.0
+    assert m.mean_rss_mib == pytest.approx(2048.0 * 0.8)
+    assert m.cpu_process_total_seconds == 305.5
+    # both the absolute and the (still-present, secondary) percentage field
+    # are available side by side.
+    assert m.cpu_process_pct_mean == 42.0
+
+
+def test_generate_comparison_plots_prioritizes_absolute_metrics_first(tmp_path):
+    """COMPARISON_METRICS orders absolute quantities before percentage
+    appendix metrics -- the reporting-emphasis rule this module exists to
+    enforce."""
+    absolute_metrics = {"total_training_seconds", "cpu_process_total_seconds", "peak_rss_mib", "mean_rss_mib", "energy_kwh", "co2eq_kg"}
+    percentage_metrics = {"cpu_process_pct_mean", "gpu_util_pct_mean"}
+    names = [m[0] for m in COMPARISON_METRICS]
+    last_absolute_index = max(names.index(m) for m in absolute_metrics if m in names)
+    first_percentage_index = min(names.index(m) for m in percentage_metrics if m in names)
+    assert last_absolute_index < first_percentage_index
+
+
+def test_generate_comparison_plots_writes_absolute_unit_comparison_files(tmp_path):
+    run_dirs = [
+        _write_run(tmp_path, "seed909", total_training_seconds=100.0, peak_rss_mib=1500.0, cpu_total_seconds=90.0),
+        _write_run(tmp_path, "seed919", total_training_seconds=110.0, peak_rss_mib=1600.0, cpu_total_seconds=95.0),
+    ]
+    plots_dir = tmp_path / "compare_plots"
+    written = generate_comparison_plots(run_dirs, plots_dir)
+    names = {p.name for p in written}
+    assert "compare_peak_rss_mib.png" in names
+    assert "compare_cpu_process_total_seconds.png" in names
 
 
 def test_load_run_metrics_missing_files_are_none_not_zero(tmp_path):

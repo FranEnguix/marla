@@ -55,6 +55,7 @@ from marla.learning.query_gate import compute_top_two_margin
 from marla.learning.rollout import EpisodeSummary, StepRecord
 from marla.learning.trainer import TrainingResult
 from marla.monitoring.carbon import write_carbon_summary
+from marla.messaging.telemetry import MessageEvent, MessageEventLog
 from marla.monitoring.resources import ResourceMonitor, ResourceSample, machine_report
 from marla.metrics.accumulators import ConsultationStats
 from marla.runtime.device import ResolvedDevice
@@ -1129,6 +1130,25 @@ def write_resource_artifacts(run_dir: Path, resource_monitor: "ResourceMonitor")
         return
     _write_csv(run_dir / "resources.csv", _RESOURCES_FIELDS, resource_monitor.to_rows())
     (run_dir / "resource_summary.json").write_text(json.dumps(resource_monitor.summarize(), indent=2), encoding="utf-8")
+
+
+_MESSAGES_FIELDS = [f.name for f in dataclasses.fields(MessageEvent)]
+
+
+def write_message_artifacts(run_dir: Path, message_log: "MessageEventLog | None") -> None:
+    """``messages.csv`` (one row per logical MARLA message -- see
+    ``marla.messaging.telemetry``'s module docstring for the exactly-once
+    counting rule) and ``message_summary.json`` (sent/received counts per
+    agent, counts by message type, consultation/retry counts). Same full-
+    overwrite-per-call contract as ``write_resource_artifacts`` above. A
+    no-op when no messages were sent (e.g. the baseline/PPO_ONLY variant,
+    which never constructs a Gatekeeper/Plan Maker at all) or the message
+    log was never started for this run.
+    """
+    if message_log is None or not message_log.events:
+        return
+    _write_csv(run_dir / "messages.csv", _MESSAGES_FIELDS, message_log.to_rows())
+    (run_dir / "message_summary.json").write_text(json.dumps(message_log.summarize(), indent=2), encoding="utf-8")
 
 
 def finalize_run_directory(

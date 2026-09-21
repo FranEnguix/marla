@@ -327,7 +327,14 @@ async def run_training_loop(
     """
     # Imported lazily: metrics.writer imports TrainingResult from this
     # module, so importing it at module scope would be circular.
-    from marla.metrics.writer import append_rollout_metrics, build_decision_rows, build_rollout_row, write_resource_artifacts
+    from marla.messaging import telemetry
+    from marla.metrics.writer import (
+        append_rollout_metrics,
+        build_decision_rows,
+        build_rollout_row,
+        write_message_artifacts,
+        write_resource_artifacts,
+    )
 
     adapters = adapter if isinstance(adapter, list) else [adapter]
     # Every collector shares run_id verbatim (never a per-stream suffix):
@@ -373,6 +380,25 @@ async def run_training_loop(
         enabled=config.metrics.resource_monitoring.enabled if config else False,
     )
     resource_monitor.start()
+
+    # Raw inter-agent message telemetry (messages.csv) -- see
+    # marla.messaging.telemetry's module docstring for the counting rule.
+    # A no-op for the baseline/PPO_ONLY variant: build_message() is called
+    # here too, it just never sees anything ADVISORY_REQUEST-shaped without
+    # a Gatekeeper/Plan Maker configured.
+    #
+    # KNOWN SCOPE LIMITATION: this window starts/stops around
+    # run_training_loop's OWN duration, not the full agent lifecycle -- the
+    # READY_CHECK/START_EXPERIMENT messages sent immediately BEFORE this
+    # call (and STOP_EXPERIMENT sent immediately after, from
+    # OrchestratorLifecycleBehaviour.run()) are therefore NOT captured
+    # here. This is a deliberate, documented scope choice (not a bug): the
+    # lifecycle handshake is a small, fixed number of messages (len(
+    # required_participants) x 2-3) regardless of run length, dwarfed by
+    # real decision-time consultation volume, and run_training_loop is
+    # also called directly (without any orchestrator agent at all) by
+    # several unit tests, which need their own self-contained start/stop.
+    message_log = telemetry.start_run(run_id)
 
     # Per-agent CodeCarbon energy/CO2eq tracking (spec: "one agent = one
     # MARLA run, one config, one seed"). Config-driven, same pattern as
@@ -674,6 +700,7 @@ async def run_training_loop(
                 # hard between rollouts still leaves resources.csv/
                 # resource_summary.json reflecting everything sampled so far.
                 write_resource_artifacts(run_dir, resource_monitor)
+                write_message_artifacts(run_dir, message_log)
 
             # Nothing below this point needs `records`/`decision_rows` again --
             # both go out of scope at the top of the next iteration (or at
@@ -703,6 +730,12 @@ async def run_training_loop(
         except Exception:
             logger.exception("resource_monitor cleanup failed during exception handling")
         try:
+            stopped_log = telemetry.stop_run()
+            if incremental:
+                write_message_artifacts(run_dir, stopped_log)
+        except Exception:
+            logger.exception("message telemetry cleanup failed during exception handling")
+        try:
             result.carbon_summary = carbon_tracker.stop()
             if incremental and result.carbon_summary is not None:
                 write_carbon_summary(run_dir, result.carbon_summary, agent_id=run_id)
@@ -722,8 +755,10 @@ async def run_training_loop(
     # invariant visible at the call site too.
     carbon_summary = carbon_tracker.stop()
     result.carbon_summary = carbon_summary
+    final_message_log = telemetry.stop_run()
     if incremental:
         write_resource_artifacts(run_dir, resource_monitor)
+        write_message_artifacts(run_dir, final_message_log)
         # No derived efficiency metrics here (root_auc/successful_finish
         # counts are a post-hoc analysis-layer concept -- see
         # research/optuna's own aggregation step, which augments this

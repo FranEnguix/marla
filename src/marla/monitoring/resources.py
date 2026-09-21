@@ -10,6 +10,32 @@ whatever the caller last set as the current phase/step via
 phase names) -- never sampled per environment step, which would both be
 far too fine-grained to be meaningful and would materially slow training.
 
+**Absolute vs. relative units (paper-reporting hardening)**: percentages
+(``cpu_process_pct``, ``cpu_system_pct``, ``gpu_util_pct``) are strongly
+hardware-relative -- the same workload on a different core count or a
+different GPU reports a different percentage for the same real work. Every
+metric with a genuine absolute physical unit is ALSO recorded that way:
+process memory in MiB (never converted from/to a CPU-percent -- memory and
+compute are different physical quantities), GPU memory in MiB (device-level
+NVML, PyTorch-allocated, and PyTorch-reserved kept as three DISTINCT
+fields, never merged into one ambiguous "GPU memory"), and CPU *compute*
+in absolute seconds (``cpu_process_user_seconds`` / ``..._system_seconds``
+/ ``..._total_seconds``, from :meth:`psutil.Process.cpu_times`, cumulative
+since process start -- unaffected by core count the way a percentage is).
+Percentages remain in the raw per-sample telemetry as a secondary
+diagnostic (useful for spotting throttling/contention within one run), but
+:meth:`ResourceMonitor.summarize` surfaces the absolute quantities as the
+primary run-level summary fields a paper table should read.
+
+GPU *compute* has no reliable absolute measure available here: NVML's
+``utilization.gpu`` is a coarse, driver-reported percentage-busy-over-a-
+recent-window sample, not a kernel-time accounting API, and PyTorch
+exposes no elapsed-kernel-time counter either. :func:`_gpu_utilization_equivalent_seconds`
+derives a documented, clearly-labeled *approximation* (utilization
+fraction integrated over the actual wall-clock gap between consecutive
+samples) for readers who want a single number, but this is never presented
+as exact GPU compute time -- see that function's own docstring.
+
 **CPU-percent semantics** -- ``cpu_process_pct`` and ``cpu_system_pct``
 use TWO DIFFERENT conventions, both :mod:`psutil`'s own, neither
 normalized here:
@@ -28,7 +54,9 @@ normalized here:
   the other expecting a "fraction of system CPU this process used" number
   -- that would need ``cpu_process_pct / (100 * cpu_logical_count)``
   instead. Both scales are documented here specifically because
-  conflating them would silently misrepresent utilization.
+  conflating them would silently misrepresent utilization. Prefer the
+  absolute ``cpu_process_*_seconds`` fields for cross-run/cross-hardware
+  comparison; keep the percentages for within-run diagnostics.
 
 Logical vs. physical core counts are both reported specifically so a
 percentage can be interpreted against either basis by whoever reads
@@ -41,7 +69,7 @@ available; ``torch.cuda.memory_allocated``/``memory_reserved``/
 CUDA is available REGARDLESS of NVML (they come from PyTorch's own CUDA
 caching allocator, not from any driver query) -- so a CUDA-without-NVML
 environment still gets PyTorch-side memory numbers, just with
-``gpu_util_pct``/``gpu_memory_used_mb`` left ``None``. On a CPU-only
+``gpu_util_pct``/``gpu_memory_used_mib`` left ``None``. On a CPU-only
 machine every GPU field is ``None`` and nothing about training changes;
 this module never repeatedly shells out to ``nvidia-smi`` (a real,
 measurable per-call subprocess-spawn cost at 1s sampling intervals) -- it
@@ -67,7 +95,12 @@ except ImportError:  # pragma: no cover -- exercised by the "no NVML" smoke path
     _NVML_IMPORTABLE = False
 
 
-def _bytes_to_mb(n: int | float) -> float:
+def _bytes_to_mib(n: int | float) -> float:
+    """Binary mebibytes (1 MiB = 1024*1024 bytes) -- this is what every
+    "_mib"-suffixed field in this module actually computes and always has
+    (the prior "_mb" naming computed the identical binary value, which is
+    MiB, not decimal MB; this is a labeling correction, not a value
+    change)."""
     return n / (1024 * 1024)
 
 
@@ -117,25 +150,33 @@ class ResourceSample:
     cpu_system_pct: float | None
     cpu_logical_count: int | None
     cpu_physical_count: int | None
+    # Absolute CPU compute, cumulative since process start (psutil.Process
+    # .cpu_times()) -- unlike the percentages above, these are directly
+    # comparable across runs/hardware with different core counts.
+    cpu_process_user_seconds: float | None
+    cpu_process_system_seconds: float | None
+    cpu_process_total_seconds: float | None
 
-    ram_rss_mb: float | None
-    ram_peak_rss_mb: float | None  # None where the platform doesn't reliably expose peak RSS (see _process_peak_rss_mb)
-    ram_system_used_mb: float | None
-    ram_system_total_mb: float | None
+    ram_rss_mib: float | None
+    ram_peak_rss_mib: float | None  # None where the platform doesn't reliably expose peak RSS (see _process_peak_rss_mib)
+    ram_vms_mib: float | None  # secondary: virtual memory size, not the primary process-memory metric (that's RSS)
+    ram_system_used_mib: float | None
+    ram_system_available_mib: float | None
+    ram_system_total_mib: float | None
     ram_system_pct: float | None
 
     gpu_index: int | None
-    gpu_util_pct: float | None
-    gpu_memory_used_mb: float | None
-    gpu_memory_total_mb: float | None
+    gpu_util_pct: float | None  # NVML-reported, relative -- see module docstring
+    gpu_memory_used_mib: float | None  # device-level (NVML): everything resident on the GPU, not just this process/PyTorch
+    gpu_memory_total_mib: float | None
 
-    torch_cuda_allocated_mb: float | None
-    torch_cuda_reserved_mb: float | None
-    torch_cuda_max_allocated_mb: float | None
-    torch_cuda_max_reserved_mb: float | None
+    torch_cuda_allocated_mib: float | None  # PyTorch's own caching allocator: tensors actually in use
+    torch_cuda_reserved_mib: float | None  # PyTorch's own caching allocator: reserved from the driver (>= allocated)
+    torch_cuda_max_allocated_mib: float | None
+    torch_cuda_max_reserved_mib: float | None
 
 
-def _process_peak_rss_mb(process: psutil.Process) -> float | None:
+def _process_peak_rss_mib(process: psutil.Process) -> float | None:
     """Peak RSS is not part of psutil's cross-platform API (it varies by
     OS: ``ru_maxrss`` via ``resource.getrusage`` on Linux/macOS, nothing
     directly comparable on Windows) -- reported "if reliably available"
@@ -158,6 +199,7 @@ def _sample_once(process: psutil.Process, phase: str | None, global_env_step: in
     cpu_system_pct = psutil.cpu_percent(interval=None)
     vmem = psutil.virtual_memory()
     mem_info = process.memory_info()
+    cpu_times = process.cpu_times()  # cumulative seconds since process start -- an absolute measure, not a rate
 
     gpu_index = gpu_util = gpu_mem_used = gpu_mem_total = None
     if _NvmlHandles.ensure_init():
@@ -173,29 +215,58 @@ def _sample_once(process: psutil.Process, phase: str | None, global_env_step: in
                 util = pynvml.nvmlDeviceGetUtilizationRates(handle)
                 gpu_util = float(util.gpu)
                 mem = pynvml.nvmlDeviceGetMemoryInfo(handle)
-                gpu_mem_used = _bytes_to_mb(mem.used)
-                gpu_mem_total = _bytes_to_mb(mem.total)
+                gpu_mem_used = _bytes_to_mib(mem.used)
+                gpu_mem_total = _bytes_to_mib(mem.total)
             except Exception:  # noqa: BLE001 -- a transient NVML query failure degrades this one sample, not the run
                 pass
 
     torch_allocated = torch_reserved = torch_max_allocated = torch_max_reserved = None
     if torch.cuda.is_available():
-        torch_allocated = _bytes_to_mb(torch.cuda.memory_allocated())
-        torch_reserved = _bytes_to_mb(torch.cuda.memory_reserved())
-        torch_max_allocated = _bytes_to_mb(torch.cuda.max_memory_allocated())
-        torch_max_reserved = _bytes_to_mb(torch.cuda.max_memory_reserved())
+        torch_allocated = _bytes_to_mib(torch.cuda.memory_allocated())
+        torch_reserved = _bytes_to_mib(torch.cuda.memory_reserved())
+        torch_max_allocated = _bytes_to_mib(torch.cuda.max_memory_allocated())
+        torch_max_reserved = _bytes_to_mib(torch.cuda.max_memory_reserved())
 
     return ResourceSample(
         timestamp=time.time(), phase=phase, global_env_step=global_env_step, ppo_update=ppo_update,
         cpu_process_pct=cpu_process_pct, cpu_system_pct=cpu_system_pct,
         cpu_logical_count=psutil.cpu_count(logical=True), cpu_physical_count=psutil.cpu_count(logical=False),
-        ram_rss_mb=_bytes_to_mb(mem_info.rss), ram_peak_rss_mb=_process_peak_rss_mb(process),
-        ram_system_used_mb=_bytes_to_mb(vmem.used), ram_system_total_mb=_bytes_to_mb(vmem.total),
-        ram_system_pct=vmem.percent,
-        gpu_index=gpu_index, gpu_util_pct=gpu_util, gpu_memory_used_mb=gpu_mem_used, gpu_memory_total_mb=gpu_mem_total,
-        torch_cuda_allocated_mb=torch_allocated, torch_cuda_reserved_mb=torch_reserved,
-        torch_cuda_max_allocated_mb=torch_max_allocated, torch_cuda_max_reserved_mb=torch_max_reserved,
+        cpu_process_user_seconds=cpu_times.user, cpu_process_system_seconds=cpu_times.system,
+        cpu_process_total_seconds=cpu_times.user + cpu_times.system,
+        ram_rss_mib=_bytes_to_mib(mem_info.rss), ram_peak_rss_mib=_process_peak_rss_mib(process),
+        ram_vms_mib=_bytes_to_mib(mem_info.vms),
+        ram_system_used_mib=_bytes_to_mib(vmem.used), ram_system_available_mib=_bytes_to_mib(vmem.available),
+        ram_system_total_mib=_bytes_to_mib(vmem.total), ram_system_pct=vmem.percent,
+        gpu_index=gpu_index, gpu_util_pct=gpu_util, gpu_memory_used_mib=gpu_mem_used, gpu_memory_total_mib=gpu_mem_total,
+        torch_cuda_allocated_mib=torch_allocated, torch_cuda_reserved_mib=torch_reserved,
+        torch_cuda_max_allocated_mib=torch_max_allocated, torch_cuda_max_reserved_mib=torch_max_reserved,
     )
+
+
+def _gpu_utilization_equivalent_seconds(rows: list[dict]) -> float | None:
+    r"""An approximate GPU-busy-time in seconds, derived ONLY from periodic
+    utilization sampling -- NOT exact kernel time (NVML exposes no
+    absolute kernel-time counter, and PyTorch exposes none either).
+
+    Defined explicitly as: for each pair of consecutive samples with a
+    non-null ``gpu_util_pct``, accumulate
+    ``(util_fraction_i / 100) * (timestamp_{i+1} - timestamp_i)`` -- i.e.
+    utilization-fraction integrated over the REAL wall-clock gap between
+    samples (never assumed to equal the configured sampling interval,
+    since a slow sample or a paused monitor would otherwise silently bias
+    this). ``None`` (not 0.0) when fewer than 2 samples carry a GPU
+    utilization value, since there is then no time gap to integrate over.
+    """
+    timed = [(r["timestamp"], r["gpu_util_pct"]) for r in rows if r.get("gpu_util_pct") is not None]
+    if len(timed) < 2:
+        return None
+    timed.sort(key=lambda pair: pair[0])
+    total = 0.0
+    for (t0, u0), (t1, _u1) in zip(timed, timed[1:]):
+        dt = t1 - t0
+        if dt > 0:
+            total += (u0 / 100.0) * dt
+    return total
 
 
 class ResourceMonitor:
@@ -275,10 +346,40 @@ class ResourceMonitor:
         return [asdict(s) for s in self.samples]
 
     def summarize(self) -> dict:
-        """Phase-level mean/p95/max for the fields a compute-budget table
-        (spec section 47) actually needs. Returns ``{}`` if no samples
-        were collected (monitor disabled, or a run shorter than one
-        sampling interval).
+        """Run-level resource summary, prioritizing ABSOLUTE, dimensionally
+        correct quantities (spec: paper reporting should not rely on
+        hardware-relative percentages as the primary measure). Returns
+        ``{}`` if no samples were collected (monitor disabled, or a run
+        shorter than one sampling interval).
+
+        Top-level keys (present only when the underlying telemetry is
+        available -- never a fabricated 0.0):
+
+        - ``peak_rss_mib`` / ``mean_rss_mib`` -- process RSS, the primary
+          process-memory metric.
+        - ``peak_system_memory_used_mib`` -- system-wide RAM used.
+        - ``peak_gpu_device_memory_mib`` -- NVML device-level GPU memory
+          (everything resident on the GPU, not just this process).
+        - ``peak_torch_allocated_mib`` / ``peak_torch_reserved_mib`` --
+          PyTorch's own caching-allocator memory, distinct from the NVML
+          device-level figure above (reserved >= allocated by
+          construction; reserved approaches the device figure only when
+          nothing else shares the GPU).
+        - ``process_cpu_user_seconds`` / ``..._system_seconds`` /
+          ``..._total_seconds`` -- absolute CPU compute consumed by this
+          process, cumulative since process start (the last sample's
+          cumulative ``psutil.Process.cpu_times()`` reading) -- directly
+          comparable across hardware with different core counts, unlike
+          ``cpu_process_pct``.
+        - ``gpu_utilization_equivalent_seconds`` -- see
+          :func:`_gpu_utilization_equivalent_seconds`'s docstring: an
+          explicitly-approximate integral of sampled utilization over
+          wall-clock time, never exact GPU kernel time.
+
+        ``overall``/``by_phase`` (mean/p95/max per raw telemetry field,
+        including the still-useful percentage diagnostics) are kept
+        unchanged as secondary/diagnostic detail -- not the primary
+        reporting surface.
         """
         if not self.samples:
             return {}
@@ -286,8 +387,8 @@ class ResourceMonitor:
 
         df = pd.DataFrame(self.to_rows())
         metrics = [
-            "cpu_process_pct", "cpu_system_pct", "ram_rss_mb", "ram_system_pct",
-            "gpu_util_pct", "gpu_memory_used_mb", "torch_cuda_allocated_mb", "torch_cuda_reserved_mb",
+            "cpu_process_pct", "cpu_system_pct", "ram_rss_mib", "ram_system_pct",
+            "gpu_util_pct", "gpu_memory_used_mib", "torch_cuda_allocated_mib", "torch_cuda_reserved_mib",
         ]
         summary: dict = {"overall": {}, "by_phase": {}}
         for metric in metrics:
@@ -306,6 +407,34 @@ class ResourceMonitor:
                 }
         summary["sample_count"] = len(self.samples)
         summary["sampling_interval_seconds"] = self.sampling_interval_seconds
+
+        def _peak(col: str) -> float | None:
+            s = df[col].dropna()
+            return float(s.max()) if not s.empty else None
+
+        def _mean(col: str) -> float | None:
+            s = df[col].dropna()
+            return float(s.mean()) if not s.empty else None
+
+        summary["peak_rss_mib"] = _peak("ram_rss_mib")
+        summary["mean_rss_mib"] = _mean("ram_rss_mib")
+        summary["peak_system_memory_used_mib"] = _peak("ram_system_used_mib")
+        summary["peak_gpu_device_memory_mib"] = _peak("gpu_memory_used_mib")
+        summary["peak_torch_allocated_mib"] = _peak("torch_cuda_allocated_mib")
+        summary["peak_torch_reserved_mib"] = _peak("torch_cuda_reserved_mib")
+
+        cpu_total = df["cpu_process_total_seconds"].dropna()
+        if not cpu_total.empty:
+            # Cumulative-since-process-start counters: the LAST sample already
+            # reports the total up to that point -- not summed across samples
+            # (summing would massively over-count a monotonically increasing
+            # cumulative quantity).
+            summary["process_cpu_user_seconds"] = float(df["cpu_process_user_seconds"].dropna().iloc[-1])
+            summary["process_cpu_system_seconds"] = float(df["cpu_process_system_seconds"].dropna().iloc[-1])
+            summary["process_cpu_total_seconds"] = float(cpu_total.iloc[-1])
+
+        summary["gpu_utilization_equivalent_seconds"] = _gpu_utilization_equivalent_seconds(self.to_rows())
+
         return summary
 
 
@@ -356,5 +485,5 @@ def machine_report() -> dict:
         "cpu_model": _cpu_model_name(),
         "cpu_logical_count": psutil.cpu_count(logical=True),
         "cpu_physical_count": psutil.cpu_count(logical=False),
-        "total_ram_mb": _bytes_to_mb(vmem.total),
+        "total_ram_mib": _bytes_to_mib(vmem.total),
     }

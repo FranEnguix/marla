@@ -33,6 +33,7 @@ from marla.environment.visible_facts import (
     extract_visible_network_exploration,
 )
 from marla.evaluation.overrides import EvaluationOverrides
+from marla.messaging import telemetry
 from marla.learning.decision import (
     FinalDecision,
     compute_final_decision,
@@ -399,6 +400,12 @@ class RolloutCollector:
 
             if i % STEP_LOG_INTERVAL == 0:
                 logger.info("  step %d/%d (episode %d)", i + 1, num_steps, self._episode_id)
+
+            # Tags any advisory/correction message this decision sends
+            # (messages.csv, see marla.messaging.telemetry) with the
+            # decision it belongs to -- a no-op when no message telemetry
+            # is active for this run (e.g. baseline/unit tests).
+            telemetry.set_context(episode_id=self._episode_id, environment_step=self._episode_steps)
 
             state = self._state
             rstate = self._rstate

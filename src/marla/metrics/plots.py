@@ -176,6 +176,7 @@ def generate_plots(run_dir: Path, plots_dir: Path) -> list[Path]:
         resources = pd.read_csv(resources_path)
         if not resources.empty:
             written += _plot_resource_cpu(resources, plots_dir)
+            written += _plot_resource_cpu_seconds(resources, plots_dir)
             written += _plot_resource_ram(resources, plots_dir)
             written += _plot_resource_gpu(resources, plots_dir)
             written += _plot_resource_gpu_memory(resources, plots_dir)
@@ -617,21 +618,54 @@ def _plot_resource_cpu(resources: pd.DataFrame, plots_dir: Path) -> list[Path]:
     return [_save(fig, plots_dir / "resource_cpu_over_time.png")]
 
 
-def _plot_resource_ram(resources: pd.DataFrame, plots_dir: Path) -> list[Path]:
-    if "ram_rss_mb" not in resources.columns:
+def _plot_resource_cpu_seconds(resources: pd.DataFrame, plots_dir: Path) -> list[Path]:
+    """Absolute CPU compute (cumulative process CPU-seconds since process
+    start), the primary cross-hardware-comparable companion to
+    _plot_resource_cpu's percentages above -- unlike a percentage, a
+    "seconds of CPU time consumed" figure means the same thing on an
+    8-core and an 80-core machine, so THIS is what a paper table should
+    read, not cpu_process_pct.
+    """
+    if "cpu_process_total_seconds" not in resources.columns:
         return []
-    n = len(resources["ram_rss_mb"].dropna())
+    n = len(resources["cpu_process_total_seconds"].dropna())
+    fig, ax = plt.subplots(figsize=(9, 4.5))
+    if n < _MIN_RESOURCE_SAMPLES_FOR_TIMESERIES:
+        _set_title_with_note(ax, "Cumulative CPU compute over training")
+        _insufficient_samples_panel(ax, _resource_insufficient_message(n))
+        return [_save(fig, plots_dir / "resource_cpu_seconds_over_time.png")]
+    x = _resource_wall_clock_seconds(resources)
+    ax.plot(x, resources["cpu_process_user_seconds"], label="user (s)", color="tab:blue")
+    ax.plot(x, resources["cpu_process_system_seconds"], label="system (s)", color="tab:cyan", alpha=0.8)
+    ax.plot(x, resources["cpu_process_total_seconds"], label="total (s)", color="tab:blue", linestyle="--", linewidth=2)
+    ax.set_xlabel("Wall-clock seconds since run start")
+    ax.set_ylabel("Cumulative process CPU time (seconds)")
+    ax.set_title("Cumulative CPU compute over training")
+    ax.legend(fontsize=8)
+    ax.grid(alpha=0.3)
+    return [_save(fig, plots_dir / "resource_cpu_seconds_over_time.png")]
+
+
+def _plot_resource_ram(resources: pd.DataFrame, plots_dir: Path) -> list[Path]:
+    # RSS (process-resident memory) is the primary absolute process-memory
+    # metric -- displayed in MiB (binary mebibytes; these columns are
+    # computed as bytes/1024/1024, which is MiB by definition), never
+    # converted from/to a CPU percentage (memory and compute are different
+    # physical quantities -- see monitoring/resources.py's module docstring).
+    if "ram_rss_mib" not in resources.columns:
+        return []
+    n = len(resources["ram_rss_mib"].dropna())
     fig, ax = plt.subplots(figsize=(9, 4.5))
     if n < _MIN_RESOURCE_SAMPLES_FOR_TIMESERIES:
         _set_title_with_note(ax, "RAM usage over training")
         _insufficient_samples_panel(ax, _resource_insufficient_message(n))
         return [_save(fig, plots_dir / "resource_ram_over_time.png")]
     x = _resource_wall_clock_seconds(resources)
-    ax.plot(x, resources["ram_rss_mb"], label="process RSS (MB)", color="tab:purple")
-    if "ram_system_used_mb" in resources.columns:
-        ax.plot(x, resources["ram_system_used_mb"], label="system RAM used (MB)", color="tab:gray", alpha=0.7)
+    ax.plot(x, resources["ram_rss_mib"], label="process RSS (MiB)", color="tab:purple")
+    if "ram_system_used_mib" in resources.columns:
+        ax.plot(x, resources["ram_system_used_mib"], label="system RAM used (MiB)", color="tab:gray", alpha=0.7)
     ax.set_xlabel("Wall-clock seconds since run start")
-    ax.set_ylabel("RAM (MB)")
+    ax.set_ylabel("RAM (MiB)")
     ax.set_title("RAM usage over training")
     ax.legend(fontsize=8)
     ax.grid(alpha=0.3)
@@ -641,28 +675,36 @@ def _plot_resource_ram(resources: pd.DataFrame, plots_dir: Path) -> list[Path]:
 def _plot_resource_gpu(resources: pd.DataFrame, plots_dir: Path) -> list[Path]:
     # Absent (not zero) whenever NVML wasn't available -- see
     # monitoring/resources.py's module docstring on GPU-field semantics.
+    # A RELATIVE, periodically-sampled diagnostic -- not an absolute
+    # compute measure (no exact GPU kernel-time counter exists here); see
+    # resource_summary.json's gpu_utilization_equivalent_seconds for a
+    # clearly-labeled, explicitly-approximate absolute-seconds derivation.
     return _plot_resource_by_phase(
-        resources, "gpu_util_pct", "GPU utilization %", "GPU utilization over training (NVML)",
+        resources, "gpu_util_pct", "GPU utilization % (NVML sample, relative)", "GPU utilization over training (NVML)",
         "resource_gpu_over_time.png", plots_dir,
     )
 
 
 def _plot_resource_gpu_memory(resources: pd.DataFrame, plots_dir: Path) -> list[Path]:
-    if "torch_cuda_allocated_mb" not in resources.columns or resources["torch_cuda_allocated_mb"].dropna().empty:
+    # Three DISTINCT memory quantities, never merged into one ambiguous
+    # "GPU memory" line: NVML's device-level figure (everything resident on
+    # the GPU, not just this process) vs. PyTorch's own allocated/reserved
+    # caching-allocator figures (reserved >= allocated by construction).
+    if "torch_cuda_allocated_mib" not in resources.columns or resources["torch_cuda_allocated_mib"].dropna().empty:
         return []
-    n = len(resources["torch_cuda_allocated_mb"].dropna())
+    n = len(resources["torch_cuda_allocated_mib"].dropna())
     fig, ax = plt.subplots(figsize=(9, 4.5))
     if n < _MIN_RESOURCE_SAMPLES_FOR_TIMESERIES:
         _set_title_with_note(ax, "GPU memory over training")
         _insufficient_samples_panel(ax, _resource_insufficient_message(n))
         return [_save(fig, plots_dir / "resource_gpu_memory_over_time.png")]
     x = _resource_wall_clock_seconds(resources)
-    ax.plot(x, resources["torch_cuda_allocated_mb"], label="torch allocated (MB)", color="tab:red")
-    ax.plot(x, resources["torch_cuda_reserved_mb"], label="torch reserved (MB)", color="tab:orange", alpha=0.7)
-    if "gpu_memory_used_mb" in resources.columns and resources["gpu_memory_used_mb"].notna().any():
-        ax.plot(x, resources["gpu_memory_used_mb"], label="NVML GPU memory used (MB)", color="tab:gray", alpha=0.6)
+    ax.plot(x, resources["torch_cuda_allocated_mib"], label="torch allocated (MiB)", color="tab:red")
+    ax.plot(x, resources["torch_cuda_reserved_mib"], label="torch reserved (MiB)", color="tab:orange", alpha=0.7)
+    if "gpu_memory_used_mib" in resources.columns and resources["gpu_memory_used_mib"].notna().any():
+        ax.plot(x, resources["gpu_memory_used_mib"], label="NVML device memory used (MiB)", color="tab:gray", alpha=0.6)
     ax.set_xlabel("Wall-clock seconds since run start")
-    ax.set_ylabel("GPU memory (MB)")
+    ax.set_ylabel("GPU memory (MiB)")
     ax.set_title("GPU memory over training")
     ax.legend(fontsize=8)
     ax.grid(alpha=0.3)

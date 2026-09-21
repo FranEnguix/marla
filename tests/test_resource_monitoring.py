@@ -67,9 +67,16 @@ def test_every_sample_has_finite_cpu_and_ram_fields():
         assert s.cpu_process_pct is not None and s.cpu_process_pct >= 0.0
         assert s.cpu_system_pct is not None and s.cpu_system_pct >= 0.0
         assert s.cpu_logical_count is not None and s.cpu_logical_count >= 1
-        assert s.ram_rss_mb is not None and s.ram_rss_mb > 0.0
-        assert s.ram_system_total_mb is not None and s.ram_system_total_mb > 0.0
+        assert s.ram_rss_mib is not None and s.ram_rss_mib > 0.0
+        assert s.ram_system_total_mib is not None and s.ram_system_total_mib > 0.0
         assert 0.0 <= s.ram_system_pct <= 100.0
+        # Absolute CPU compute (cumulative since process start) -- must be
+        # finite and non-negative, and total == user + system exactly.
+        assert s.cpu_process_user_seconds is not None and s.cpu_process_user_seconds >= 0.0
+        assert s.cpu_process_system_seconds is not None and s.cpu_process_system_seconds >= 0.0
+        assert s.cpu_process_total_seconds == pytest.approx(s.cpu_process_user_seconds + s.cpu_process_system_seconds)
+        assert s.ram_vms_mib is not None and s.ram_vms_mib > 0.0
+        assert s.ram_system_available_mib is not None and s.ram_system_available_mib >= 0.0
 
 
 def test_gpu_fields_are_consistent_with_cuda_availability():
@@ -82,16 +89,16 @@ def test_gpu_fields_are_consistent_with_cuda_availability():
         if not torch.cuda.is_available():
             # CPU-only: torch.cuda.* fields must be None, never a crash or
             # a fabricated zero pretending to be a real reading.
-            assert s.torch_cuda_allocated_mb is None
-            assert s.torch_cuda_reserved_mb is None
+            assert s.torch_cuda_allocated_mib is None
+            assert s.torch_cuda_reserved_mib is None
         else:
-            assert s.torch_cuda_allocated_mb is not None
-            assert s.torch_cuda_allocated_mb >= 0.0
-            assert s.torch_cuda_reserved_mb is not None
-        # gpu_util_pct/gpu_memory_used_mb are populated together (real NVML
+            assert s.torch_cuda_allocated_mib is not None
+            assert s.torch_cuda_allocated_mib >= 0.0
+            assert s.torch_cuda_reserved_mib is not None
+        # gpu_util_pct/gpu_memory_used_mib are populated together (real NVML
         # reading) or both None (no NVML/no GPU) -- never one without the
         # other, which would imply a half-successful query.
-        assert (s.gpu_util_pct is None) == (s.gpu_memory_used_mb is None)
+        assert (s.gpu_util_pct is None) == (s.gpu_memory_used_mib is None)
 
 
 def test_summarize_reports_overall_and_per_phase_stats():
@@ -109,6 +116,70 @@ def test_summarize_reports_overall_and_per_phase_stats():
     for stat in ("mean", "p95", "max"):
         assert stat in summary["overall"]["cpu_process_pct"]
     assert set(summary["by_phase"]) <= {"rollout_collection", "ppo_update"}
+
+
+def test_summarize_reports_absolute_units_as_top_level_fields():
+    """The primary, paper-reporting surface: absolute quantities exposed as
+    flat top-level keys, not buried in overall/by_phase percentile detail."""
+    monitor = ResourceMonitor(sampling_interval_seconds=0.05, enabled=True)
+    monitor.start()
+    time.sleep(0.2)
+    monitor.stop()
+    summary = monitor.summarize()
+
+    assert summary["peak_rss_mib"] is not None and summary["peak_rss_mib"] > 0.0
+    assert summary["mean_rss_mib"] is not None and summary["mean_rss_mib"] > 0.0
+    # peak must be the true max across samples, not just the last one.
+    assert summary["peak_rss_mib"] == pytest.approx(max(s.ram_rss_mib for s in monitor.samples))
+
+    assert summary["process_cpu_total_seconds"] is not None and summary["process_cpu_total_seconds"] >= 0.0
+    assert summary["process_cpu_user_seconds"] is not None
+    assert summary["process_cpu_system_seconds"] is not None
+    assert summary["process_cpu_total_seconds"] == pytest.approx(
+        summary["process_cpu_user_seconds"] + summary["process_cpu_system_seconds"]
+    )
+    # Cumulative-since-start counters: the reported total must be the LAST
+    # sample's cumulative reading, not a sum across samples (which would
+    # massively over-count a monotonically increasing quantity).
+    assert summary["process_cpu_total_seconds"] == pytest.approx(monitor.samples[-1].cpu_process_total_seconds)
+
+    if not torch.cuda.is_available():
+        assert summary["peak_torch_allocated_mib"] is None
+        assert summary["peak_torch_reserved_mib"] is None
+    else:
+        assert summary["peak_torch_allocated_mib"] is not None
+        assert summary["peak_torch_reserved_mib"] is not None
+
+
+def test_gpu_utilization_equivalent_seconds_is_none_without_enough_gpu_samples():
+    # No GPU on this path (or too few samples) -> None, never a fabricated 0.0.
+    monitor = ResourceMonitor(sampling_interval_seconds=0.05, enabled=True)
+    monitor.start()
+    time.sleep(0.05)
+    monitor.stop()
+    summary = monitor.summarize()
+    if not torch.cuda.is_available():
+        assert summary["gpu_utilization_equivalent_seconds"] is None
+
+
+def test_gpu_utilization_equivalent_seconds_matches_manual_integration():
+    from marla.monitoring.resources import _gpu_utilization_equivalent_seconds
+
+    rows = [
+        {"timestamp": 0.0, "gpu_util_pct": 50.0},
+        {"timestamp": 1.0, "gpu_util_pct": 100.0},
+        {"timestamp": 3.0, "gpu_util_pct": 0.0},
+    ]
+    # (0.5 * 1.0) + (1.0 * 2.0) = 2.5 -- the LAST row's own util never
+    # contributes (no forward interval to integrate it over).
+    assert _gpu_utilization_equivalent_seconds(rows) == pytest.approx(2.5)
+
+
+def test_gpu_utilization_equivalent_seconds_none_below_two_samples():
+    from marla.monitoring.resources import _gpu_utilization_equivalent_seconds
+
+    assert _gpu_utilization_equivalent_seconds([]) is None
+    assert _gpu_utilization_equivalent_seconds([{"timestamp": 0.0, "gpu_util_pct": 50.0}]) is None
 
 
 def test_negative_or_zero_sampling_interval_rejected():
@@ -133,7 +204,7 @@ def test_machine_report_has_expected_keys_and_no_private_paths_or_hostnames():
     for key in (
         "os", "python_version", "marla_version", "git_commit", "torch_version",
         "cuda_available", "cuda_version", "cudnn_version", "gpu_count", "gpu_models",
-        "nvml_available", "cpu_model", "cpu_logical_count", "cpu_physical_count", "total_ram_mb",
+        "nvml_available", "cpu_model", "cpu_logical_count", "cpu_physical_count", "total_ram_mib",
     ):
         assert key in report
     assert report["cuda_available"] == torch.cuda.is_available()

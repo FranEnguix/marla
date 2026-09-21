@@ -36,6 +36,13 @@ class RunMetrics:
     """One run's scalar comparison metrics, each ``None`` when that run's
     artifacts don't have it (an older run directory, a disabled feature,
     ...) -- never a fabricated 0.0.
+
+    Absolute, dimensionally-correct quantities are the primary fields
+    (wall-clock seconds, CPU-seconds, RSS/GPU-memory in MiB, energy) --
+    utilization PERCENTAGES are kept only as secondary/appendix fields
+    (``*_pct_mean``), since they are hardware-relative and a poor primary
+    basis for a cross-run paper comparison (see monitoring/resources.py's
+    module docstring).
     """
 
     label: str
@@ -43,26 +50,39 @@ class RunMetrics:
     total_collection_seconds: float | None = None
     total_optimization_seconds: float | None = None
     total_evaluation_seconds: float | None = None
-    cpu_process_pct_mean: float | None = None
-    ram_rss_mb_mean: float | None = None
-    gpu_util_pct_mean: float | None = None
-    gpu_memory_used_mb_mean: float | None = None
+    # Absolute CPU compute (cumulative process CPU-seconds).
+    cpu_process_total_seconds: float | None = None
+    # Absolute process/GPU memory, MiB.
+    peak_rss_mib: float | None = None
+    mean_rss_mib: float | None = None
+    peak_gpu_device_memory_mib: float | None = None
+    peak_torch_allocated_mib: float | None = None
+    peak_torch_reserved_mib: float | None = None
     energy_kwh: float | None = None
     co2eq_kg: float | None = None
+    # Secondary/appendix: hardware-relative utilization percentages.
+    cpu_process_pct_mean: float | None = None
+    gpu_util_pct_mean: float | None = None
 
 
-# (attribute name, axis label incl. unit, short title)
+# (attribute name, axis label incl. unit, short title) -- absolute
+# quantities first (the primary paper-reporting surface), utilization
+# percentages last (secondary/appendix diagnostics).
 COMPARISON_METRICS: list[tuple[str, str, str]] = [
     ("total_training_seconds", "Wall-clock seconds", "Total training time"),
     ("total_collection_seconds", "Wall-clock seconds", "Rollout collection time"),
     ("total_optimization_seconds", "Wall-clock seconds", "PPO optimization time"),
     ("total_evaluation_seconds", "Wall-clock seconds", "Evaluation time"),
-    ("cpu_process_pct_mean", "Process CPU % (can exceed 100%)", "Mean process CPU utilization"),
-    ("ram_rss_mb_mean", "RAM (MB)", "Mean process RSS"),
-    ("gpu_util_pct_mean", "GPU utilization %", "Mean GPU utilization"),
-    ("gpu_memory_used_mb_mean", "GPU memory (MB)", "Mean GPU memory used"),
+    ("cpu_process_total_seconds", "CPU time (seconds)", "Total process CPU compute"),
+    ("peak_rss_mib", "RAM (MiB)", "Peak process RSS"),
+    ("mean_rss_mib", "RAM (MiB)", "Mean process RSS"),
+    ("peak_gpu_device_memory_mib", "GPU memory (MiB)", "Peak GPU device memory used (NVML)"),
+    ("peak_torch_allocated_mib", "GPU memory (MiB)", "Peak PyTorch-allocated GPU memory"),
+    ("peak_torch_reserved_mib", "GPU memory (MiB)", "Peak PyTorch-reserved GPU memory"),
     ("energy_kwh", "Energy (kWh)", "Estimated energy consumed"),
     ("co2eq_kg", "CO2eq (kg)", "Estimated CO2eq emissions"),
+    ("cpu_process_pct_mean", "Process CPU % (can exceed 100%, appendix)", "Mean process CPU utilization"),
+    ("gpu_util_pct_mean", "GPU utilization % (appendix)", "Mean GPU utilization"),
 ]
 
 
@@ -86,9 +106,11 @@ def load_run_metrics(run_dir: Path, label: str | None = None) -> RunMetrics:
         summary = json.loads(summary_path.read_text(encoding="utf-8"))
 
     resource_summary: dict = {}
+    resource_overall: dict = {}
     resource_path = run_dir / "resource_summary.json"
     if resource_path.is_file():
-        resource_summary = json.loads(resource_path.read_text(encoding="utf-8")).get("overall", {})
+        resource_summary = json.loads(resource_path.read_text(encoding="utf-8"))
+        resource_overall = resource_summary.get("overall", {})
 
     carbon_summary: dict = {}
     carbon_path = run_dir / "carbon" / "carbon_summary.json"
@@ -97,8 +119,8 @@ def load_run_metrics(run_dir: Path, label: str | None = None) -> RunMetrics:
         if not carbon_summary.get("enabled"):
             carbon_summary = {}
 
-    def _res(key: str) -> float | None:
-        return resource_summary.get(key, {}).get("mean") if key in resource_summary else None
+    def _res_mean(key: str) -> float | None:
+        return resource_overall.get(key, {}).get("mean") if key in resource_overall else None
 
     return RunMetrics(
         label=label,
@@ -106,12 +128,16 @@ def load_run_metrics(run_dir: Path, label: str | None = None) -> RunMetrics:
         total_collection_seconds=summary.get("total_collection_seconds"),
         total_optimization_seconds=summary.get("total_optimization_seconds"),
         total_evaluation_seconds=summary.get("total_evaluation_seconds"),
-        cpu_process_pct_mean=_res("cpu_process_pct"),
-        ram_rss_mb_mean=_res("ram_rss_mb"),
-        gpu_util_pct_mean=_res("gpu_util_pct"),
-        gpu_memory_used_mb_mean=_res("gpu_memory_used_mb"),
+        cpu_process_total_seconds=resource_summary.get("process_cpu_total_seconds"),
+        peak_rss_mib=resource_summary.get("peak_rss_mib"),
+        mean_rss_mib=resource_summary.get("mean_rss_mib"),
+        peak_gpu_device_memory_mib=resource_summary.get("peak_gpu_device_memory_mib"),
+        peak_torch_allocated_mib=resource_summary.get("peak_torch_allocated_mib"),
+        peak_torch_reserved_mib=resource_summary.get("peak_torch_reserved_mib"),
         energy_kwh=carbon_summary.get("energy_consumed_kwh"),
         co2eq_kg=carbon_summary.get("emissions_kg_co2eq"),
+        cpu_process_pct_mean=_res_mean("cpu_process_pct"),
+        gpu_util_pct_mean=_res_mean("gpu_util_pct"),
     )
 
 
