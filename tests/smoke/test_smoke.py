@@ -25,6 +25,21 @@ richest real schema available), ``summary.json``, ``smoke_test.log``, and
 ``plots/*.png``, all generated only from real data collected during this
 run.
 
+``<run-id>`` is unique per invocation (``smoke-<UTC timestamp>`` by
+default, or an explicit ``run_id`` passed to :func:`run_smoke_test`) --
+the two real ``marla run`` subprocesses (phases 2/3 above) likewise write
+their OWN output under ``runs/ppo_baseline/<run-id>-baseline/`` and
+``runs/ppo_plan_maker/<run-id>-assisted/``, never a fixed
+``smoke-baseline``/``smoke-assisted`` directory reused across runs. This
+matters: after a metrics/schema change, rerunning a smoke test against a
+FIXED run directory would append new-schema rows onto an old-schema
+``decisions.csv`` from a previous invocation, producing a mixed-column-
+count file and a misleading parse failure rather than a clean, fresh
+artifact -- see ``test_smoke_hygiene.py`` for the regression test proving
+this can no longer happen. Nothing under ``runs/`` is ever deleted by this
+test (a failed run's artifacts stay inspectable under their own
+directory), and nothing needs to be cleared manually before rerunning.
+
 Run directly (writes artifacts, prints the full report):
     python tests/smoke/test_smoke.py
 
@@ -287,8 +302,16 @@ def _run_marla_subprocess(config_path: Path, extra_env: dict, timeout: int) -> s
     )
 
 
-def _phase_baseline_subprocess(result: SmokeResult, log: logging.Logger, work_dir: Path) -> Path | None:
-    config_path = _write_tiny_baseline_config(work_dir, run_id="smoke-baseline")
+def _phase_baseline_subprocess(result: SmokeResult, log: logging.Logger, work_dir: Path, run_id: str) -> Path | None:
+    # run_id is this smoke invocation's own unique namespace (see
+    # run_smoke_test) -- never the fixed "smoke-baseline" this used to be,
+    # which meant every invocation appended to the SAME runs/ppo_baseline/
+    # smoke-baseline/ directory. After a metrics/schema change, that made a
+    # rerun silently produce a decisions.csv mixing old- and new-schema
+    # rows (different column counts), corrupting the artifact instead of
+    # failing loudly. Each invocation now gets its own fresh directory.
+    inner_run_id = f"{run_id}-baseline"
+    config_path = _write_tiny_baseline_config(work_dir, run_id=inner_run_id)
     log.info("Phase 2: launching real `marla run` subprocess (PPO_ONLY) -- config=%s", config_path)
     try:
         proc = _run_marla_subprocess(config_path, {"MARLA_RL_ORCHESTRATOR_PASSWORD": "smoke-test-pass"}, timeout=180)
@@ -308,15 +331,18 @@ def _phase_baseline_subprocess(result: SmokeResult, log: logging.Logger, work_di
         result.ok("baseline_subprocess")
     log.info("Phase 2: PPO_ONLY subprocess completed (rc=0)")
 
-    run_dir = REPO_ROOT / "runs" / "ppo_baseline" / "smoke-baseline"
+    run_dir = REPO_ROOT / "runs" / "ppo_baseline" / inner_run_id
     if not run_dir.is_dir():
         result.fail("baseline_artifacts", "critical", f"expected run directory not found: {run_dir}")
         return None
     return run_dir
 
 
-def _phase_assisted_subprocess(result: SmokeResult, log: logging.Logger, work_dir: Path) -> Path | None:
-    config_path = _write_tiny_assisted_config(work_dir, run_id="smoke-assisted")
+def _phase_assisted_subprocess(result: SmokeResult, log: logging.Logger, work_dir: Path, run_id: str) -> Path | None:
+    # See _phase_baseline_subprocess's comment on why this is unique per
+    # smoke invocation, not the fixed "smoke-assisted" it used to be.
+    inner_run_id = f"{run_id}-assisted"
+    config_path = _write_tiny_assisted_config(work_dir, run_id=inner_run_id)
     log.info("Phase 3: launching real `marla run` subprocess (MARLA_FULL, stub Plan Maker) -- config=%s", config_path)
     try:
         proc = _run_marla_subprocess(
@@ -341,7 +367,7 @@ def _phase_assisted_subprocess(result: SmokeResult, log: logging.Logger, work_di
     result.ok("assisted_subprocess")
     log.info("Phase 3: MARLA_FULL subprocess completed (rc=0)")
 
-    run_dir = REPO_ROOT / "runs" / "ppo_plan_maker" / "smoke-assisted"
+    run_dir = REPO_ROOT / "runs" / "ppo_plan_maker" / inner_run_id
     if not run_dir.is_dir():
         result.fail("assisted_artifacts", "critical", f"expected run directory not found: {run_dir}")
         return None
@@ -603,12 +629,12 @@ def run_smoke_test(run_id: str | None = None) -> SmokeResult:
     work_dir.mkdir(exist_ok=True)
 
     baseline_decisions = None
-    baseline_run_dir = _phase_baseline_subprocess(result, log, work_dir)
+    baseline_run_dir = _phase_baseline_subprocess(result, log, work_dir, run_id)
     if baseline_run_dir is not None:
         baseline_decisions = _validate_baseline_artifacts(result, log, baseline_run_dir)
 
     assisted_decisions = None
-    assisted_run_dir = _phase_assisted_subprocess(result, log, work_dir)
+    assisted_run_dir = _phase_assisted_subprocess(result, log, work_dir, run_id)
     if assisted_run_dir is not None:
         assisted_decisions = _validate_assisted_artifacts(result, log, assisted_run_dir)
 

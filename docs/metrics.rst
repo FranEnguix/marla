@@ -366,6 +366,24 @@ Run directory contents
     ``gradient_norm``, and the actual current ``learning_rate`` (reflecting
     the configured schedule, see :doc:`configuration`).
 
+    **Route-switch diagnostics** (subnet-scoped consultation --
+    PIECEWISE_EXACT_SEMIGRADIENT, see :doc:`architecture`'s "Subnet-scoped
+    consultation" section and :mod:`marla.learning.decision`'s module
+    docstring for the full audit): ``queried_replay_transitions`` (how many
+    of this minibatch's transitions were queried and had a defined
+    consulted subnet), ``route_switch_count`` (how many of those the
+    CURRENT parameters' own deterministic routing rule would now route to a
+    DIFFERENT subnet than the one actually consulted at collection time --
+    never used to alter training, purely a read-only report),
+    ``route_switch_fraction`` (``route_switch_count / queried_replay_transitions``,
+    ``null`` when the latter is 0, never a fabricated 0),
+    ``mean_routing_margin`` (mean, over transitions with >=2 visible
+    subnets, of the winning non-FINISH action's logit minus the best
+    competing different-subnet action's logit -- how close routing is to
+    switching; ``null`` when no such transition exists this minibatch).
+    All four are ``null``/0 throughout for PPO_ONLY (baseline), which never
+    populates them at all.
+
 ``resources.csv`` / ``resource_summary.json``
     One row per background-thread telemetry sample (default ~1s cadence,
     tagged with whichever training ``phase`` was current -- see

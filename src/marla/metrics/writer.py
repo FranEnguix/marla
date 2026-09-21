@@ -336,6 +336,16 @@ _UPDATES_FIELDS = [
     "critic_refinement_epoch", "critic_refinement_minibatch",
     "critic_loss_before_refinement", "critic_loss_after_refinement",
     "critic_refinement_grad_norm_before_clip", "critic_refinement_grad_norm_after_clip",
+    # Route-switch diagnostics (subnet-scoped consultation routing-semantics
+    # audit -- PIECEWISE_EXACT_SEMIGRADIENT, see learning/decision.py's
+    # module docstring): how often this update's CURRENT parameters would
+    # now route a previously-queried transition to a different subnet than
+    # the one actually consulted at collection time. Diagnostic-only --
+    # never affects the loss or gradients. route_switch_fraction/
+    # mean_routing_margin are blank (not 0) whenever queried_replay_transitions
+    # is 0 (nothing queried this minibatch) or the policy is PPO_ONLY
+    # (never populated at all).
+    "queried_replay_transitions", "route_switch_count", "route_switch_fraction", "mean_routing_margin",
 ]
 
 

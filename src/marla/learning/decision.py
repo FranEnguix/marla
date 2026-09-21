@@ -11,55 +11,110 @@ stored ``selected_action_index``, and (critically) the exact stored Plan
 Maker confidence vector -- never recomputing or re-fetching any of them.
 
 **PPO-ratio consistency of subnet routing (subnet-scoped consultation,
-design audit -- required before this feature could be implemented at
-all)**: the joint log-probability this module computes is::
+design audit)**: the joint log-probability this module computes is::
 
     log p_t = log pi^q(q_t|z_t) + (1-q_t) log pi^0(a_t) + q_t log pi^PM(a_t)
 
-Every term here already comes from a RANDOM VARIABLE that was actually
-sampled at collection time (``q_t``, ``a_t``) and whose realized value is
-frozen/replayed verbatim, with only its *probability under new parameters*
-recomputed for the importance-sampling ratio -- this was already true
-before subnet-scoped consultation existed for ``selected_action_index``
-and ``legal_action_descriptors`` (which actions exist AT ALL is itself a
-frozen, replayed context, never resampled or recomputed from a live
-environment during replay).
+**Classification: PIECEWISE_EXACT_SEMIGRADIENT** (not an unconditionally
+exact PPO policy ratio -- see the two-tier argument below and
+``research/aamas2027/PAPER_EXPERIMENTS.md``'s "Routing likelihood-ratio
+classification" section for the paper-facing writeup).
 
-Subnet-scoped consultation adds exactly one new piece of per-decision
-context: ``consulted_subnet`` (and the ``consulted_action_indices`` it
-implies against the frozen candidate set). By explicit design (spec:
-"do NOT add a learned subnet-selection head", "do NOT add an unaccounted
-stochastic subnet action"), this is a DETERMINISTIC function of
-already-accounted context -- ``argmax`` over the collection-time base
-logits, restricted to non-FINISH candidates -- never a sampled decision of
-its own. A deterministic function of already-accounted random variables
-contributes no probability term of its own to a joint log-probability
-(there is nothing to integrate over); it is exactly the same kind of
-"frozen context" ``legal_action_descriptors`` already was. Consequently:
+An earlier version of this docstring claimed reusing the stored route was
+"exactly the same kind of frozen context ``legal_action_descriptors``
+already was." That claim is imprecise and has been corrected after a
+targeted audit. ``legal_action_descriptors`` (which actions exist at all)
+is EXOGENOUS: a function of the environment/observation only, literally
+independent of theta under every possible parameter value -- replaying it
+verbatim is trivially exact for any theta. ``consulted_subnet = f(theta,
+observation) = subnet(argmax_i base_logit_i, i != FINISH)`` is instead
+PARAMETER-DEPENDENT: it is a deterministic function of theta, but a
+*different* theta can genuinely produce a *different* value. "Deterministic"
+and "parameter-independent" are not the same property, and only the second
+one gives an unconditional exactness guarantee. Conflating them was the
+error.
+
+Formally, let ``s_old = f(theta_old, o_t)`` (the subnet actually consulted
+at collection) and ``s_new = f(theta_new, o_t)`` (what the SAME deterministic
+rule would pick under the parameters live at replay time). Two cases:
+
+- **s_new == s_old** (no route switch): replaying the stored
+  ``consulted_action_indices``/Plan Maker scores at ``theta_new`` computes
+  EXACTLY the log-probability the fully-redeployed ``theta_new`` policy
+  would assign to the stored compound action -- the consulted index set is
+  identical either way (a pure function of the unchanged route and the
+  already-exogenous candidate set), and the Plan Maker's response would be
+  unchanged too (its request depends only on the subnet and the unchanged
+  observation, not on theta directly, under the existing assumption --
+  already true before this feature -- that the configured backend is a
+  deterministic function of its request; genuine backend sampling
+  temperature is a separate, pre-existing simplification this feature does
+  not introduce or resolve). This branch is EXACT.
+- **s_new != s_old** (route switch): the fully-redeployed ``theta_new``
+  policy would have consulted a DIFFERENT subnet, gotten different Plan
+  Maker evidence, and produced a different final-action distribution than
+  what replay computes. Replay instead computes the log-probability of the
+  stored action under a SURROGATE policy that keeps the collection-time
+  external routing/consultation context frozen and only re-evaluates the
+  actor/critic/trust-head parameters conditioned on it. This is NOT the
+  probability the actual current policy would assign -- it is a genuine,
+  identifiable target-policy mismatch, not a missing probability term
+  (routing has zero entropy on both sides; there is no stochastic quantity
+  being silently dropped -- see :mod:`marla.learning.ppo`'s route-switch
+  diagnostic for why this is issue "target-policy mismatch", not issue
+  "missing stochastic term").
+
+This is a defensible, explicit design -- NOT silently accepted -- under the
+following reading: the on-policy PPO batch treats "which subnet was
+consulted, and what the Plan Maker said about it" as part of the frozen
+STATE/CONTEXT for that collected transition (like the observation itself),
+refreshed only when the next rollout is collected, rather than as a
+continuously-current property of the live policy. PPO already tolerates
+old-vs-new policy drift within a trust region (that is what the clip
+epsilon is for); this adds one more source of same-batch drift, bounded by
+the SAME trust region, and empirically measurable -- see
+:mod:`marla.learning.ppo`'s ``route_switch_count``/``route_switch_fraction``/
+``mean_routing_margin`` update-level diagnostics. It is not tuned or hidden:
+``learning/ppo.py``'s replay loop measures, for every queried transition,
+whether the CURRENT parameters' own deterministic routing rule would now
+disagree with the stored route, purely for reporting.
+
+Consequently:
 
 - ``consulted_subnet``/``consulted_action_indices``/the Plan Maker's
   scores for them are stored on each :class:`~marla.learning.rollout.StepRecord`
   and REPLAYED VERBATIM, never recomputed from replay's own (possibly
   different, under updated parameters) base logits, and the Plan Maker is
-  NEVER called again during replay.
+  NEVER called again during replay -- this is unconditionally true and
+  unconditionally intentional, regardless of which branch above applies.
 - ``softmax(final_logits)`` (used for both ``pi^0`` and ``pi^PM`` via the
   single ``final_logits`` -- see :func:`compute_joint_log_probability`)
   still integrates to 1 over the FULL global action set regardless of
   which subset received a sparse advice residual, so no normalization
-  inconsistency is introduced by scoping.
-- Because routing is frozen rather than recomputed, a PPO update CANNOT
-  silently "discover" that a different subnet would now route differently
-  under new parameters and apply the stored advice to the wrong indices --
-  the stored ``consulted_action_indices`` are the authoritative target for
-  scattering the stored scores, always validated against the replayed
-  candidate set (see ``learning/ppo.py``'s replay-time assertions).
+  inconsistency is introduced by scoping, in either branch.
+- The stored ``consulted_action_indices`` are always validated against the
+  replayed candidate set (see ``learning/ppo.py``'s replay-time
+  assertions) -- indices are never silently wrong, even when the ROUTE
+  they encode has become stale relative to current parameters.
 
+**Hard empirical confirmation**: at ``theta == theta_old`` (before any
+optimizer step touches the policy), ``s_new`` trivially equals ``s_old``
+for every transition (nothing about theta has changed), so replay must
+reproduce ``old_joint_log_probability`` exactly and report zero route
+switches -- proven by
+``tests/test_route_switch_diagnostics.py::test_replay_at_theta_old_reproduces_old_log_prob_and_has_zero_route_switches``.
+A short real multi-update PPO diagnostic probe in the same file shows route
+switching is NOT a negligible edge case once parameters move: in one
+400-step/4-epoch diagnostic run (non-paper seed, ``examples/baseline.yaml``'s
+default PPO hyperparameters, not trial-22's), route-switch fraction stayed
+at 0.0 for the first several updates and then rose into the 15-80% range
+per update as clip fraction/approximate KL grew -- see that test's printed
+report and ``research/aamas2027/PAPER_EXPERIMENTS.md`` for the numbers.
 This was audited as a hard correctness gate before implementation began
-(not an afterthought): if routing could not be defended as consistent with
-the existing ratio definition this way, the intended next step was to STOP
-and report the smallest principled alternative rather than silently
-approximate it. It passed the audit; no second learned head or extra
-stochastic term was introduced.
+(not an afterthought): had routing been indefensible under this reading,
+the intended next step was to STOP and report the smallest principled
+alternative rather than silently approximate it. No second learned head or
+extra stochastic term was introduced.
 """
 
 from __future__ import annotations

@@ -123,6 +123,10 @@ async def test_baseline_smoke_run_cpu_small_scenario():
         "mean_raw_advantage_successful_finish", "mean_raw_advantage_premature_finish",
         "finish_advantage_z_max", "max_raw_advantage_state_N_finish", "max_normalized_advantage_state_N_finish",
         "mean_raw_advantage_state_N_finish", "mean_normalized_advantage_state_N_finish",
+        # Route-switch diagnostics: always None in PPO_ONLY (baseline) mode,
+        # which never queries the Plan Maker or populates route/margin data
+        # at all -- see learning/ppo.py's ppo_update.
+        "route_switch_fraction", "mean_routing_margin",
     }
     for m in result.update_metrics:
         # Rollout-level aggregates that can legitimately be None/NaN in

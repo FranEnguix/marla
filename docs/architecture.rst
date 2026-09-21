@@ -168,20 +168,37 @@ consultation decouples the two:
   (:class:`~marla.learning.rollout.StepRecord`) and replayed verbatim
   during a PPO update -- the Plan Maker is never called again, and the
   route is never recomputed from the update's own (possibly different)
-  parameters. This is a deliberate, documented stop-gradient/frozen-
-  routing-context design: routing is a *deterministic* function of
-  already-accounted context (exactly like which actions are legal at all,
-  which was already frozen and replayed this way before subnet scoping
-  existed), not a new stochastic variable, so it needs no probability term
-  of its own in the existing compound joint log-probability -- see
-  :mod:`marla.learning.decision`'s module docstring for the full
-  likelihood-ratio reasoning.
+  parameters.
+
+  **This is deliberately documented as a PIECEWISE_EXACT_SEMIGRADIENT
+  design, not an unconditionally exact PPO policy ratio.** Routing
+  (``consulted_subnet = f(theta, observation)``) is deterministic, but --
+  unlike ``legal_action_descriptors``, which is exogenous and literally
+  independent of theta -- it is a function OF theta, so a different theta
+  can genuinely route differently. When the current parameters' own
+  routing rule agrees with the stored route (the common case while updates
+  stay small), replay is exact. When it would now disagree (a "route
+  switch"), replay computes the log-probability of the stored action under
+  a surrogate policy that keeps the collection-time external routing/
+  consultation context frozen for that on-policy batch, rather than the
+  probability the fully-redeployed current policy would assign -- a real,
+  bounded, and measured approximation, not a silently accepted one. A
+  dedicated update-level diagnostic (``route_switch_count``/
+  ``route_switch_fraction``/``mean_routing_margin`` in ``updates.csv``,
+  never used to alter training) reports exactly how often this happens.
+  See :mod:`marla.learning.decision`'s module docstring for the full audit
+  and the formal argument for why this is defensible, and
+  ``research/aamas2027/PAPER_EXPERIMENTS.md`` for measured route-switch
+  behavior.
 
 **Trade-off**: the Plan Maker no longer compares candidate actions across
 different subnets within one request -- it is a local expert on whichever
 subnet the deterministic route selected, not a global comparator. The
 global progress summary gives it enough whole-network context to reason
-about ``finish`` sensibly without seeing every host's detail.
+about ``finish`` sensibly without seeing every host's detail. A second,
+related trade-off introduced by this same design: PPO replay's likelihood
+ratio is exact only while the deterministic route stays unchanged from
+collection to replay -- see the PIECEWISE_EXACT_SEMIGRADIENT note above.
 
 Execution modes
 -----------------

@@ -28,6 +28,7 @@ import torch
 from torch import Tensor
 
 from marla.config.models import PPOConfig
+from marla.environment.consultation_scope import compute_routing_margin, select_consulted_subnet
 from marla.environment.graph import GraphObservation
 from marla.learning.decision import compute_final_decision, compute_joint_log_probability, compute_query_probability
 from marla.learning.recurrent_policy import RecurrentPolicy, RecurrentState
@@ -106,6 +107,19 @@ class ReplayOutputs:
     new_values: Tensor
     action_entropies: Tensor
     query_entropies: Tensor | None  # None for a policy built with consultation_enabled=False
+    # Route-switch diagnostics (subnet-scoped consultation, spec sections
+    # 4-5 of the routing-semantics audit) -- DIAGNOSTIC ONLY, never used to
+    # alter training. One entry per QUERIED record in this chunk (accepted
+    # or rejected -- routing happens before that determination), in
+    # replay order. route_switches[i] is True when the CURRENT (this
+    # replay's, under whatever parameters are live right now)
+    # counterfactual route disagrees with the route actually experienced
+    # at collection time. routing_margins holds only the DEFINED margins
+    # (see compute_routing_margin) -- shorter than route_switches whenever
+    # a record's margin was None (single visible subnet or no non-FINISH
+    # candidate). Empty for a policy built with consultation_enabled=False.
+    route_switches: list[bool]
+    routing_margins: list[float]
 
 
 def _replay_chunk(
@@ -122,6 +136,8 @@ def _replay_chunk(
     new_values: list[Tensor] = []
     action_entropies: list[Tensor] = []
     query_entropies: list[Tensor] | None = [] if policy.consultation_enabled else None
+    route_switches: list[bool] = []
+    routing_margins: list[float] = []
 
     for record in chunk.records:
         graph_obs = GraphObservation(data=record.graph_data.to(device), node_key_to_index=record.node_key_to_index)
@@ -154,12 +170,22 @@ def _replay_chunk(
             # frozen, stored routing context, reused verbatim here. The
             # Plan Maker is NEVER called again, no new request is ever
             # built, and the route is NEVER recomputed from this replay's
-            # (possibly different) new base logits -- see decision.py's
-            # module docstring for why this is consistent with the
-            # existing PPO joint-log-probability definition: consulted_subnet
-            # is a deterministic function of already-frozen context
-            # (exactly like legal_action_descriptors itself), not a new
-            # stochastic variable requiring its own probability term.
+            # (possibly different) new base logits. This is a PIECEWISE
+            # semi-gradient design, not an unconditionally exact PPO ratio
+            # -- see decision.py's module docstring for the full routing-
+            # semantics audit (why "deterministic" does not by itself mean
+            # "equivalent to exogenous context" the way legal_action_descriptors
+            # is, and what happens when the current parameters' own routing
+            # would now disagree with the stored route). The route-switch
+            # diagnostic just below measures exactly that disagreement,
+            # read-only, never altering what gets trained on.
+            if record.sampled_query:
+                current_route = select_consulted_subnet(record.legal_action_descriptors, out.base_logits.detach())
+                route_switches.append(current_route != record.consulted_subnet)
+                margin = compute_routing_margin(record.legal_action_descriptors, out.base_logits.detach())
+                if margin is not None:
+                    routing_margins.append(margin)
+
             plan_maker_confidence = None
             consulted_indices_tensor = None
             if record.sampled_query and record.plan_maker_validation_status == "accepted":
@@ -204,6 +230,8 @@ def _replay_chunk(
         new_values=torch.stack(new_values),
         action_entropies=torch.stack(action_entropies),
         query_entropies=torch.stack(query_entropies) if query_entropies else None,
+        route_switches=route_switches,
+        routing_margins=routing_margins,
     )
 
 
@@ -503,6 +531,8 @@ def ppo_update(
     new_log_probs_parts, new_values_parts, action_entropy_parts = [], [], []
     query_entropy_parts: list[Tensor] = []
     all_records: list[StepRecord] = []
+    all_route_switches: list[bool] = []
+    all_routing_margins: list[float] = []
 
     for chunk in chunks:
         replay = _replay_chunk(policy, chunk, device, consultation_cost)
@@ -520,6 +550,8 @@ def ppo_update(
         if replay.query_entropies is not None:
             query_entropy_parts.append(replay.query_entropies)
         all_records.extend(chunk.records)
+        all_route_switches.extend(replay.route_switches)
+        all_routing_margins.extend(replay.routing_margins)
 
     old_log_probs = torch.cat(old_log_probs_parts)
     raw_advantages = torch.cat(advantages_parts)
@@ -634,6 +666,24 @@ def ppo_update(
     metrics.update(_tensor_stats("return", returns))
     metrics.update(_finish_advantage_diagnostics(all_records, raw_advantages))
     metrics.update(_state_n_advantage_diagnostics(all_records, raw_advantages, normalized_advantages))
+
+    # Route-switch diagnostics (subnet-scoped consultation routing-semantics
+    # audit, PIECEWISE_EXACT_SEMIGRADIENT classification -- see
+    # decision.py's module docstring): how often THIS update's current
+    # parameters would now route a previously-queried transition to a
+    # DIFFERENT subnet than the one actually consulted at collection time.
+    # Diagnostic only -- never used to alter training (no Plan Maker call,
+    # no recomputed advice, no changed loss). queried_replay_transitions=0
+    # (route_switch_fraction/mean_routing_margin=None) whenever this update
+    # replayed no queried transitions at all, or the policy is PPO_ONLY
+    # (which never populates route_switches/routing_margins in the first
+    # place).
+    metrics["queried_replay_transitions"] = len(all_route_switches)
+    metrics["route_switch_count"] = sum(all_route_switches)
+    metrics["route_switch_fraction"] = (
+        sum(all_route_switches) / len(all_route_switches) if all_route_switches else None
+    )
+    metrics["mean_routing_margin"] = _mean(all_routing_margins) if all_routing_margins else None
     return metrics
 
 

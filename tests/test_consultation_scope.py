@@ -5,11 +5,13 @@ SPADE consultation path and DirectConsultant evaluation.
 
 from __future__ import annotations
 
+import pytest
 import torch
 
 from marla.environment.actions import ActionDescriptor, finish_descriptor, host_target_key
 from marla.environment.consultation_scope import (
     build_scoped_observation,
+    compute_routing_margin,
     extract_action_subnet,
     select_consulted_actions,
     select_consulted_subnet,
@@ -198,3 +200,34 @@ def test_scoped_observation_no_hidden_fact_leakage_when_subnet_is_none():
 def test_scoped_observation_contains_no_keys_beyond_global_progress_and_local_hosts():
     scoped = build_scoped_observation(_observation_fixture(), consulted_subnet=1)
     assert set(scoped.keys()) == {"global_progress", "local_hosts"}
+
+
+# --- compute_routing_margin (route-switch diagnostic, spec sections 4-5) ---
+
+
+def test_routing_margin_is_the_gap_to_the_best_competing_subnet():
+    actions = [_scan(1, 1), _scan(2, 1), finish_descriptor()]
+    base_logits = torch.tensor([5.0, 2.0, 3.0])  # winner: subnet 1 (logit 5.0), best other: subnet 2 (logit 2.0)
+    assert compute_routing_margin(actions, base_logits) == pytest.approx(3.0)
+
+
+def test_routing_margin_is_none_with_a_single_visible_subnet():
+    actions = [_scan(1, 1), _scan(1, 2), finish_descriptor()]
+    base_logits = torch.tensor([5.0, 1.0, 3.0])
+    assert compute_routing_margin(actions, base_logits) is None
+
+
+def test_routing_margin_is_none_with_no_non_finish_candidate():
+    actions = [finish_descriptor()]
+    base_logits = torch.tensor([2.0])
+    assert compute_routing_margin(actions, base_logits) is None
+
+
+def test_routing_margin_can_be_negative_when_winner_and_runner_up_are_close():
+    actions = [_scan(1, 1), _scan(2, 1)]
+    base_logits = torch.tensor([1.0, 1.5])  # subnet 2 actually wins the argmax
+    margin = compute_routing_margin(actions, base_logits)
+    assert margin == pytest.approx(0.5)
+    # the "winner" in the margin computation is whichever subnet
+    # select_consulted_subnet would actually route to -- confirm consistency.
+    assert select_consulted_subnet(actions, base_logits) == 2

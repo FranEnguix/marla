@@ -98,6 +98,36 @@ def select_consulted_subnet(legal_actions: list[ActionDescriptor], base_logits: 
     return extract_action_subnet(legal_actions[i_star])
 
 
+def compute_routing_margin(legal_actions: list[ActionDescriptor], base_logits: Tensor) -> float | None:
+    """How close ``select_consulted_subnet`` is to picking a DIFFERENT
+    subnet, given ``base_logits``: the winning non-FINISH action's own
+    logit, minus the highest non-FINISH logit belonging to any OTHER
+    subnet. A small/negative margin means routing is close to (or already
+    past) a tie with a competing subnet; the PPO route-switch diagnostic
+    (``learning.ppo``) uses this purely for reporting, never to alter
+    training.
+
+    ``None`` when there is no non-FINISH candidate at all, or when every
+    non-FINISH candidate belongs to the SAME subnet (nothing to switch
+    to) -- both documented "not applicable" cases, never a fabricated 0.
+    """
+    non_finish = [(i, a) for i, a in enumerate(legal_actions) if not a.is_finish]
+    if not non_finish:
+        return None
+    non_finish_indices = [i for i, _ in non_finish]
+    non_finish_logits = base_logits[non_finish_indices]
+    local_argmax = int(torch.argmax(non_finish_logits).item())
+    winner_index, winner_action = non_finish[local_argmax]
+    winner_subnet = extract_action_subnet(winner_action)
+
+    other_subnet_logits = [
+        float(base_logits[i].item()) for i, a in non_finish if extract_action_subnet(a) != winner_subnet
+    ]
+    if not other_subnet_logits:
+        return None
+    return float(base_logits[winner_index].item()) - max(other_subnet_logits)
+
+
 @dataclass(frozen=True)
 class ConsultationScope:
     """The exact subset of the global candidate set the Plan Maker is asked about.
