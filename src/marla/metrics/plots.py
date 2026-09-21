@@ -619,27 +619,51 @@ def _plot_resource_cpu(resources: pd.DataFrame, plots_dir: Path) -> list[Path]:
 
 
 def _plot_resource_cpu_seconds(resources: pd.DataFrame, plots_dir: Path) -> list[Path]:
-    """Absolute CPU compute (cumulative process CPU-seconds since process
-    start), the primary cross-hardware-comparable companion to
-    _plot_resource_cpu's percentages above -- unlike a percentage, a
-    "seconds of CPU time consumed" figure means the same thing on an
-    8-core and an 80-core machine, so THIS is what a paper table should
-    read, not cpu_process_pct.
+    """Absolute CPU compute, run-scoped: the raw resources.csv columns are
+    cumulative since the OS PROCESS started (see
+    monitoring/resources.py's module docstring), so this plot subtracts
+    each series' own first sample before plotting -- the curve starts at
+    (approximately) 0 at this run's own monitoring start, not at whatever
+    CPU time the process had already accumulated during import/config-
+    load/model-construction before ResourceMonitor.start() was called.
+    "Approximately" because the true start() baseline is captured slightly
+    before the first sample (up to one sampling_interval_seconds earlier);
+    resource_summary.json's process_cpu_*_seconds is the exact, non-
+    approximate run-scoped figure a paper table should read -- this plot
+    is for shape/trend inspection, not the authoritative total.
+
+    Avoids cpu_process_pct's core-count/utilization-scaling distortion
+    (a "seconds of CPU time consumed" figure means the same thing
+    regardless of core count), but is NOT hardware-performance-normalized
+    -- the same work costs a different number of CPU-seconds on a faster
+    vs. slower processor. See monitoring/resources.py's module docstring.
     """
-    if "cpu_process_total_seconds" not in resources.columns:
+    if "cpu_process_total_seconds_since_process_start" not in resources.columns:
         return []
-    n = len(resources["cpu_process_total_seconds"].dropna())
+    n = len(resources["cpu_process_total_seconds_since_process_start"].dropna())
     fig, ax = plt.subplots(figsize=(9, 4.5))
     if n < _MIN_RESOURCE_SAMPLES_FOR_TIMESERIES:
         _set_title_with_note(ax, "Cumulative CPU compute over training")
         _insufficient_samples_panel(ax, _resource_insufficient_message(n))
         return [_save(fig, plots_dir / "resource_cpu_seconds_over_time.png")]
     x = _resource_wall_clock_seconds(resources)
-    ax.plot(x, resources["cpu_process_user_seconds"], label="user (s)", color="tab:blue")
-    ax.plot(x, resources["cpu_process_system_seconds"], label="system (s)", color="tab:cyan", alpha=0.8)
-    ax.plot(x, resources["cpu_process_total_seconds"], label="total (s)", color="tab:blue", linestyle="--", linewidth=2)
+
+    def _since_first_sample(col: str) -> pd.Series:
+        series = resources[col]
+        first_valid = series.dropna().iloc[0]
+        return series - first_valid
+
+    ax.plot(x, _since_first_sample("cpu_process_user_seconds_since_process_start"), label="user (s)", color="tab:blue")
+    ax.plot(
+        x, _since_first_sample("cpu_process_system_seconds_since_process_start"),
+        label="system (s)", color="tab:cyan", alpha=0.8,
+    )
+    ax.plot(
+        x, _since_first_sample("cpu_process_total_seconds_since_process_start"),
+        label="total (s)", color="tab:blue", linestyle="--", linewidth=2,
+    )
     ax.set_xlabel("Wall-clock seconds since run start")
-    ax.set_ylabel("Cumulative process CPU time (seconds)")
+    ax.set_ylabel("Process CPU time since run start (seconds, approx.)")
     ax.set_title("Cumulative CPU compute over training")
     ax.legend(fontsize=8)
     ax.grid(alpha=0.3)

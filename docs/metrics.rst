@@ -360,24 +360,44 @@ Run directory contents
     the GPU, not just this process), ``torch_cuda_allocated_mib`` /
     ``torch_cuda_reserved_mib`` / ``..._max_...`` (PyTorch's own caching
     allocator -- a DIFFERENT quantity from the NVML figure, never merged
-    with it), and ``cpu_process_user_seconds`` / ``..._system_seconds`` /
-    ``..._total_seconds`` (cumulative process CPU compute since process
-    start -- comparable across hardware with different core counts,
-    unlike a percentage). ``cpu_process_pct`` / ``cpu_system_pct`` /
-    ``gpu_util_pct`` remain as secondary, hardware-relative diagnostics
-    (see the module docstring for their two different psutil scaling
-    conventions). ``resource_summary.json`` exposes the run-level
-    absolutes directly as top-level keys (``peak_rss_mib``,
+    with it), and ``cpu_process_user_seconds_since_process_start`` /
+    ``..._system_..._``/ ``..._total_..._`` (process CPU compute,
+    CUMULATIVE SINCE THE OS PROCESS STARTED -- the field name says so
+    explicitly; this is NOT the run-scoped figure a paper table should
+    read, see ``resource_summary.json`` below for that). Avoids a
+    percentage's core-count/utilization-scaling distortion, but is **not**
+    hardware-performance-normalized -- the same work costs a different
+    number of CPU-seconds on a faster vs. slower processor; always report
+    ``machine_report()``'s CPU/GPU model fields alongside any CPU-second
+    figure before treating two runs as comparable. ``cpu_process_pct`` /
+    ``cpu_system_pct`` / ``gpu_util_pct`` remain as secondary, hardware-
+    relative diagnostics (see the module docstring for their two different
+    psutil scaling conventions). ``resource_summary.json`` exposes the
+    run-level absolutes directly as top-level keys (``peak_rss_mib``,
     ``mean_rss_mib``, ``peak_system_memory_used_mib``,
     ``peak_gpu_device_memory_mib``, ``peak_torch_allocated_mib``,
-    ``peak_torch_reserved_mib``, ``process_cpu_total_seconds`` and its
-    user/system split, ``gpu_utilization_equivalent_seconds`` -- an
-    explicitly-approximate integral of sampled GPU utilization over
-    wall-clock time, documented as such, never exact kernel time), plus
-    the original ``overall``/``by_phase`` mean/p95/max detail (including
-    the percentage diagnostics) as secondary/appendix data. Skipped
-    entirely when ``metrics.resource_monitoring.enabled: false`` or the
-    run ended before one sampling interval elapsed.
+    ``peak_torch_reserved_mib``, ``gpu_utilization_equivalent_seconds`` --
+    an explicitly-approximate integral of sampled GPU utilization over
+    wall-clock time, documented as such, never exact kernel time, and
+    likewise not hardware-performance-normalized), plus the original
+    ``overall``/``by_phase`` mean/p95/max detail (including the percentage
+    diagnostics) as secondary/appendix data. Skipped entirely when
+    ``metrics.resource_monitoring.enabled: false`` or the run ended before
+    one sampling interval elapsed.
+
+    ``resource_summary.json``'s CPU figures are RUN-SCOPED, not process-
+    lifetime: ``process_cpu_user_seconds`` / ``..._system_seconds`` /
+    ``..._total_seconds`` are the raw cumulative-since-process-start
+    reading at the last sample MINUS a baseline captured at
+    :meth:`~marla.monitoring.resources.ResourceMonitor.start` -- CPU time
+    consumed during this run, excluding pre-run process setup (import/
+    config-load/model-construction) and, for a process that runs more
+    than one experiment sequentially, any earlier run's own CPU time. The
+    baseline itself is included (``cpu_baseline_user_seconds`` and
+    friends) so the delta is independently auditable from the JSON alone;
+    the unsubtracted process-lifetime total at the last sample is also
+    kept, under ``process_lifetime_cpu_*_seconds_at_last_sample``, for a
+    reader who specifically wants that figure instead.
 
 ``messages.csv`` / ``message_summary.json``
     One row per logical MARLA inter-agent message (RL Orchestrator <->

@@ -70,11 +70,16 @@ def test_every_sample_has_finite_cpu_and_ram_fields():
         assert s.ram_rss_mib is not None and s.ram_rss_mib > 0.0
         assert s.ram_system_total_mib is not None and s.ram_system_total_mib > 0.0
         assert 0.0 <= s.ram_system_pct <= 100.0
-        # Absolute CPU compute (cumulative since process start) -- must be
-        # finite and non-negative, and total == user + system exactly.
-        assert s.cpu_process_user_seconds is not None and s.cpu_process_user_seconds >= 0.0
-        assert s.cpu_process_system_seconds is not None and s.cpu_process_system_seconds >= 0.0
-        assert s.cpu_process_total_seconds == pytest.approx(s.cpu_process_user_seconds + s.cpu_process_system_seconds)
+        # Absolute CPU compute (cumulative since PROCESS start, not run
+        # start -- see the field name) -- must be finite and non-negative,
+        # and total == user + system exactly.
+        assert s.cpu_process_user_seconds_since_process_start is not None
+        assert s.cpu_process_user_seconds_since_process_start >= 0.0
+        assert s.cpu_process_system_seconds_since_process_start is not None
+        assert s.cpu_process_system_seconds_since_process_start >= 0.0
+        assert s.cpu_process_total_seconds_since_process_start == pytest.approx(
+            s.cpu_process_user_seconds_since_process_start + s.cpu_process_system_seconds_since_process_start
+        )
         assert s.ram_vms_mib is not None and s.ram_vms_mib > 0.0
         assert s.ram_system_available_mib is not None and s.ram_system_available_mib >= 0.0
 
@@ -136,12 +141,25 @@ def test_summarize_reports_absolute_units_as_top_level_fields():
     assert summary["process_cpu_user_seconds"] is not None
     assert summary["process_cpu_system_seconds"] is not None
     assert summary["process_cpu_total_seconds"] == pytest.approx(
-        summary["process_cpu_user_seconds"] + summary["process_cpu_system_seconds"]
+        summary["process_cpu_user_seconds"] + summary["process_cpu_system_seconds"], abs=1e-9
     )
-    # Cumulative-since-start counters: the reported total must be the LAST
-    # sample's cumulative reading, not a sum across samples (which would
-    # massively over-count a monotonically increasing quantity).
-    assert summary["process_cpu_total_seconds"] == pytest.approx(monitor.samples[-1].cpu_process_total_seconds)
+    # Run-scoped: the reported total is the LAST sample's cumulative
+    # process-lifetime reading MINUS the baseline captured at start() --
+    # never a sum across samples (which would massively over-count a
+    # monotonically increasing quantity), and never the raw process-
+    # lifetime figure unsubtracted.
+    last = monitor.samples[-1]
+    assert summary["process_cpu_total_seconds"] == pytest.approx(
+        last.cpu_process_total_seconds_since_process_start - summary["cpu_baseline_total_seconds"], abs=1e-9
+    )
+    assert summary["cpu_baseline_user_seconds"] is not None and summary["cpu_baseline_user_seconds"] >= 0.0
+    assert summary["cpu_baseline_system_seconds"] is not None
+    assert summary["cpu_baseline_total_seconds"] == pytest.approx(
+        summary["cpu_baseline_user_seconds"] + summary["cpu_baseline_system_seconds"], abs=1e-9
+    )
+    assert summary["process_lifetime_cpu_total_seconds_at_last_sample"] == pytest.approx(
+        last.cpu_process_total_seconds_since_process_start
+    )
 
     if not torch.cuda.is_available():
         assert summary["peak_torch_allocated_mib"] is None
@@ -149,6 +167,72 @@ def test_summarize_reports_absolute_units_as_top_level_fields():
     else:
         assert summary["peak_torch_allocated_mib"] is not None
         assert summary["peak_torch_reserved_mib"] is not None
+
+
+def _burn_cpu(seconds: float) -> None:
+    """Deterministic, measurable CPU-bound work (not I/O sleep) -- busy-loop
+    for at least `seconds` of wall-clock time so psutil.Process.cpu_times()
+    actually advances."""
+    deadline = time.monotonic() + seconds
+    x = 0
+    while time.monotonic() < deadline:
+        x = (x * 1103515245 + 12345) % (2**31)
+
+
+def test_cpu_work_before_start_is_not_counted_as_run_cpu_consumption():
+    """The central regression this fix exists for: CPU time spent BEFORE
+    ResourceMonitor.start() (e.g. import/config-load/model-construction)
+    must not inflate process_cpu_total_seconds -- only CPU work done
+    between start() and the last sample counts."""
+    _burn_cpu(0.3)  # real CPU work performed before the monitor starts at all
+
+    monitor = ResourceMonitor(sampling_interval_seconds=0.03, enabled=True)
+    monitor.start()
+    _burn_cpu(0.15)  # real CPU work performed DURING the run
+    time.sleep(0.05)  # let the background thread take at least one more sample
+    monitor.stop()
+
+    summary = monitor.summarize()
+    # The pre-start burn (0.3s) must not appear in the run-scoped total --
+    # it should be small, bounded by roughly the in-run burn plus
+    # scheduling noise, not >= the pre-start burn's own duration.
+    assert summary["process_cpu_total_seconds"] < 0.3
+    # But the baseline captured at start() DOES already reflect that
+    # pre-start work -- proving the subtraction actually happened, not
+    # that cpu_times() simply reads zero.
+    assert summary["cpu_baseline_total_seconds"] >= 0.2
+    # And the unsubtracted process-lifetime figure includes BOTH the
+    # pre-start and in-run work.
+    assert summary["process_lifetime_cpu_total_seconds_at_last_sample"] >= 0.3
+
+
+def test_sequential_monitors_in_the_same_process_do_not_leak_prior_cpu_time():
+    """Two ResourceMonitor instances used sequentially in one process (the
+    normal pattern: a fresh instance per run_training_loop call) must each
+    report only their OWN window's CPU consumption -- the second run's
+    baseline must reflect the first run's CPU time too (since it really
+    did happen, in this same process), so the second summary's total
+    never re-counts the first run's work."""
+    monitor_a = ResourceMonitor(sampling_interval_seconds=0.03, enabled=True)
+    monitor_a.start()
+    _burn_cpu(0.2)
+    time.sleep(0.05)
+    monitor_a.stop()
+    summary_a = monitor_a.summarize()
+
+    monitor_b = ResourceMonitor(sampling_interval_seconds=0.03, enabled=True)
+    monitor_b.start()
+    _burn_cpu(0.05)
+    time.sleep(0.05)
+    monitor_b.stop()
+    summary_b = monitor_b.summarize()
+
+    # monitor_b's baseline must be >= monitor_a's own final cumulative
+    # reading (process-lifetime CPU time is monotonic non-decreasing).
+    assert summary_b["cpu_baseline_total_seconds"] >= summary_a["process_lifetime_cpu_total_seconds_at_last_sample"] - 1e-6
+    # monitor_b's run-scoped total reflects only ITS OWN (much shorter)
+    # burn, not monitor_a's larger one.
+    assert summary_b["process_cpu_total_seconds"] < summary_a["process_cpu_total_seconds"]
 
 
 def test_gpu_utilization_equivalent_seconds_is_none_without_enough_gpu_samples():

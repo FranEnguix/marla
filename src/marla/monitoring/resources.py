@@ -19,13 +19,30 @@ process memory in MiB (never converted from/to a CPU-percent -- memory and
 compute are different physical quantities), GPU memory in MiB (device-level
 NVML, PyTorch-allocated, and PyTorch-reserved kept as three DISTINCT
 fields, never merged into one ambiguous "GPU memory"), and CPU *compute*
-in absolute seconds (``cpu_process_user_seconds`` / ``..._system_seconds``
-/ ``..._total_seconds``, from :meth:`psutil.Process.cpu_times`, cumulative
-since process start -- unaffected by core count the way a percentage is).
-Percentages remain in the raw per-sample telemetry as a secondary
-diagnostic (useful for spotting throttling/contention within one run), but
-:meth:`ResourceMonitor.summarize` surfaces the absolute quantities as the
-primary run-level summary fields a paper table should read.
+in absolute seconds (:meth:`ResourceMonitor.summarize`'s ``process_cpu_user_seconds``
+/ ``..._system_seconds`` / ``..._total_seconds``, from :meth:`psutil.Process.cpu_times`,
+**run-scoped**: a baseline is captured at :meth:`ResourceMonitor.start`
+and subtracted from the final cumulative reading, so this reflects CPU
+time consumed DURING this run, not since the OS process itself started
+-- see "Run-scoped vs. process-lifetime CPU accounting" below).
+
+IMPORTANT -- what "absolute" does and does NOT mean here: these CPU-second
+and GPU-memory-MiB figures avoid CPU-percent's core-count/utilization-
+scaling distortion (see "CPU-percent semantics" below) and are directly
+addable/subtractable as real seconds/bytes. They are **not**, however,
+hardware-performance-normalized: the same algorithm on a faster CPU (higher
+clock speed, newer microarchitecture, more effective IPC) will consume
+FEWER CPU-seconds for identical work than on a slower one, and likewise a
+faster/slower GPU changes real elapsed compute time for the same kernels.
+"Absolute" here means "not scaled by a percentage convention or core
+count," never "hardware-independent" or "directly comparable across
+different CPU/GPU models" -- a genuine hardware-normalized compute metric
+(FLOPs, instruction counts, ...) is not measured anywhere in this module,
+and none is invented here. ``machine_report()``'s CPU/GPU model fields
+exist precisely so a reader can tell whether two runs' CPU/GPU-second
+figures were measured on comparable hardware before treating them as
+comparable -- always report that metadata alongside any CPU-second or
+GPU-second figure in a paper table.
 
 GPU *compute* has no reliable absolute measure available here: NVML's
 ``utilization.gpu`` is a coarse, driver-reported percentage-busy-over-a-
@@ -34,7 +51,28 @@ exposes no elapsed-kernel-time counter either. :func:`_gpu_utilization_equivalen
 derives a documented, clearly-labeled *approximation* (utilization
 fraction integrated over the actual wall-clock gap between consecutive
 samples) for readers who want a single number, but this is never presented
-as exact GPU compute time -- see that function's own docstring.
+as exact GPU compute time -- see that function's own docstring. The same
+hardware-normalization caveat above applies to it too: an "equivalent
+second" of GPU-busy time is not the same amount of real work on two
+different GPU models.
+
+**Run-scoped vs. process-lifetime CPU accounting**: :meth:`psutil.Process.cpu_times`
+is cumulative since the OS PROCESS started (import time, config loading,
+model construction -- everything before :meth:`ResourceMonitor.start` is
+ever called -- already counts toward it). Reporting that raw cumulative
+value as "this run's CPU consumption" would silently include pre-run
+setup cost, and would be flatly wrong for a process that runs more than
+one experiment sequentially (e.g. several ``run_training_loop`` calls in
+one test process). :meth:`ResourceMonitor.start` therefore captures a
+baseline (``cpu_times()`` at that exact moment); raw per-sample telemetry
+(``resources.csv``) keeps the cumulative-since-process-start reading
+verbatim, under field names that say so explicitly
+(``cpu_process_*_seconds_since_process_start``); :meth:`ResourceMonitor.summarize`
+reports the RUN-SCOPED delta (final cumulative reading minus that
+baseline) under the unqualified ``process_cpu_*_seconds`` names -- the
+figures a paper table should read. The baseline itself is also exposed in
+the summary (``cpu_baseline_*_seconds``) so the delta is independently
+auditable from the JSON alone, without needing ``resources.csv``.
 
 **CPU-percent semantics** -- ``cpu_process_pct`` and ``cpu_system_pct``
 use TWO DIFFERENT conventions, both :mod:`psutil`'s own, neither
@@ -150,12 +188,16 @@ class ResourceSample:
     cpu_system_pct: float | None
     cpu_logical_count: int | None
     cpu_physical_count: int | None
-    # Absolute CPU compute, cumulative since process start (psutil.Process
-    # .cpu_times()) -- unlike the percentages above, these are directly
-    # comparable across runs/hardware with different core counts.
-    cpu_process_user_seconds: float | None
-    cpu_process_system_seconds: float | None
-    cpu_process_total_seconds: float | None
+    # Absolute CPU compute (psutil.Process.cpu_times()) -- but CUMULATIVE
+    # SINCE THE OS PROCESS STARTED, not since this run/monitor began; the
+    # name says so explicitly so this is never mistaken for a run-scoped
+    # figure. ResourceMonitor.summarize()'s process_cpu_*_seconds (baseline-
+    # subtracted) is the run-scoped quantity a paper table should read --
+    # see this module's docstring, "Run-scoped vs. process-lifetime CPU
+    # accounting".
+    cpu_process_user_seconds_since_process_start: float | None
+    cpu_process_system_seconds_since_process_start: float | None
+    cpu_process_total_seconds_since_process_start: float | None
 
     ram_rss_mib: float | None
     ram_peak_rss_mib: float | None  # None where the platform doesn't reliably expose peak RSS (see _process_peak_rss_mib)
@@ -231,8 +273,9 @@ def _sample_once(process: psutil.Process, phase: str | None, global_env_step: in
         timestamp=time.time(), phase=phase, global_env_step=global_env_step, ppo_update=ppo_update,
         cpu_process_pct=cpu_process_pct, cpu_system_pct=cpu_system_pct,
         cpu_logical_count=psutil.cpu_count(logical=True), cpu_physical_count=psutil.cpu_count(logical=False),
-        cpu_process_user_seconds=cpu_times.user, cpu_process_system_seconds=cpu_times.system,
-        cpu_process_total_seconds=cpu_times.user + cpu_times.system,
+        cpu_process_user_seconds_since_process_start=cpu_times.user,
+        cpu_process_system_seconds_since_process_start=cpu_times.system,
+        cpu_process_total_seconds_since_process_start=cpu_times.user + cpu_times.system,
         ram_rss_mib=_bytes_to_mib(mem_info.rss), ram_peak_rss_mib=_process_peak_rss_mib(process),
         ram_vms_mib=_bytes_to_mib(mem_info.vms),
         ram_system_used_mib=_bytes_to_mib(vmem.used), ram_system_available_mib=_bytes_to_mib(vmem.available),
@@ -294,6 +337,12 @@ class ResourceMonitor:
         self._process = psutil.Process()
         self._stop_event = threading.Event()
         self._thread: threading.Thread | None = None
+        # Captured fresh on every start() (see start()'s own comment) --
+        # None until then, so summarize() can tell "never started" apart
+        # from "started with a genuinely zero baseline".
+        self._cpu_baseline_user: float | None = None
+        self._cpu_baseline_system: float | None = None
+        self._cpu_baseline_total: float | None = None
 
     def set_context(self, phase: str | None = None, global_env_step: int | None = None, ppo_update: int | None = None) -> None:
         if phase is not None:
@@ -323,6 +372,18 @@ class ResourceMonitor:
         self._process.cpu_percent(interval=None)
         psutil.cpu_percent(interval=None)
         _NvmlHandles.ensure_init()
+        # The run-scoped CPU baseline (spec: process_cpu_*_seconds must
+        # reflect CPU consumed DURING this run, not since the OS process
+        # itself started -- see the module docstring's "Run-scoped vs.
+        # process-lifetime CPU accounting"). Captured fresh every start()
+        # call, not just once in __init__, so re-using one ResourceMonitor
+        # instance across a stop()/start() cycle still measures from the
+        # correct point -- though the normal, expected usage is a fresh
+        # instance per run (see learning/trainer.py).
+        baseline = self._process.cpu_times()
+        self._cpu_baseline_user = baseline.user
+        self._cpu_baseline_system = baseline.system
+        self._cpu_baseline_total = baseline.user + baseline.system
         self._stop_event.clear()
         self._thread = threading.Thread(target=self._run, daemon=True, name="marla-resource-monitor")
         self._thread.start()
@@ -366,15 +427,30 @@ class ResourceMonitor:
           construction; reserved approaches the device figure only when
           nothing else shares the GPU).
         - ``process_cpu_user_seconds`` / ``..._system_seconds`` /
-          ``..._total_seconds`` -- absolute CPU compute consumed by this
-          process, cumulative since process start (the last sample's
-          cumulative ``psutil.Process.cpu_times()`` reading) -- directly
-          comparable across hardware with different core counts, unlike
-          ``cpu_process_pct``.
+          ``..._total_seconds`` -- RUN-SCOPED absolute CPU compute: the
+          last sample's cumulative ``psutil.Process.cpu_times()`` reading
+          MINUS the baseline captured at :meth:`start`, i.e. CPU time
+          consumed between ``start()`` and the last sample, never
+          including pre-run process setup (import/config-load/model-
+          construction time) or, for a process that runs more than one
+          experiment sequentially, any earlier run's own CPU time. Avoids
+          ``cpu_process_pct``'s core-count/utilization-scaling distortion,
+          but is NOT hardware-performance-normalized -- see the module
+          docstring's "IMPORTANT" paragraph before treating two runs'
+          figures as comparable across different CPU models.
+        - ``cpu_baseline_user_seconds`` / ``..._system_seconds`` /
+          ``..._total_seconds`` -- the baseline itself (this process's
+          cumulative CPU time AT the moment ``start()`` was called), so
+          the delta above is independently auditable from this JSON alone.
+        - ``process_lifetime_cpu_*_seconds_at_last_sample`` -- the
+          unsubtracted, process-lifetime-cumulative reading at the last
+          sample, for a reader who specifically wants that figure instead
+          of the run-scoped one.
         - ``gpu_utilization_equivalent_seconds`` -- see
           :func:`_gpu_utilization_equivalent_seconds`'s docstring: an
           explicitly-approximate integral of sampled utilization over
-          wall-clock time, never exact GPU kernel time.
+          wall-clock time, never exact GPU kernel time, and likewise not
+          hardware-performance-normalized.
 
         ``overall``/``by_phase`` (mean/p95/max per raw telemetry field,
         including the still-useful percentage diagnostics) are kept
@@ -423,15 +499,37 @@ class ResourceMonitor:
         summary["peak_torch_allocated_mib"] = _peak("torch_cuda_allocated_mib")
         summary["peak_torch_reserved_mib"] = _peak("torch_cuda_reserved_mib")
 
-        cpu_total = df["cpu_process_total_seconds"].dropna()
-        if not cpu_total.empty:
-            # Cumulative-since-process-start counters: the LAST sample already
-            # reports the total up to that point -- not summed across samples
-            # (summing would massively over-count a monotonically increasing
-            # cumulative quantity).
-            summary["process_cpu_user_seconds"] = float(df["cpu_process_user_seconds"].dropna().iloc[-1])
-            summary["process_cpu_system_seconds"] = float(df["cpu_process_system_seconds"].dropna().iloc[-1])
-            summary["process_cpu_total_seconds"] = float(cpu_total.iloc[-1])
+        cpu_total = df["cpu_process_total_seconds_since_process_start"].dropna()
+        if not cpu_total.empty and self._cpu_baseline_total is not None:
+            # Cumulative-since-PROCESS-START counters: the LAST sample
+            # already reports the total up to that point (never summed
+            # across samples -- summing would massively over-count a
+            # monotonically increasing cumulative quantity). RUN-SCOPED
+            # figures (what a paper table should read) subtract the
+            # baseline captured at start() -- see the module docstring's
+            # "Run-scoped vs. process-lifetime CPU accounting". A negative
+            # delta is structurally impossible (cpu_times() is monotonic
+            # non-decreasing within one process lifetime) but clamped to
+            # 0.0 defensively rather than ever reporting negative CPU time.
+            last_user = float(df["cpu_process_user_seconds_since_process_start"].dropna().iloc[-1])
+            last_system = float(df["cpu_process_system_seconds_since_process_start"].dropna().iloc[-1])
+            last_total = float(cpu_total.iloc[-1])
+            summary["process_cpu_user_seconds"] = max(0.0, last_user - self._cpu_baseline_user)
+            summary["process_cpu_system_seconds"] = max(0.0, last_system - self._cpu_baseline_system)
+            summary["process_cpu_total_seconds"] = max(0.0, last_total - self._cpu_baseline_total)
+            # The baseline itself, for independent auditability of the
+            # delta above directly from this JSON (no need to also consult
+            # resources.csv).
+            summary["cpu_baseline_user_seconds"] = self._cpu_baseline_user
+            summary["cpu_baseline_system_seconds"] = self._cpu_baseline_system
+            summary["cpu_baseline_total_seconds"] = self._cpu_baseline_total
+            # Also retained under the old unqualified names' former meaning,
+            # explicitly relabeled: cumulative since process start, at the
+            # LAST sample -- kept only for readers who specifically want
+            # the process-lifetime total, not the run-scoped one above.
+            summary["process_lifetime_cpu_user_seconds_at_last_sample"] = last_user
+            summary["process_lifetime_cpu_system_seconds_at_last_sample"] = last_system
+            summary["process_lifetime_cpu_total_seconds_at_last_sample"] = last_total
 
         summary["gpu_utilization_equivalent_seconds"] = _gpu_utilization_equivalent_seconds(self.to_rows())
 
