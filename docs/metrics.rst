@@ -148,6 +148,43 @@ Run directory contents
 
     .. important::
 
+       **Value/credit-assignment terminology -- three DIFFERENT
+       quantities, never conflated:**
+
+       - ``critic_value`` = :math:`V_\theta(s_t)`, the critic's own
+         prediction at collection time. A learned estimate, not a fact.
+       - ``gae_advantage`` = the GAE advantage estimate at this step
+         (spec: :mod:`marla.learning.gae`, unchanged by any of this).
+       - ``return_target`` = ``gae_advantage + critic_value`` (exact
+         floating-point identity, ``learning/ppo.py``) -- the **GAE
+         training target** the critic is regressed toward on the next PPO
+         update. This is **not** :math:`V^\pi(s_t)` (the true value of the
+         policy) and must never be called "true value" or "ground truth"
+         anywhere in code, plots, or reporting -- it is a bootstrapped
+         training target, itself built partly from the critic's own
+         (fallible) prediction at the rollout/truncation boundary.
+
+       A genuinely empirical quantity -- the **realized discounted
+       return-to-go** for a step in a COMPLETED (terminated) episode,
+       :math:`\sum_{k=0}^{T-t} \gamma^k r_{t+k}` using only the episode's
+       own observed ``nasimemu_reward``/``training_reward`` sequence and
+       the run's own ``gamma`` -- is a mathematically different thing from
+       ``return_target`` (no bootstrap term, no critic dependency, and
+       only defined at all for a step whose episode actually ended
+       rather than being cut off by a rollout window) and is deliberately
+       **not** persisted as a column here (it does not exist for the
+       common case of a truncated/rollout-cut-off step, and storing it
+       for the completed-episode subset only would need a second,
+       differently-scoped semantic living in the same table). It remains
+       fully reconstructible offline, post-hoc, from ``decisions.csv``'s
+       own ``nasimemu_reward``/``training_reward`` and ``episode_id``
+       columns plus ``config.yaml``'s ``policy.ppo.gamma`` -- see this
+       exact formula if you build that reconstruction, and call the
+       result ``empirical_discounted_return_to_go`` if you persist it
+       anywhere, never "true value."
+
+    .. important::
+
        ``objective_satisfied_before_action`` is a **different question**
        from ``objective_satisfied``/``objective_became_satisfied`` above,
        not a duplicate: the latter two describe the simulator state
@@ -310,6 +347,73 @@ Run directory contents
     ``approximate_kl``, ``clip_fraction``, ``explained_variance``,
     ``gradient_norm``, and the actual current ``learning_rate`` (reflecting
     the configured schedule, see :doc:`configuration`).
+
+``resources.csv`` / ``resource_summary.json``
+    One row per background-thread telemetry sample (default ~1s cadence,
+    tagged with whichever training ``phase`` was current -- see
+    :mod:`marla.monitoring.resources`). Absolute, dimensionally-correct
+    fields are the primary reporting surface: ``ram_rss_mib`` (process
+    memory, the primary process-memory metric), ``ram_vms_mib``,
+    ``ram_system_used_mib`` / ``ram_system_available_mib`` /
+    ``ram_system_total_mib``, ``gpu_memory_used_mib`` /
+    ``gpu_memory_total_mib`` (NVML device-level -- everything resident on
+    the GPU, not just this process), ``torch_cuda_allocated_mib`` /
+    ``torch_cuda_reserved_mib`` / ``..._max_...`` (PyTorch's own caching
+    allocator -- a DIFFERENT quantity from the NVML figure, never merged
+    with it), and ``cpu_process_user_seconds`` / ``..._system_seconds`` /
+    ``..._total_seconds`` (cumulative process CPU compute since process
+    start -- comparable across hardware with different core counts,
+    unlike a percentage). ``cpu_process_pct`` / ``cpu_system_pct`` /
+    ``gpu_util_pct`` remain as secondary, hardware-relative diagnostics
+    (see the module docstring for their two different psutil scaling
+    conventions). ``resource_summary.json`` exposes the run-level
+    absolutes directly as top-level keys (``peak_rss_mib``,
+    ``mean_rss_mib``, ``peak_system_memory_used_mib``,
+    ``peak_gpu_device_memory_mib``, ``peak_torch_allocated_mib``,
+    ``peak_torch_reserved_mib``, ``process_cpu_total_seconds`` and its
+    user/system split, ``gpu_utilization_equivalent_seconds`` -- an
+    explicitly-approximate integral of sampled GPU utilization over
+    wall-clock time, documented as such, never exact kernel time), plus
+    the original ``overall``/``by_phase`` mean/p95/max detail (including
+    the percentage diagnostics) as secondary/appendix data. Skipped
+    entirely when ``metrics.resource_monitoring.enabled: false`` or the
+    run ended before one sampling interval elapsed.
+
+``messages.csv`` / ``message_summary.json``
+    One row per logical MARLA inter-agent message (RL Orchestrator <->
+    Gatekeeper <-> Plan Maker), recorded exactly once per message at the
+    single point every message is built (:func:`marla.messaging.builders.build_message`
+    -- see :mod:`marla.messaging.telemetry`'s module docstring for the
+    full counting rule this guarantees). Never raw XMPP transport packets
+    (presence, IQ pings) -- those never pass through this function.
+    Columns: ``sender_alias``/``receiver_alias``, ``performative``,
+    ``message_type`` (``READY_CHECK``/``START_EXPERIMENT``/
+    ``STOP_EXPERIMENT`` lifecycle vs. ``ADVISORY_REQUEST``/
+    ``ADVISORY_RESPONSE``/``CORRECTION_REQUEST`` decision-time
+    consultation -- always distinguishable by this field),
+    ``conversation_id``/``request_id`` for correlation, and
+    ``episode_id``/``environment_step`` (populated for decision-time
+    messages via the rollout loop's own context, always ``None`` for
+    lifecycle messages, which are not tied to any one decision).
+    ``message_summary.json``'s ``sent_count_by_agent`` /
+    ``received_count_by_agent`` are BOTH derived from this same event
+    list (grouped by sender/receiver respectively) -- never two
+    independently instrumented counters, which is what avoids double-
+    counting or the two figures drifting apart. ``consultation_request_
+    count``/``consultation_response_count`` count MESSAGES (each hop --
+    Orchestrator->Gatekeeper and Gatekeeper->Plan Maker are two separate
+    ADVISORY_REQUEST messages for one logical consultation), not distinct
+    consultations; compare against ``decisions.csv``'s own
+    ``consultation_count``/``queried`` for the distinct-consultation
+    figure. KNOWN SCOPE LIMITATION: capture is scoped to
+    ``learning.trainer.run_training_loop``'s own duration, so the
+    handshake READY_CHECK/START_EXPERIMENT (sent immediately before) and
+    STOP_EXPERIMENT (sent immediately after, from
+    ``OrchestratorLifecycleBehaviour``) are not currently captured -- a
+    small, fixed number of messages regardless of run length, not
+    decision-time volume. Absent entirely (no file written) for the
+    baseline/PPO_ONLY variant if no messages of any kind were sent, and
+    whenever no message telemetry was active for the run.
 
 ``summary.json``
     Aggregate statistics computed from the above, without ever holding a
@@ -597,21 +701,42 @@ Is PPO training numerically stable?
     the Plan Maker).
 
 ``critic_quality.png``
-    Scatter of the critic's predicted value (``critic_value``, at
-    collection time) against the GAE return target it was trained toward
-    (``return_target``), with a y=x reference line -- how well-calibrated
-    the critic is, complementing ``ppo_losses.png``'s explained-variance
-    summary statistic with the actual point cloud.
+    Two panels: the critic's predicted value (``critic_value``, $V_t$, at
+    collection time) against the GAE **training** return target it was
+    regressed toward (``return_target``, $R_t$ -- ``return_target =
+    gae_advantage + critic_value`` by construction, learning/ppo.py; NEVER
+    a Monte Carlo ground-truth policy value, and the plot's own title says
+    so explicitly). A density-aware full-range hexbin (log-scaled count)
+    plus a zoomed central-range view (5th-95th percentile of $R_t$,
+    widened to never clip $V_t$'s own range), since $R_t$ can span a much
+    wider range than $V_t$ under this project's near-1 discount and
+    large one-off NASimEmu host-value rewards -- a wide $R_t$ tail is a
+    real signal, never hidden to look tidier. MAE/RMSE/bias/R^2 (with n)
+    are printed on the figure itself. Complements ``ppo_losses.png``'s
+    explained-variance summary statistic with the actual point cloud.
 
-``resource_cpu_over_time.png`` / ``resource_ram_over_time.png`` / ``resource_gpu_over_time.png`` / ``resource_gpu_memory_over_time.png``
+``resource_cpu_over_time.png`` / ``resource_cpu_seconds_over_time.png`` / ``resource_ram_over_time.png`` / ``resource_gpu_over_time.png`` / ``resource_gpu_memory_over_time.png``
     CPU/RAM/GPU telemetry from ``resources.csv``
     (:mod:`marla.monitoring.resources`), x-axis is wall-clock seconds
     since this run's own first sample (resource samples are on a fixed
     ~1s cadence, not aligned to rollout/environment-step boundaries).
-    CPU and RAM plots overlay process- and system-level series; the GPU
-    utilization plot color-codes points by training phase
+    Absolute, dimensionally-correct quantities are the primary reporting
+    surface (``resource_cpu_seconds_over_time.png``'s cumulative
+    process CPU-seconds; ``resource_ram_over_time.png``'s RSS/system-RAM
+    in MiB; ``resource_gpu_memory_over_time.png``'s three DISTINCT MiB
+    series -- NVML device-level, PyTorch-allocated, PyTorch-reserved,
+    never merged into one ambiguous "GPU memory"); ``resource_cpu_
+    over_time.png``'s process/system CPU PERCENTAGES and
+    ``resource_gpu_over_time.png``'s NVML utilization percentage remain
+    as secondary, hardware-relative diagnostics (see
+    :mod:`marla.monitoring.resources`'s module docstring for why a
+    percentage is a poor primary cross-hardware measure, and for
+    ``resource_summary.json``'s ``gpu_utilization_equivalent_seconds`` --
+    a clearly-labeled, explicitly-approximate integral of sampled
+    utilization over wall-clock time, never exact GPU kernel time). The
+    GPU utilization plot color-codes points by training phase
     (``rollout_collection``/``ppo_update``/``evaluation``) when available.
-    All four are skipped entirely (not present, not empty) when
+    All five are skipped entirely (not present, not empty) when
     ``metrics.resource_monitoring.enabled: false`` or the run predates
     this feature; the GPU plots are additionally skipped on a CPU-only
     machine with no NVML/CUDA data to show. See :doc:`configuration`'s
