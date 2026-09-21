@@ -191,26 +191,54 @@ class RecurrentPolicy(nn.Module):
             value=value,
         )
 
-    def apply_advice(self, z: Tensor, base_logits: Tensor, confidence: Tensor) -> AdvisedOutput:
-        """Accepted-advice residual adjustment (spec section 15).
+    def apply_advice(
+        self, z: Tensor, base_logits: Tensor, confidence_local: Tensor, consulted_indices: Tensor
+    ) -> AdvisedOutput:
+        """Sparse, subnet-scoped advice residual (subnet-scoped consultation spec, section 10).
 
-        ``confidence`` must already be in the *same order* as ``base_logits``
-        (i.e. the legal-action order), reconstructed by stable action ID --
-        never by raw vector position.
+        ``confidence_local`` covers ONLY the consulted actions (length K),
+        in the same order as ``consulted_indices`` (a LongTensor of K
+        positions into the GLOBAL ``base_logits`` this scope was built
+        from -- reconstructed by stable action ID, never raw vector
+        position, exactly as the dense predecessor of this method already
+        required). Log-odds conversion, z-score normalization, and the
+        TrustHead's advice-summary/agreement features are computed OVER
+        THE CONSULTED SUBSET ONLY -- never re-normalized against the
+        global action count, which is the whole point: an unrelated
+        action from another subnet must never change this normalization
+        (spec section 10/18).
+
+        The resulting per-action residual is SPARSE: constructed as zeros
+        the full width of ``base_logits``, with ``normalized_local``
+        scattered in at exactly ``consulted_indices`` and left at 0.0
+        everywhere else -- so ``final_logits[i] == base_logits[i]`` EXACTLY
+        for every non-consulted action ``i`` (spec section 10's central
+        correctness rule; no unnecessary numerical transformation of
+        unconsulted logits at all). No global re-normalization ever
+        happens after the scatter.
+
+        When every non-FINISH candidate belongs to one subnet,
+        ``consulted_indices`` covers the full action range and this
+        reduces exactly to the previous dense computation (single-subnet
+        equivalence, spec section 17).
         """
         if not self.consultation_enabled:
             raise RuntimeError("apply_advice() called on a policy built with consultation_enabled=False")
 
-        log_odds = clip_and_logit(confidence)
-        normalized_advice = normalize_advice(log_odds)
-        summary = summary_to_tensor(compute_advice_summary(log_odds))
-        agreement = compute_agreement_features(base_logits, log_odds)
+        log_odds_local = clip_and_logit(confidence_local)
+        normalized_local = normalize_advice(log_odds_local)
+        summary = summary_to_tensor(compute_advice_summary(log_odds_local))
+        base_logits_local = base_logits[consulted_indices]
+        agreement = compute_agreement_features(base_logits_local, log_odds_local)
 
         beta = self.trust_head(z, summary, agreement)
         alpha = self.advice_scale()
-        final_logits = base_logits + beta * alpha * normalized_advice
 
-        return AdvisedOutput(final_logits=final_logits, beta=beta, alpha=alpha, normalized_advice=normalized_advice)
+        sparse_residual = base_logits.new_zeros(base_logits.shape)
+        sparse_residual[consulted_indices] = normalized_local
+        final_logits = base_logits + beta * alpha * sparse_residual
+
+        return AdvisedOutput(final_logits=final_logits, beta=beta, alpha=alpha, normalized_advice=sparse_residual)
 
     def advance_recurrent_state(
         self,

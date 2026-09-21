@@ -224,7 +224,15 @@ class OrchestratorLifecycleBehaviour(OneShotBehaviour):
         step: int,
         source_observation_id: str,
         observation: dict,
+        consulted_subnet: int | None,
+        global_candidate_action_count: int,
     ) -> ConsultationResult:
+        """Matches ``learning.rollout.ConsultFn``'s signature. ``legal_actions``
+        here is already the CONSULTED (scoped) subset -- built by
+        ``RolloutCollector._decide`` via ``marla.environment.consultation_scope``
+        before this is ever called; this method never filters/scopes
+        anything itself, it only forwards to the Gatekeeper.
+        """
         agent: RLOrchestratorAgent = self.agent
         outcome = await send_advisory_request(
             self,
@@ -239,12 +247,14 @@ class OrchestratorLifecycleBehaviour(OneShotBehaviour):
                 type=agent.config.objective.type, description=agent.config.objective.description
             ),
             observation=observation,
-            legal_actions=[
+            candidate_actions=[
                 AdvisoryActionDescriptor(
                     action_id=a.action_id, type=a.action_type, target=a.target_key, parameters=a.parameters
                 )
                 for a in legal_actions
             ],
+            consulted_subnet=consulted_subnet,
+            global_candidate_action_count=global_candidate_action_count,
             pending=agent.pending,
         )
         scores = outcome.payload.scores if outcome.payload is not None else None

@@ -62,7 +62,18 @@ class DirectConsultant:
         step: int,
         source_observation_id: str,
         observation: dict[str, Any],
+        consulted_subnet: int | None,
+        global_candidate_action_count: int,
     ) -> ConsultationResult:
+        """Matches ``learning.rollout.ConsultFn``'s signature. ``legal_actions``
+        here is already the CONSULTED (scoped) subset and ``observation`` is
+        already the scoped ``{global_progress, local_hosts}`` dict -- both
+        built by ``RolloutCollector._decide`` via
+        ``marla.environment.consultation_scope`` before this is ever
+        called. This method never filters/scopes anything itself, which is
+        exactly what keeps it in lockstep with the real SPADE path (both
+        consume whatever RolloutCollector already scoped).
+        """
         legal_action_ids = [a.action_id for a in legal_actions]
         cache_key = compute_cache_key(
             observation=observation,
@@ -93,7 +104,9 @@ class DirectConsultant:
         ]
         legal_action_type_set = {a.action_type for a in legal_actions}
         retrieved = retrieve_rules(self._knowledge_base, observation, legal_action_type_set)
-        prompt = build_prompt(retrieved, self._objective, observation, advisory_actions)
+        prompt = build_prompt(
+            retrieved, self._objective, observation, advisory_actions, consulted_subnet, global_candidate_action_count
+        )
         expected_action_ids = set(legal_action_ids)
 
         request_id = new_id("request")

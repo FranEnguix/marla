@@ -18,7 +18,7 @@ from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
-MESSAGE_SCHEMA_VERSION = "1.0"
+MESSAGE_SCHEMA_VERSION = "1.1"  # AdvisoryRequestPayload: legal_actions -> candidate_actions, + consulted_subnet/global_candidate_action_count (subnet-scoped consultation)
 
 
 class MessageType(str, Enum):
@@ -98,6 +98,16 @@ class AdvisoryActionDescriptor(BaseModel):
 
 
 class AdvisoryRequestPayload(BaseModel):
+    """Subnet-scoped consultation (schema 1.1+): ``candidate_actions`` is the
+    CONSULTED subset only (one subnet's actions plus FINISH), never the
+    full global candidate set -- renamed from ``legal_actions`` because that
+    name implied completeness this payload no longer has. ``consulted_subnet``/
+    ``global_candidate_action_count`` are accounting-only fields for the
+    Plan Maker's prompt and MARLA's own metrics; they are never used to
+    reconstruct or validate the global action set, which this payload does
+    not carry at all (sending it would defeat the whole point of scoping).
+    """
+
     model_config = ConfigDict(extra="forbid")
 
     schema_version: str
@@ -108,7 +118,9 @@ class AdvisoryRequestPayload(BaseModel):
     source_observation_id: str
     objective: AdvisoryObjective
     observation: dict[str, Any]
-    legal_actions: list[AdvisoryActionDescriptor]
+    candidate_actions: list[AdvisoryActionDescriptor]
+    consulted_subnet: int | None = None
+    global_candidate_action_count: int
 
 
 class AdvisoryResponsePayload(BaseModel):

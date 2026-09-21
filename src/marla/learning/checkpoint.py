@@ -32,6 +32,7 @@ from typing import Any
 
 import torch
 
+from marla.environment.consultation_scope import CONSULTATION_SCOPE_VERSION
 from marla.learning.action_encoder import POLICY_REPRESENTATION_VERSION
 from marla.learning.recurrent_policy import RecurrentPolicy
 
@@ -44,6 +45,22 @@ class PolicyRepresentationMismatchError(Exception):
     raised *before* ``load_state_dict`` so the failure is a clear,
     MARLA-specific message naming both versions, not a bare PyTorch tensor
     shape-mismatch stack trace. Never silently partially loads.
+    """
+
+
+class ConsultationScopeMismatchError(Exception):
+    """Raised when resuming/loading a MARLA_FULL (``consultation_enabled=True``)
+    checkpoint saved under a different ``consultation_scope_version`` --
+    e.g. one trained before subnet-scoped consultation existed. Unlike
+    ``PolicyRepresentationMismatchError``, this is NOT a tensor-shape
+    mismatch: TrustHead's weight shapes are identical before and after
+    subnet-scoped consultation, so ``load_state_dict`` alone would succeed
+    and produce a policy that silently resumes under incompatible decision
+    semantics (a TrustHead trained on dense/global advice-summary
+    statistics, now fed sparse/local ones instead). Checked only when the
+    policy being loaded into has ``consultation_enabled=True`` -- PPO_ONLY
+    checkpoints never build or use TrustHead/advice at all and are
+    completely unaffected by this check (spec invariant 11/12).
     """
 
 
@@ -71,6 +88,14 @@ class CheckpointMetadata:
     # version 1: parameter-presence-only action features, no target/action
     # compatibility layer) -- see POLICY_REPRESENTATION_VERSION.
     policy_representation_version: int | None = None
+    # Decision-semantics version for MARLA_FULL consultation (subnet-scoped
+    # routing/advice) -- see CONSULTATION_SCOPE_VERSION and
+    # ConsultationScopeMismatchError above. None for a checkpoint saved
+    # before subnet-scoped consultation existed, OR for any PPO_ONLY
+    # checkpoint (consultation was never enabled, so this was never
+    # meaningful to record). Only enforced on load when
+    # consultation_enabled=True.
+    consultation_scope_version: int | None = None
     # Architecture-ablation identity (v2/v3-target/v3-full) -- the version
     # integer alone is not enough once two policies can share a version but
     # differ in which optional visible-progress components are enabled
@@ -138,6 +163,12 @@ def save_checkpoint(
             "next_episode_seed": next_episode_seed,
             "rng_state": rng_state,
             "policy_representation_version": POLICY_REPRESENTATION_VERSION,
+            # Only meaningful for MARLA_FULL -- recorded unconditionally
+            # (even for PPO_ONLY, where it is simply never checked on load)
+            # so a later `consultation.mode` change on the same config
+            # still has an honest value to compare against rather than a
+            # silently-missing field.
+            "consultation_scope_version": CONSULTATION_SCOPE_VERSION,
             "visible_target_progress_enabled": policy.visible_target_progress_enabled,
             "visible_subnet_exploration_enabled": policy.visible_subnet_exploration_enabled,
             "critic_refinement_epochs": critic_refinement_epochs,
@@ -163,6 +194,7 @@ def peek_checkpoint_metadata(path: str | Path) -> CheckpointMetadata:
         config_hash=data["config_hash"],
         next_episode_seed=data.get("next_episode_seed"),
         policy_representation_version=data.get("policy_representation_version"),
+        consultation_scope_version=data.get("consultation_scope_version"),
         visible_target_progress_enabled=data.get("visible_target_progress_enabled"),
         visible_subnet_exploration_enabled=data.get("visible_subnet_exploration_enabled"),
         critic_refinement_epochs=data.get("critic_refinement_epochs"),
@@ -229,6 +261,26 @@ def load_checkpoint(
             "flags (v2/v3-target/v3-full) that change RecurrentCore's/GraphEncoder's "
             "input width -- the two are not weight-compatible and must never be silently "
             "partially loaded. Load with a policy configured for the same ablation instead."
+        )
+
+    # MARLA_FULL-only (spec invariant 11/12): a PPO_ONLY policy
+    # (consultation_enabled=False) never builds or uses TrustHead/advice
+    # at all, so a mismatched/missing consultation_scope_version is
+    # meaningless for it and never checked -- this preserves PPO_ONLY
+    # checkpoint loading byte-identical to before subnet-scoped
+    # consultation existed.
+    saved_consultation_scope_version = data.get("consultation_scope_version")
+    if policy.consultation_enabled and saved_consultation_scope_version != CONSULTATION_SCOPE_VERSION:
+        raise ConsultationScopeMismatchError(
+            f"Checkpoint {path} was saved under consultation_scope_version="
+            f"{saved_consultation_scope_version!r} (None means a pre-subnet-scoping MARLA_FULL "
+            f"checkpoint, or one saved before this field existed), but this build of MARLA uses "
+            f"consultation_scope_version={CONSULTATION_SCOPE_VERSION!r} (subnet-scoped "
+            "consultation). TrustHead's weight SHAPES are identical either way, so this would "
+            "otherwise load successfully and silently resume under different decision semantics "
+            "(a TrustHead trained on dense/global advice statistics, now fed sparse/local ones). "
+            "This checkpoint is from before subnet-scoped consultation and must not be resumed "
+            "or evaluated as MARLA_FULL under the new architecture -- retrain from scratch."
         )
 
     scheduler_state_dict = data.get("scheduler_state_dict")

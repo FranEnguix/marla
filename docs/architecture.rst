@@ -27,24 +27,24 @@ Gatekeeper (:mod:`marla.agents.gatekeeper`)
 
 Plan Maker (:mod:`marla.agents.plan_maker`)
     Frozen and advisory: no PPO gradients, no cross-run memory, no hidden
-    simulator access. It only ever sees what the Gatekeeper forwards -- the
-    current visible observation, current legal action descriptions, the
-    configured objective, and the static versioned knowledge base
-    (:mod:`marla.knowledge.retriever`) -- and returns per-action confidence
-    scores in ``[0, 1]``.
+    simulator access. It only ever sees what the Gatekeeper forwards -- and,
+    since subnet-scoped consultation (see below), that is deliberately a
+    SUBSET of the current step's information, not everything the policy
+    itself can see: detailed host facts and candidate actions for exactly
+    ONE subnet, plus a compact whole-network progress summary and the
+    global ``finish`` action.
 
-    The observation it receives (:func:`marla.environment.observation_summary.build_observation_summary`)
-    lists *specific* confirmed facts per host -- which services, processes,
-    and OS are actually known to be present, not just how many -- plus the
-    scenario-wide ``sensitive_hosts_total``/``sensitive_hosts_with_root_access``
-    capture-target progress. This is what lets the prompt ask it to
-    cross-reference a given exploit/privesc action's own required
-    service/OS/process (carried in that action's ``parameters``) against
-    the specific target host's confirmed facts, rather than scoring
-    actions from vague aggregate counts alone. NASimEmu's own partial-
-    observability model only ever reveals *positive* facts and never
-    reverts one to unknown, so an absent name always means "not yet
-    confirmed," never "confirmed absent" -- the prompt says this
+    The local per-host facts it receives (:func:`marla.environment.consultation_scope.build_scoped_observation`,
+    itself built from :func:`marla.environment.observation_summary.build_observation_summary`)
+    list *specific* confirmed facts per host -- which services, processes,
+    and OS are actually known to be present, not just how many. This is
+    what lets the prompt ask it to cross-reference a given exploit/privesc
+    action's own required service/OS/process (carried in that action's
+    ``parameters``) against the specific target host's confirmed facts,
+    rather than scoring actions from vague aggregate counts alone.
+    NASimEmu's own partial-observability model only ever reveals *positive*
+    facts and never reverts one to unknown, so an absent name always means
+    "not yet confirmed," never "confirmed absent" -- the prompt says this
     explicitly, and nothing in the observation claims otherwise.
 
 NASimEmu Adapter (:mod:`marla.environment.nasimemu_adapter`)
@@ -73,8 +73,12 @@ Every environment step in the assisted variant is a *compound decision*
    Most steps are *not* queried -- consultation is on-demand, not every
    step -- which is exactly what the learned query gate is for: to learn
    when consulting is worth its configured cost.
-3. If queried, :func:`marla.agents.advisory_client.send_advisory_request`
-   sends an ``ADVISORY_REQUEST`` to the Gatekeeper and ``await``\ s the
+3. If queried, :class:`~marla.learning.rollout.RolloutCollector` deterministically
+   routes the consultation to exactly ONE subnet (see `Subnet-scoped
+   consultation`_ below) and builds the scoped request/observation
+   *before* calling into the consultation transport.
+   :func:`marla.agents.advisory_client.send_advisory_request` then sends
+   an ``ADVISORY_REQUEST`` to the Gatekeeper and ``await``\ s the
    correlated ``ADVISORY_RESPONSE`` -- **indefinitely, with no elapsed
    timeout** (spec sections 5, 10, 14). This is deliberate: a real model
    doing real inference can legitimately take anywhere from milliseconds
@@ -82,7 +86,10 @@ Every environment step in the assisted variant is a *compound decision*
    that end the wait are the response itself, or (in distributed mode) a
    detected disconnect of the Gatekeeper -- see `Failure handling`_.
 4. The Gatekeeper (:class:`~marla.agents.gatekeeper.AdvisoryRequestBehaviour`)
-   validates the request and forwards it verbatim to the Plan Maker.
+   validates the request and forwards it verbatim to the Plan Maker. It
+   requires no knowledge of the global candidate set at all -- only exact
+   coverage of whatever action IDs the request actually carries (see step
+   6), which is already the SCOPED subset by the time it reaches here.
 5. The Plan Maker (:class:`~marla.agents.plan_maker.AdvisoryRequestHandler`)
    retrieves applicable knowledge rules (deterministic, not learned --
    :func:`marla.knowledge.retriever.retrieve_rules`), builds a prompt
@@ -91,26 +98,90 @@ Every environment step in the assisted variant is a *compound decision*
    :mod:`marla.models.remote_backend`).
 6. The Gatekeeper (:class:`~marla.agents.gatekeeper.AdvisoryResponseBehaviour`)
    validates the response: correct schema, matching ``run_id``/``request_id``,
-   and *exact* coverage of the requested legal action IDs (no more, no
+   and *exact* coverage of the requested (scoped) action IDs (no more, no
    fewer -- see :func:`marla.messaging.advisory_validation.validate_advisory_response_body`).
    A failing response triggers a ``CORRECTION_REQUEST`` back to the Plan
    Maker with the specific reason and a worked example, up to
    ``consultation.max_schema_revisions`` times, before giving up and
    reporting ``schema_rejected``.
-7. Back at the RL Orchestrator: an accepted response's scores are clipped,
-   converted to log-odds, and z-score normalized
-   (:mod:`marla.learning.advice`), then blended into the base policy's
-   logits as a residual adjustment scaled by a **learned per-step trust
-   coefficient** (beta) and a **learned global scale** (alpha) -- a
-   rejected response forces beta to 0, which is numerically identical to
-   ignoring the advice while still training the trust head on a real
-   (if unused) alpha. The final action is sampled from this adjusted
-   distribution.
+7. Back at the RL Orchestrator: an accepted response's scores (covering
+   only the consulted subset) are clipped, converted to log-odds, and
+   z-score normalized OVER THE CONSULTED SUBSET ONLY
+   (:mod:`marla.learning.advice`), then scattered into a GLOBAL residual
+   vector -- zero everywhere except the consulted indices -- and blended
+   into the base policy's FULL logits as a residual adjustment scaled by a
+   **learned per-step trust coefficient** (beta) and a **learned global
+   scale** (alpha). A rejected response forces beta to 0, which is
+   numerically identical to ignoring the advice while still training the
+   trust head on a real (if unused) alpha. The final action is sampled
+   from this adjusted distribution over the FULL GLOBAL action set --
+   never restricted to the consulted subnet, so the policy can still
+   select an action in a different subnet than the one it consulted about
+   (the Plan Maker supplies local evidence, never a hard mask).
 
 Every one of these fields -- whether this step was queried, the request/response
 IDs, response latency, beta/alpha, whether accepting the advice actually
-changed the top-ranked action -- is recorded per-step in ``decisions.csv``;
-see :doc:`metrics`.
+changed the top-ranked action, the consulted subnet and its action-count
+reduction ratio -- is recorded per-step in ``decisions.csv``; see :doc:`metrics`.
+
+Subnet-scoped consultation
+-----------------------------
+
+Without scoping, both the Plan Maker's prompt and the score vector it must
+generate grow roughly linearly with every visible host and its action list
+-- on a large explored network, that means an ever-larger prompt, an
+ever-larger generated JSON object, and ever-larger Plan Maker latency, none
+of which the RL policy's own action space is limited by. Subnet-scoped
+consultation decouples the two:
+
+- **PPO's action space stays global.** :meth:`~marla.learning.recurrent_policy.RecurrentPolicy.step`
+  still scores every currently legal action across every visible subnet,
+  exactly as before -- nothing about candidate-action construction, the
+  query gate, or PPO_ONLY changes (spec invariants 1, 11).
+- **Deterministic, unlearned routing.** When the query gate samples
+  ``True``, :func:`marla.environment.consultation_scope.select_consulted_subnet`
+  picks the subnet of the single highest-base-logit NON-FINISH candidate
+  (``argmax`` over the policy's own already-computed logits -- no new
+  learned head, no sampling, FINISH itself can never determine the
+  route).
+- **The Plan Maker sees one subnet.** :func:`~marla.environment.consultation_scope.select_consulted_actions`
+  restricts the request to that subnet's actions plus the global
+  ``finish`` action; :func:`~marla.environment.consultation_scope.build_scoped_observation`
+  restricts the observation to a compact whole-network progress summary
+  (sensitive-target/subnet-exploration counts -- never per-host detail)
+  plus full per-host detail for that one subnet only. Both are built ONCE,
+  by :class:`~marla.learning.rollout.RolloutCollector`, before the
+  consultation transport is ever invoked -- so the real SPADE path and the
+  in-process :class:`~marla.evaluation.direct_consult.DirectConsultant`
+  (checkpoint evaluation) both consume an already-scoped request and can
+  never define scoping differently from one another.
+- **Advice is applied sparsely.** The Plan Maker's scores are normalized
+  only over the consulted subset (never against the global candidate
+  count -- that would make normalization depend on how many unrelated
+  actions happen to exist elsewhere) and scattered into a global residual
+  vector that is exactly zero for every unconsulted action. Adding
+  arbitrary candidate actions in other subnets therefore never changes the
+  consulted subset's own normalized advice.
+- **PPO replay reuses the exact consultation experienced at collection
+  time.** The consulted subnet, the consulted action indices, and the Plan
+  Maker's scores for them are stored on each transition
+  (:class:`~marla.learning.rollout.StepRecord`) and replayed verbatim
+  during a PPO update -- the Plan Maker is never called again, and the
+  route is never recomputed from the update's own (possibly different)
+  parameters. This is a deliberate, documented stop-gradient/frozen-
+  routing-context design: routing is a *deterministic* function of
+  already-accounted context (exactly like which actions are legal at all,
+  which was already frozen and replayed this way before subnet scoping
+  existed), not a new stochastic variable, so it needs no probability term
+  of its own in the existing compound joint log-probability -- see
+  :mod:`marla.learning.decision`'s module docstring for the full
+  likelihood-ratio reasoning.
+
+**Trade-off**: the Plan Maker no longer compares candidate actions across
+different subnets within one request -- it is a local expert on whichever
+subnet the deterministic route selected, not a global comparator. The
+global progress summary gives it enough whole-network context to reason
+about ``finish`` sensibly without seeing every host's detail.
 
 Execution modes
 -----------------

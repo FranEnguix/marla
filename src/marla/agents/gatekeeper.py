@@ -80,7 +80,7 @@ class AdvisoryRequestBehaviour(CyclicBehaviour):
             episode_id=request.episode_id,
             environment_step=request.step,
             expected_agent_alias=agent.plan_maker_alias,
-            legal_action_ids=tuple(a.action_id for a in request.legal_actions),
+            legal_action_ids=tuple(a.action_id for a in request.candidate_actions),
         )
 
         forward_metadata = MessageMetadata(

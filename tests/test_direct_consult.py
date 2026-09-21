@@ -17,6 +17,25 @@ LEGAL_ACTIONS = [
 ]
 OBJECTIVE = AdvisoryObjective(type="capture_target", description="test objective")
 
+# A valid subnet-scoped observation shape (marla.environment.consultation_scope
+# .build_scoped_observation's output contract) -- these tests exercise
+# DirectConsultant's accept/correct/reject/cache behavior, not observation
+# content itself, so a minimal fixed shape is enough; build_prompt() reads
+# observation["global_progress"]/["local_hosts"] directly (no .get()
+# fallback -- production always builds this shape).
+SCOPED_OBSERVATION = {
+    "global_progress": {
+        "visible_sensitive_targets_total": 0,
+        "visible_sensitive_targets_with_root": 0,
+        "visible_sensitive_targets_remaining": 0,
+        "known_subnets_count": 1,
+        "successfully_scanned_subnets_count": 0,
+        "known_unscanned_subnets_count": 1,
+        "selected_subnet": 1,
+    },
+    "local_hosts": [],
+}
+
 
 class _ScriptedBackend:
     """Returns each response in ``responses`` in order, one per call."""
@@ -49,7 +68,7 @@ async def test_valid_response_is_accepted_on_the_first_attempt():
         '{"finish": 0.2, "scan:1-2:os_scan": 0.8}',
     ])
     consultant = make_consultant(backend)
-    result = await consultant(LEGAL_ACTIONS, episode_id=1, step=0, source_observation_id="obs-1-0", observation={})
+    result = await consultant(LEGAL_ACTIONS, episode_id=1, step=0, source_observation_id="obs-1-0", observation=SCOPED_OBSERVATION, consulted_subnet=1, global_candidate_action_count=2)
     assert result.status == "accepted"
     assert result.scores == {"finish": 0.2, "scan:1-2:os_scan": 0.8}
     assert result.input_tokens == 10 and result.output_tokens == 3 and result.total_tokens == 13
@@ -63,7 +82,7 @@ async def test_malformed_response_is_corrected_then_accepted():
         '{"finish": 0.5, "scan:1-2:os_scan": 0.5}',
     ])
     consultant = make_consultant(backend)
-    result = await consultant(LEGAL_ACTIONS, episode_id=1, step=0, source_observation_id="obs-1-0", observation={})
+    result = await consultant(LEGAL_ACTIONS, episode_id=1, step=0, source_observation_id="obs-1-0", observation=SCOPED_OBSERVATION, consulted_subnet=1, global_candidate_action_count=2)
     assert result.status == "accepted"
     assert backend.call_count == 2
 
@@ -72,7 +91,7 @@ async def test_malformed_response_is_corrected_then_accepted():
 async def test_persistent_malformed_response_is_rejected_after_max_revisions():
     backend = _ScriptedBackend(["not json"] * 4)  # 1 initial + 3 corrections
     consultant = make_consultant(backend, max_schema_revisions=3)
-    result = await consultant(LEGAL_ACTIONS, episode_id=1, step=0, source_observation_id="obs-1-0", observation={})
+    result = await consultant(LEGAL_ACTIONS, episode_id=1, step=0, source_observation_id="obs-1-0", observation=SCOPED_OBSERVATION, consulted_subnet=1, global_candidate_action_count=2)
     assert result.status == "schema_rejected"
     assert result.scores is None
     assert backend.call_count == 4
@@ -84,8 +103,8 @@ async def test_cache_hit_avoids_a_second_backend_call(tmp_path):
     backend = _ScriptedBackend(['{"finish": 0.1, "scan:1-2:os_scan": 0.9}'])
     consultant = make_consultant(backend, cache=cache)
 
-    first = await consultant(LEGAL_ACTIONS, episode_id=1, step=0, source_observation_id="obs-1-0", observation={"x": 1})
-    second = await consultant(LEGAL_ACTIONS, episode_id=2, step=5, source_observation_id="obs-2-5", observation={"x": 1})
+    first = await consultant(LEGAL_ACTIONS, episode_id=1, step=0, source_observation_id="obs-1-0", observation={**SCOPED_OBSERVATION, "x": 1}, consulted_subnet=1, global_candidate_action_count=2)
+    second = await consultant(LEGAL_ACTIONS, episode_id=2, step=5, source_observation_id="obs-2-5", observation={**SCOPED_OBSERVATION, "x": 1}, consulted_subnet=1, global_candidate_action_count=2)
 
     assert backend.call_count == 1  # second call was a cache hit despite different episode_id/step/observation_id
     assert first.scores == second.scores
@@ -102,8 +121,8 @@ async def test_different_observation_is_a_cache_miss(tmp_path):
     ])
     consultant = make_consultant(backend, cache=cache)
 
-    await consultant(LEGAL_ACTIONS, episode_id=1, step=0, source_observation_id="obs-1-0", observation={"x": 1})
-    await consultant(LEGAL_ACTIONS, episode_id=1, step=1, source_observation_id="obs-1-1", observation={"x": 2})
+    await consultant(LEGAL_ACTIONS, episode_id=1, step=0, source_observation_id="obs-1-0", observation={**SCOPED_OBSERVATION, "x": 1}, consulted_subnet=1, global_candidate_action_count=2)
+    await consultant(LEGAL_ACTIONS, episode_id=1, step=1, source_observation_id="obs-1-1", observation={**SCOPED_OBSERVATION, "x": 2}, consulted_subnet=1, global_candidate_action_count=2)
 
     assert backend.call_count == 2
     assert consultant.cache_misses == 2
@@ -116,5 +135,5 @@ async def test_backend_exception_routes_through_correction_not_a_crash():
             raise RuntimeError("simulated backend failure")
 
     consultant = make_consultant(_RaisingBackend(), max_schema_revisions=0)
-    result = await consultant(LEGAL_ACTIONS, episode_id=1, step=0, source_observation_id="obs-1-0", observation={})
+    result = await consultant(LEGAL_ACTIONS, episode_id=1, step=0, source_observation_id="obs-1-0", observation=SCOPED_OBSERVATION, consulted_subnet=1, global_candidate_action_count=2)
     assert result.status == "schema_rejected"

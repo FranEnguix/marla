@@ -186,7 +186,7 @@ async def test_collect_sets_bootstrap_value_when_stopped_mid_step_not_at_episode
 
     from marla.learning.rollout import ConsultationResult
 
-    async def consult_fn(legal_actions, episode_id, step, source_observation_id, observation):
+    async def consult_fn(legal_actions, episode_id, step, source_observation_id, observation, consulted_subnet, global_candidate_action_count):
         # Simulate Ctrl+C arriving while awaiting the Plan Maker's response.
         stop_event.set()
         return ConsultationResult(status="schema_rejected", scores=None, request_id="request-1")
@@ -232,7 +232,7 @@ def _build_assisted_collector(max_episode_steps: int, base_seed: int = 1, overri
     torch.manual_seed(0)
     policy = RecurrentPolicy(config.policy, consultation_enabled=True)
 
-    async def consult_fn(legal_actions, episode_id, step, source_observation_id, observation):
+    async def consult_fn(legal_actions, episode_id, step, source_observation_id, observation, consulted_subnet, global_candidate_action_count):
         return ConsultationResult(status="schema_rejected", scores=None, request_id="request-1")
 
     collector = RolloutCollector(
@@ -550,7 +550,7 @@ async def test_run_evaluation_episodes_uses_fixed_seeds_regardless_of_training_p
 # in isolation. None of this is reachable from marla.learning.trainer.
 
 
-async def _default_rejecting_consult_fn(legal_actions, episode_id, step, source_observation_id, observation):
+async def _default_rejecting_consult_fn(legal_actions, episode_id, step, source_observation_id, observation, consulted_subnet, global_candidate_action_count):
     return ConsultationResult(status="schema_rejected", scores=None, request_id="unused")
 
 
@@ -584,7 +584,7 @@ def _accepting_consult_fn_factory(call_counter: list):
     descending -- a predictable ranking to assert PLAN_MAKER_ONLY/BETA
     behavior against."""
 
-    async def consult_fn(legal_actions, episode_id, step, source_observation_id, observation):
+    async def consult_fn(legal_actions, episode_id, step, source_observation_id, observation, consulted_subnet, global_candidate_action_count):
         call_counter.append(1)
         n = len(legal_actions)
         scores = {a.action_id: (n - i) / n for i, a in enumerate(legal_actions)}
@@ -676,14 +676,21 @@ async def test_plan_maker_only_ignores_base_policy_for_action_choice():
     records, _ = await collector.collect(10)
     assert len(calls) == 10  # PLAN_MAKER_ONLY forces query_mode="always"
     for r in records:
-        # The fake consult_fn always scores the first legal action highest.
+        # The fake consult_fn always scores the FIRST CONSULTED action
+        # highest -- subnet-scoped consultation means that is not
+        # necessarily legal_action_descriptors[0] (the first GLOBAL
+        # action), only the first entry of this decision's own
+        # consulted_action_indices (global order preserved within the
+        # scope, per marla.environment.consultation_scope).
+        assert r.consulted_action_indices is not None
         selected_id = r.legal_action_descriptors[r.selected_action_index].action_id
-        assert selected_id == r.legal_action_descriptors[0].action_id
+        expected_id = r.legal_action_descriptors[r.consulted_action_indices[0]].action_id
+        assert selected_id == expected_id
 
 
 @pytest.mark.asyncio
 async def test_plan_maker_only_falls_back_to_seeded_random_choice_on_rejection():
-    async def rejecting_consult_fn(legal_actions, episode_id, step, source_observation_id, observation):
+    async def rejecting_consult_fn(legal_actions, episode_id, step, source_observation_id, observation, consulted_subnet, global_candidate_action_count):
         return ConsultationResult(status="schema_rejected", scores=None, request_id="request-1")
 
     overrides = EvaluationOverrides(

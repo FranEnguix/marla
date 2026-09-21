@@ -56,10 +56,13 @@ class AdvisoryRequestHandler(CyclicBehaviour):
             return
         record_message_handled(metadata)
 
-        legal_action_types = {action.type for action in request.legal_actions}
+        legal_action_types = {action.type for action in request.candidate_actions}
         retrieved = retrieve_rules(agent.knowledge_base, request.observation, legal_action_types)
-        legal_action_ids = [action.action_id for action in request.legal_actions]
-        prompt = build_prompt(retrieved, request.objective, request.observation, request.legal_actions)
+        legal_action_ids = [action.action_id for action in request.candidate_actions]
+        prompt = build_prompt(
+            retrieved, request.objective, request.observation, request.candidate_actions,
+            request.consulted_subnet, request.global_candidate_action_count,
+        )
 
         agent.pending_prompts[request.request_id] = (prompt, legal_action_ids)
         await agent.generate_and_respond(

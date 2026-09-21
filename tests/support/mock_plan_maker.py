@@ -63,7 +63,7 @@ class _AdvisoryRequestHandler(CyclicBehaviour):
         except MessageValidationError:
             return
 
-        legal_action_ids = [a["action_id"] for a in body["legal_actions"]]
+        legal_action_ids = [a["action_id"] for a in body["candidate_actions"]]
         agent.attempt_count[metadata.request_id] = 1
         await self._reply(agent, metadata.request_id, legal_action_ids, attempt=1)
 

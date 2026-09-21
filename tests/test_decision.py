@@ -54,7 +54,10 @@ def test_compute_final_decision_queried_and_accepted_applies_residual():
     policy = make_assisted_policy()
     step_out = fake_step_output(num_actions=3)
     confidence = torch.tensor([0.9, 0.1, 0.5])
-    decision = compute_final_decision(policy, step_out, sampled_query=True, plan_maker_confidence=confidence)
+    consulted_indices = torch.tensor([0, 1, 2], dtype=torch.long)
+    decision = compute_final_decision(
+        policy, step_out, sampled_query=True, plan_maker_confidence=confidence, consulted_indices=consulted_indices
+    )
     assert decision.beta is not None
     assert 0.0 <= decision.beta.item() <= 1.0
     assert decision.alpha is not None
@@ -64,6 +67,26 @@ def test_compute_final_decision_queried_and_accepted_applies_residual():
     # final logits should differ from base logits since a real residual was applied
     # (unless beta happens to be exactly 0 or normalized_advice exactly 0, astronomically unlikely here)
     assert not torch.equal(decision.final_logits, step_out.base_logits)
+
+
+def test_compute_final_decision_sparse_residual_leaves_unconsulted_logits_exactly_unchanged():
+    """Subnet-scoped consultation: when only a subset of actions was
+    consulted, every unconsulted action's final logit must equal its base
+    logit EXACTLY (spec section 10's central correctness rule)."""
+    policy = make_assisted_policy()
+    step_out = fake_step_output(num_actions=5)
+    confidence_local = torch.tensor([0.9, 0.2])  # only 2 of 5 actions consulted
+    consulted_indices = torch.tensor([1, 3], dtype=torch.long)
+    decision = compute_final_decision(
+        policy, step_out, sampled_query=True,
+        plan_maker_confidence=confidence_local, consulted_indices=consulted_indices,
+    )
+    unconsulted = [0, 2, 4]
+    for i in unconsulted:
+        assert decision.final_logits[i].item() == step_out.base_logits[i].item()
+    assert decision.normalized_advice is not None
+    for i in unconsulted:
+        assert decision.normalized_advice[i].item() == 0.0
 
 
 def test_joint_log_probability_not_queried_matches_base_log_prob():

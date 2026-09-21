@@ -71,11 +71,24 @@ class StubMainBehaviour(OneShotBehaviour):
             step=1,
             source_observation_id="observation-1-1",
             objective=AdvisoryObjective(type="capture_target", description="test objective"),
-            observation={},
-            legal_actions=[
+            observation={
+                "global_progress": {
+                    "visible_sensitive_targets_total": 0,
+                    "visible_sensitive_targets_with_root": 0,
+                    "visible_sensitive_targets_remaining": 0,
+                    "known_subnets_count": 1,
+                    "successfully_scanned_subnets_count": 0,
+                    "known_unscanned_subnets_count": 1,
+                    "selected_subnet": 1,
+                },
+                "local_hosts": [],
+            },
+            candidate_actions=[
                 AdvisoryActionDescriptor(action_id="service-scan:host-1-0", type="service_scan", target="host-1-0"),
                 AdvisoryActionDescriptor(action_id="finish", type="finish", target=None),
             ],
+            consulted_subnet=1,
+            global_candidate_action_count=2,
             pending=agent.pending,
         )
 

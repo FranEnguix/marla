@@ -23,6 +23,11 @@ from torch_geometric.data import Data
 
 from marla.environment.action_compatibility import compute_compatibility_matrix
 from marla.environment.actions import ActionDescriptor
+from marla.environment.consultation_scope import (
+    build_scoped_observation,
+    select_consulted_actions,
+    select_consulted_subnet,
+)
 from marla.environment.nasimemu_adapter import EnvironmentState, NasimEmuAdapter
 from marla.environment.observation_summary import build_observation_summary
 from marla.environment.state_delta import AccessGain, StateDelta, compute_state_delta
@@ -64,7 +69,21 @@ class ConsultationResult:
     total_tokens: int | None = None
 
 
-ConsultFn = Callable[[list[ActionDescriptor], int, int, str, dict], Awaitable[ConsultationResult]]
+# Subnet-scoped consultation (spec sections 2-9): ``legal_actions`` here is
+# already the SCOPED subset (that subnet's actions plus FINISH), and
+# ``observation`` is already the scoped {global_progress, local_hosts} dict
+# -- both constructed by RolloutCollector._decide via
+# marla.environment.consultation_scope BEFORE this is called, so every
+# consult_fn implementation (the real SPADE path in agents/orchestrator.py,
+# and evaluation/direct_consult.py's DirectConsultant) is scope-agnostic by
+# construction and can never drift from one another. ``consulted_subnet``/
+# ``global_candidate_action_count`` are passed through only for the
+# implementation to put into the advisory request payload/prompt for
+# accounting -- never to reconstruct or second-guess the scope itself.
+ConsultFn = Callable[
+    [list[ActionDescriptor], int, int, str, dict, int | None, int],
+    Awaitable[ConsultationResult],
+]
 
 
 @dataclass
@@ -183,6 +202,18 @@ class StepRecord:
     sampled_query: bool = False
     old_query_probability: float | None = None
     old_query_log_probability: float | None = None
+    # Subnet-scoped consultation (spec sections 2-13): scores/subnet/indices
+    # are stored in CONSULTED order/scope, never global -- consulted_action_indices[j]
+    # is the GLOBAL legal_action_descriptors position that
+    # plan_maker_scores_in_action_order[j] scored. Both None when not
+    # queried; both populated (possibly consulted_subnet=None, a
+    # single-element indices list for FINISH-only) whenever sampled_query
+    # is True, accepted or not -- PPO replay (learning/ppo.py) reuses this
+    # EXACT stored routing context rather than recomputing or re-querying
+    # it (spec section 13/14: frozen, stop-gradient routing context).
+    consulted_subnet: int | None = None
+    consulted_action_indices: list[int] | None = None
+    global_candidate_action_count: int | None = None
     plan_maker_scores_in_action_order: list[float] | None = None
     plan_maker_validation_status: str | None = None
     plan_maker_response_status: str | None = None
@@ -534,6 +565,9 @@ class RolloutCollector:
                 sampled_query=decision["sampled_query"],
                 old_query_probability=decision["query_probability"],
                 old_query_log_probability=decision["query_log_prob"],
+                consulted_subnet=decision["consulted_subnet"],
+                consulted_action_indices=decision["consulted_action_indices"],
+                global_candidate_action_count=decision["global_candidate_action_count"],
                 plan_maker_scores_in_action_order=decision["plan_maker_scores"],
                 plan_maker_validation_status=decision["plan_maker_validation_status"],
                 plan_maker_response_status=decision["plan_maker_response_status"],
@@ -660,6 +694,9 @@ class RolloutCollector:
                 "sampled_query": False,
                 "query_probability": None,
                 "query_log_prob": None,
+                "consulted_subnet": None,
+                "consulted_action_indices": None,
+                "global_candidate_action_count": None,
                 "plan_maker_scores": None,
                 "plan_maker_validation_status": None,
                 "plan_maker_response_status": None,
@@ -699,20 +736,37 @@ class RolloutCollector:
         plan_maker_input_tokens: int | None = None
         plan_maker_output_tokens: int | None = None
         plan_maker_total_tokens: int | None = None
+        consulted_subnet: int | None = None
+        consulted_action_indices: list[int] | None = None
+        global_candidate_action_count: int | None = None
+        consulted_indices_tensor: torch.Tensor | None = None
 
         if sampled_query:
             assert self._consult_fn is not None
             consultation_cost = self._consultation_cost
+
+            # Deterministic subnet routing (spec sections 3-7): s_t is a
+            # function of the GLOBAL base logits, never sampled/learned.
+            # Scoped BEFORE consult_fn is called, so every consult_fn
+            # implementation (real SPADE path, DirectConsultant) receives
+            # the already-scoped subset and neither can drift from this
+            # single authoritative construction.
+            consulted_subnet = select_consulted_subnet(legal_actions, step_out.base_logits)
+            scope = select_consulted_actions(legal_actions, consulted_subnet)
+            consulted_action_indices = scope.consulted_indices
+            global_candidate_action_count = scope.global_candidate_action_count
             observation = build_observation_summary(state)
+            scoped_observation = build_scoped_observation(observation, consulted_subnet)
             logger.info(
-                "  step %d (episode %d): querying Plan Maker, %d legal action(s)...",
-                self._episode_steps, self._episode_id, len(legal_actions),
+                "  step %d (episode %d): querying Plan Maker, subnet=%s, %d/%d candidate action(s)...",
+                self._episode_steps, self._episode_id, consulted_subnet,
+                len(scope.consulted_actions), global_candidate_action_count,
             )
             consult_start = time.monotonic()
             result = await self._consult_fn(
-                legal_actions, self._episode_id, self._episode_steps,
+                scope.consulted_actions, self._episode_id, self._episode_steps,
                 f"observation-{self._episode_id}-{self._episode_steps}",
-                observation,
+                scoped_observation, consulted_subnet, global_candidate_action_count,
             )
             logger.info(
                 "  step %d (episode %d): Plan Maker responded in %.1fs: %s",
@@ -728,15 +782,20 @@ class RolloutCollector:
                 assert result.scores is not None
                 plan_maker_validation_status = "accepted"
                 plan_maker_confidence = torch.tensor(
-                    [result.scores[a.action_id] for a in legal_actions],
+                    [result.scores[a.action_id] for a in scope.consulted_actions],
                     dtype=torch.float32,
                     device=step_out.z.device,
                 )
                 plan_maker_scores = plan_maker_confidence.tolist()
+                consulted_indices_tensor = torch.tensor(
+                    scope.consulted_indices, dtype=torch.long, device=step_out.z.device
+                )
             else:
                 plan_maker_validation_status = "rejected"
 
-        final_decision = compute_final_decision(self._policy, step_out, sampled_query, plan_maker_confidence)
+        final_decision = compute_final_decision(
+            self._policy, step_out, sampled_query, plan_maker_confidence, consulted_indices_tensor
+        )
 
         # BETA_ZERO/BETA_ONE: only meaningful when advice was actually
         # obtained -- compute_final_decision already leaves normalized_advice
@@ -761,8 +820,14 @@ class RolloutCollector:
             # PLAN_MAKER_ONLY: ignore the policy's distribution entirely.
             # Fixed, seeded fallback on schema_rejected -- a documented
             # fallback rule, never a re-use of any learned policy output.
+            # plan_maker_confidence is now LOCAL (consulted-subset) length
+            # -- argmax over it is a LOCAL index, mapped back to the GLOBAL
+            # legal_actions position via consulted_action_indices (never a
+            # raw positional reuse across the two spaces).
             if plan_maker_confidence is not None:
-                action_index = int(torch.argmax(plan_maker_confidence).item())
+                assert consulted_action_indices is not None
+                local_argmax = int(torch.argmax(plan_maker_confidence).item())
+                action_index = consulted_action_indices[local_argmax]
             else:
                 assert self._fallback_rng is not None
                 action_index = self._fallback_rng.randrange(len(legal_actions))
@@ -787,6 +852,9 @@ class RolloutCollector:
             "sampled_query": sampled_query,
             "query_probability": float(query_probability.detach()),
             "query_log_prob": float(joint.query_log_prob),
+            "consulted_subnet": consulted_subnet,
+            "consulted_action_indices": consulted_action_indices,
+            "global_candidate_action_count": global_candidate_action_count,
             "plan_maker_scores": plan_maker_scores,
             "plan_maker_validation_status": plan_maker_validation_status,
             "plan_maker_response_status": plan_maker_response_status,

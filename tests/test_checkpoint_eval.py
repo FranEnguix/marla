@@ -101,7 +101,10 @@ async def test_evaluate_checkpoint_with_fresh_scaffold_policy_needs_no_checkpoin
         cache_hits = 0
         cache_misses = 0
 
-        async def __call__(self, legal_actions, episode_id, step, source_observation_id, observation):
+        async def __call__(
+            self, legal_actions, episode_id, step, source_observation_id, observation,
+            consulted_subnet, global_candidate_action_count,
+        ):
             from marla.learning.rollout import ConsultationResult
             return ConsultationResult(status="schema_rejected", scores=None, request_id="r")
 

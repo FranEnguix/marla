@@ -147,14 +147,40 @@ def _replay_chunk(
             )
             query_entropies.append(_bernoulli_entropy(query_probability))
 
+            # Subnet-scoped consultation replay (spec section 13/14): the
+            # consultation ACTUALLY EXPERIENCED at collection time --
+            # consulted_subnet, consulted_action_indices, and the Plan
+            # Maker scores obtained for exactly those indices -- is a
+            # frozen, stored routing context, reused verbatim here. The
+            # Plan Maker is NEVER called again, no new request is ever
+            # built, and the route is NEVER recomputed from this replay's
+            # (possibly different) new base logits -- see decision.py's
+            # module docstring for why this is consistent with the
+            # existing PPO joint-log-probability definition: consulted_subnet
+            # is a deterministic function of already-frozen context
+            # (exactly like legal_action_descriptors itself), not a new
+            # stochastic variable requiring its own probability term.
             plan_maker_confidence = None
+            consulted_indices_tensor = None
             if record.sampled_query and record.plan_maker_validation_status == "accepted":
                 assert record.plan_maker_scores_in_action_order is not None
+                assert record.consulted_action_indices is not None
+                assert len(record.consulted_action_indices) == len(record.plan_maker_scores_in_action_order), (
+                    "stored consulted_action_indices and plan_maker_scores_in_action_order must be the same length"
+                )
+                assert all(
+                    0 <= i < len(record.legal_action_descriptors) for i in record.consulted_action_indices
+                ), "every consulted index must be valid for the replayed global candidate set"
                 plan_maker_confidence = torch.tensor(
                     record.plan_maker_scores_in_action_order, dtype=torch.float32, device=device
                 )
+                consulted_indices_tensor = torch.tensor(
+                    record.consulted_action_indices, dtype=torch.long, device=device
+                )
 
-            final_decision = compute_final_decision(policy, out, record.sampled_query, plan_maker_confidence)
+            final_decision = compute_final_decision(
+                policy, out, record.sampled_query, plan_maker_confidence, consulted_indices_tensor
+            )
             joint = compute_joint_log_probability(
                 query_probability, record.sampled_query, final_decision.final_logits, record.selected_action_index
             )

@@ -83,10 +83,18 @@ async def send_advisory_request(
     source_observation_id: str,
     objective: AdvisoryObjective,
     observation: dict,
-    legal_actions: list[AdvisoryActionDescriptor],
+    candidate_actions: list[AdvisoryActionDescriptor],
+    consulted_subnet: int | None,
+    global_candidate_action_count: int,
     pending: dict[str, "asyncio.Future"],
 ) -> AdvisoryOutcome:
-    """Send one advisory request and await its correlated response, indefinitely."""
+    """Send one advisory request and await its correlated response, indefinitely.
+
+    ``candidate_actions`` is already the SCOPED (consulted-subnet) subset
+    -- see ``marla.environment.consultation_scope`` and
+    ``RolloutCollector._decide``, the one place that builds it. This
+    function never filters/scopes anything itself.
+    """
     request_id = new_id("request")
     request_payload = AdvisoryRequestPayload(
         schema_version=MESSAGE_SCHEMA_VERSION,
@@ -97,7 +105,9 @@ async def send_advisory_request(
         source_observation_id=source_observation_id,
         objective=objective,
         observation=observation,
-        legal_actions=legal_actions,
+        candidate_actions=candidate_actions,
+        consulted_subnet=consulted_subnet,
+        global_candidate_action_count=global_candidate_action_count,
     )
 
     future: asyncio.Future = asyncio.get_event_loop().create_future()

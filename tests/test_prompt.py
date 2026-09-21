@@ -3,15 +3,27 @@ from marla.messaging.schemas import AdvisoryActionDescriptor, AdvisoryObjective
 from marla.models.prompt import build_correction_prompt, build_prompt
 
 
+def _scoped_observation(local_hosts=None, selected_subnet=1):
+    return {
+        "global_progress": {
+            "visible_sensitive_targets_total": 0, "visible_sensitive_targets_with_root": 0,
+            "visible_sensitive_targets_remaining": 0, "known_subnets_count": 1,
+            "successfully_scanned_subnets_count": 0, "known_unscanned_subnets_count": 1,
+            "selected_subnet": selected_subnet,
+        },
+        "local_hosts": local_hosts or [],
+    }
+
+
 def test_build_prompt_includes_all_sections():
     rules = [KnowledgeRule(id="r1", observation_flags=(), legal_action_types=(), text="Do the thing.")]
     objective = AdvisoryObjective(type="capture_target", description="Get root somewhere.")
-    observation = {"hosts": [{"target": "host-1-0", "access": "none"}]}
+    observation = _scoped_observation(local_hosts=[{"target": "host-1-0", "access": "none"}], selected_subnet=1)
     legal_actions = [
         AdvisoryActionDescriptor(action_id="finish", type="finish", target=None, parameters={}),
     ]
 
-    prompt = build_prompt(rules, objective, observation, legal_actions)
+    prompt = build_prompt(rules, objective, observation, legal_actions, consulted_subnet=1, global_candidate_action_count=1)
 
     assert "Do the thing." in prompt
     assert "capture_target" in prompt
@@ -19,11 +31,14 @@ def test_build_prompt_includes_all_sections():
     assert "host-1-0" in prompt
     assert '"finish"' in prompt
     assert "Return strict JSON" in prompt
+    assert "CONSULTED SUBNET 1" in prompt
 
 
 def test_build_prompt_handles_no_retrieved_rules():
     objective = AdvisoryObjective(type="capture_target", description="d")
-    prompt = build_prompt([], objective, {}, [])
+    prompt = build_prompt(
+        [], objective, _scoped_observation(), [], consulted_subnet=None, global_candidate_action_count=0
+    )
     assert "no specific rules retrieved" in prompt
 
 

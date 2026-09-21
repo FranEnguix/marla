@@ -477,7 +477,7 @@ def written_assisted_run_dir(tmp_path):
         premature_finish_penalty=config.objective.premature_finish_penalty,
     )
 
-    async def consult_fn(legal_actions, episode_id, step, source_observation_id, observation):
+    async def consult_fn(legal_actions, episode_id, step, source_observation_id, observation, consulted_subnet, global_candidate_action_count):
         scores = {a.action_id: 1.0 / (i + 1) for i, a in enumerate(legal_actions)}
         return ConsultationResult(status="accepted", scores=scores, request_id=f"req-{episode_id}-{step}", latency_ms=42.0)
 

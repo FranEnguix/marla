@@ -62,16 +62,21 @@ def load_knowledge_base(path: str | Path) -> KnowledgeBase:
 
 
 def compute_observation_flags(observation: dict[str, Any]) -> set[str]:
-    """Derive boolean observation flags from the request's visible observation summary.
+    """Derive boolean observation flags from the request's SCOPED observation summary.
 
-    ``observation`` is the JSON summary built by
-    ``environment.observation_summary.build_observation_summary``: a dict
-    with a ``hosts`` list (each host carrying ``access``, ``reachable``, and
-    the ``known_services``/``known_processes``/``known_os`` name lists --
-    all visible-only) plus the scenario-wide ``sensitive_hosts_total``/
-    ``sensitive_hosts_with_root_access`` capture-target progress counts.
+    ``observation`` is the subnet-scoped summary built by
+    ``environment.consultation_scope.build_scoped_observation``: a dict
+    with a ``local_hosts`` list (each host carrying ``access``,
+    ``reachable``, and the ``known_services``/``known_processes``/
+    ``known_os`` name lists -- all visible-only, filtered to the consulted
+    subnet) plus a ``global_progress`` dict with the whole-network
+    ``visible_sensitive_targets_total``/``visible_sensitive_targets_with_root``
+    capture-target progress counts. Host-level flags are therefore local
+    to the consulted subnet (consistent with what the Plan Maker actually
+    sees); the capture-target flag stays global/whole-network, matching
+    FINISH's own global scope.
     """
-    hosts = observation.get("hosts", [])
+    hosts = observation.get("local_hosts", [])
     flags: set[str] = set()
 
     if any(host.get("reachable") and not host.get("known_services") for host in hosts):
@@ -81,8 +86,9 @@ def compute_observation_flags(observation: dict[str, Any]) -> set[str]:
     if not any(host.get("access") == "root" for host in hosts):
         flags.add("root_access_missing")
 
-    sensitive_total = observation.get("sensitive_hosts_total", 0)
-    sensitive_captured = observation.get("sensitive_hosts_with_root_access", 0)
+    global_progress = observation.get("global_progress", {})
+    sensitive_total = global_progress.get("visible_sensitive_targets_total", 0)
+    sensitive_captured = global_progress.get("visible_sensitive_targets_with_root", 0)
     if sensitive_total > 0 and sensitive_captured >= sensitive_total:
         flags.add("all_sensitive_hosts_captured")
 

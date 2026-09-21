@@ -16,6 +16,7 @@ from marla.metrics.plots import (
     _accepted_advice_rows,
     _critic_quality_r_squared,
     _plot_advice_influence,
+    _plot_consultation_scope,
     _plot_critic_quality,
     _plot_decision_diagnostics,
 )
@@ -164,6 +165,39 @@ def test_advice_influence_beta_label_uses_mathtext_and_renders(tmp_path, monkeyp
     ax1 = capture.last_axes[0]
     assert "$\\beta$" in ax1.get_ylabel()
     assert "$\\beta$" in ax1.get_title()
+
+
+def test_consultation_scope_plot_is_absent_without_the_column(tmp_path):
+    decisions = pd.DataFrame({"queried": [False, False], "beta": [None, None]})
+    assert _plot_consultation_scope(decisions, _tmp_dir(tmp_path)) == []
+
+
+def test_consultation_scope_plot_is_absent_when_never_queried(tmp_path):
+    decisions = pd.DataFrame({"consultation_scope": [None, None], "queried": [False, False]})
+    assert _plot_consultation_scope(decisions, _tmp_dir(tmp_path)) == []
+
+
+def test_consultation_scope_plot_renders_and_reflects_the_real_reduction(tmp_path, monkeypatch):
+    capture = _FigureCapture(monkeypatch)
+    decisions = pd.DataFrame(
+        {
+            "consultation_scope": ["subnet_scoped", "subnet_scoped", None],
+            "queried": [True, True, False],
+            "global_candidate_action_count": [61, 121, None],
+            "consulted_candidate_action_count": [31, 31, None],
+            "consultation_action_reduction_ratio": [31 / 61, 31 / 121, None],
+            "plan_maker_input_tokens": [2400, 2450, None],
+            "plan_maker_output_tokens": [40, 42, None],
+            "consulted_subnet": [1, 2, None],
+        }
+    )
+    written = _plot_consultation_scope(decisions, _tmp_dir(tmp_path))
+    assert written and written[0].is_file()
+
+    ax1 = capture.last_axes[0]
+    global_line, consulted_line = ax1.lines[0], ax1.lines[1]
+    assert list(global_line.get_ydata()) == [61, 121]
+    assert list(consulted_line.get_ydata()) == [31, 31]
 
 
 # --- critic_quality.png: numerical correctness, density-aware rendering, ---

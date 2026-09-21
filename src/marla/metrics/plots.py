@@ -164,6 +164,7 @@ def generate_plots(run_dir: Path, plots_dir: Path) -> list[Path]:
             written += _plot_advice_influence(decisions, plots_dir)
             written += _plot_gatekeeper_reliability(decisions, plots_dir)
             written += _plot_plan_maker_latency(decisions, plots_dir)
+            written += _plot_consultation_scope(decisions, plots_dir)
             written += _plot_query_decision_analysis(decisions, plots_dir)
             written += _plot_critic_quality(decisions, plots_dir)
             written += _plot_reward_vs_credit_assignment(decisions, plots_dir)
@@ -877,6 +878,79 @@ def _plot_plan_maker_latency(decisions: pd.DataFrame, plots_dir: Path) -> list[P
 
     fig.suptitle(f"mean={mean:.0f}ms  median={median:.0f}ms  p95={p95:.0f}ms  p99={p99:.0f}ms", fontsize=9)
     return [_save(fig, plots_dir / "plan_maker_latency.png")]
+
+
+def _plot_consultation_scope(decisions: pd.DataFrame, plots_dir: Path) -> list[Path]:
+    """Subnet-scoped consultation (spec section 38): global vs. consulted
+    candidate-action count over queried decisions, the resulting action-
+    reduction ratio, and Plan Maker input/output token counts -- the
+    scaling story this feature exists for, at production-run scale (see
+    ``research/scalability/PLAN_MAKER_SCOPE_SCALING.md`` for a dedicated,
+    larger structural sweep). Absent entirely for a run written before
+    subnet-scoped consultation existed (no ``consultation_scope`` column)
+    or the baseline/PPO_ONLY variant (never queried at all).
+    """
+    if "consultation_scope" not in decisions.columns:
+        return []
+    queried = decisions[decisions["consultation_scope"] == "subnet_scoped"]
+    if queried.empty:
+        return []
+
+    window = max(1, min(20, len(queried)))
+    fig, axes = plt.subplots(2, 2, figsize=(11, 8))
+    (ax1, ax2), (ax3, ax4) = axes
+
+    ax1.plot(
+        range(len(queried)), queried["global_candidate_action_count"].to_numpy(),
+        label="global", color="tab:blue", alpha=0.7,
+    )
+    ax1.plot(
+        range(len(queried)), queried["consulted_candidate_action_count"].to_numpy(),
+        label="consulted", color="tab:orange", alpha=0.9,
+    )
+    ax1.set_xlabel("Queried decision (in collection order)")
+    ax1.set_ylabel("Candidate action count")
+    ax1.set_title("Global vs. consulted candidate actions")
+    ax1.legend(fontsize="small")
+    ax1.grid(alpha=0.3)
+
+    ratio = queried["consultation_action_reduction_ratio"].dropna()
+    if not ratio.empty:
+        ax2.plot(range(len(ratio)), ratio.rolling(window, min_periods=1).mean(), color="tab:green")
+    ax2.set_xlabel("Queried decision (in collection order)")
+    ax2.set_ylabel(f"consulted/global ratio (rolling, window={window})")
+    ax2.set_ylim(0.0, 1.05)
+    ax2.set_title("Consultation action-reduction ratio")
+    ax2.grid(alpha=0.3)
+
+    input_tokens = queried["plan_maker_input_tokens"].dropna()
+    output_tokens = queried["plan_maker_output_tokens"].dropna()
+    if not input_tokens.empty:
+        ax3.plot(
+            range(len(input_tokens)), input_tokens.rolling(window, min_periods=1).mean(),
+            label="input", color="tab:purple",
+        )
+    if not output_tokens.empty:
+        ax3.plot(
+            range(len(output_tokens)), output_tokens.rolling(window, min_periods=1).mean(),
+            label="output", color="tab:brown",
+        )
+    ax3.set_xlabel("Queried decision (in collection order)")
+    ax3.set_ylabel(f"Tokens (rolling mean, window={window})")
+    ax3.set_title("Plan Maker token counts")
+    if not input_tokens.empty or not output_tokens.empty:
+        ax3.legend(fontsize="small")
+    ax3.grid(alpha=0.3)
+
+    subnet_counts = queried["consulted_subnet"].dropna().astype(int).value_counts().sort_index()
+    if not subnet_counts.empty:
+        ax4.bar(subnet_counts.index.astype(str), subnet_counts.to_numpy(), color="tab:cyan")
+    ax4.set_xlabel("Consulted subnet")
+    ax4.set_ylabel("Queried decision count")
+    ax4.set_title("Which subnets got consulted")
+    ax4.grid(alpha=0.3, axis="y")
+
+    return [_save(fig, plots_dir / "consultation_scope.png")]
 
 
 def _plot_query_decision_analysis(decisions: pd.DataFrame, plots_dir: Path) -> list[Path]:

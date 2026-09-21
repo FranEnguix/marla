@@ -49,6 +49,7 @@ import yaml
 from marla.config.loader import config_hash, redacted_config_dict
 from marla.config.models import Config
 from marla.environment.action_compatibility import CompatibilityStatus, compatibility_status_from_vector
+from marla.environment.consultation_scope import extract_action_subnet
 from marla.learning.checkpoint import save_checkpoint
 from marla.learning.masking import masked_entropy
 from marla.learning.query_gate import compute_top_two_margin
@@ -99,6 +100,16 @@ _DECISIONS_FIELDS = [
     "plan_maker_top_action_id", "selected_action_plan_maker_rank", "beta", "alpha",
     "advice_changed_top_action",
     "plan_maker_input_tokens", "plan_maker_output_tokens", "plan_maker_total_tokens",
+    # Subnet-scoped consultation (spec sections 2-23): consultation_scope/
+    # consulted_subnet/consulted_candidate_action_count/
+    # consultation_action_reduction_ratio are None on a non-queried
+    # decision -- nothing was consulted, not a missing measurement.
+    # global_candidate_action_count is None on a non-queried decision too
+    # (equal to legal_action_count above whenever it IS populated; not
+    # duplicated there to avoid two columns carrying the same value).
+    "consultation_scope", "consulted_subnet", "global_candidate_action_count",
+    "consulted_candidate_action_count", "consultation_action_reduction_ratio",
+    "selected_action_in_consulted_subnet", "base_top_action_subnet", "final_top_action_subnet",
     # Action/target compatibility (spec sections 14-15) -- all driven by the
     # single authoritative marla.environment.action_compatibility helper, so
     # these can never drift from the encoder's own input features or the
@@ -370,6 +381,19 @@ def _rank_descending(scores: list[float], index: int) -> int:
     return order.index(index) + 1
 
 
+def _extract_action_subnet_defensively(action) -> int | None:
+    """``extract_action_subnet`` read defensively for a reporting-only CSV
+    column -- a malformed ``target_key`` (never produced by
+    ``environment.actions.build_legal_actions`` in production) degrades
+    this one field to ``None`` rather than crashing the whole decisions.csv
+    write, matching this function's own FINISH-diagnostics fields above.
+    """
+    try:
+        return extract_action_subnet(action)
+    except ValueError:
+        return None
+
+
 def _decision_row(record: StepRecord, advantage: float, return_target: float) -> dict[str, Any]:
     """Builds one decisions.csv row from a still-live ``StepRecord``.
 
@@ -419,11 +443,39 @@ def _decision_row(record: StepRecord, advantage: float, return_target: float) ->
 
     plan_maker_top_id = None
     plan_maker_rank = None
+    selected_action_in_consulted_subnet = None
+    consulted_candidate_action_count = None
+    consultation_action_reduction_ratio = None
+    base_top_action_subnet = _extract_action_subnet_defensively(record.legal_action_descriptors[base_top_index])
+    final_top_action_subnet = _extract_action_subnet_defensively(record.legal_action_descriptors[final_top_index])
     if record.plan_maker_scores_in_action_order is not None:
+        # Subnet-scoped consultation (spec sections 10/23): pm_scores and
+        # record.consulted_action_indices are BOTH in consulted order/scope
+        # (length K <= legal_action_count) -- never global-index-aligned,
+        # so a local index found within pm_scores must be mapped back
+        # through consulted_action_indices before indexing the GLOBAL
+        # action_ids list.
         pm_scores = record.plan_maker_scores_in_action_order
-        pm_top_index = max(range(len(pm_scores)), key=lambda i: pm_scores[i])
-        plan_maker_top_id = action_ids[pm_top_index]
-        plan_maker_rank = _rank_descending(pm_scores, record.selected_action_index)
+        assert record.consulted_action_indices is not None
+        assert len(record.consulted_action_indices) == len(pm_scores)
+        consulted_candidate_action_count = len(record.consulted_action_indices)
+        if record.global_candidate_action_count:
+            consultation_action_reduction_ratio = (
+                consulted_candidate_action_count / record.global_candidate_action_count
+            )
+        pm_local_top_index = max(range(len(pm_scores)), key=lambda i: pm_scores[i])
+        plan_maker_top_id = action_ids[record.consulted_action_indices[pm_local_top_index]]
+        # The PPO-selected action is not guaranteed to be one the Plan
+        # Maker actually scored -- sparse advice supplies local evidence,
+        # never a hard mask, so the global argmax/sample can still land on
+        # an unconsulted action (spec section 16). selected_action_plan_maker_rank
+        # is only meaningful (non-None) when it was.
+        if record.selected_action_index in record.consulted_action_indices:
+            local_selected_index = record.consulted_action_indices.index(record.selected_action_index)
+            plan_maker_rank = _rank_descending(pm_scores, local_selected_index)
+            selected_action_in_consulted_subnet = True
+        else:
+            selected_action_in_consulted_subnet = False
 
     statuses = [
         compatibility_status_from_vector(descriptor.action_type, row)
@@ -495,6 +547,20 @@ def _decision_row(record: StepRecord, advantage: float, return_target: float) ->
         "plan_maker_input_tokens": record.plan_maker_input_tokens,
         "plan_maker_output_tokens": record.plan_maker_output_tokens,
         "plan_maker_total_tokens": record.plan_maker_total_tokens,
+        # Subnet-scoped consultation (spec section 23) -- consultation_scope
+        # is a fixed literal ("subnet_scoped") rather than a boolean/enum
+        # column of its own values, kept for forward-compatible filtering
+        # if a future non-subnet scoping mode is ever added; consulted_subnet
+        # /consulted_candidate_action_count/consultation_action_reduction_ratio
+        # are all None on a non-queried decision (nothing was consulted).
+        "consultation_scope": "subnet_scoped" if record.sampled_query else None,
+        "consulted_subnet": record.consulted_subnet,
+        "global_candidate_action_count": record.global_candidate_action_count,
+        "consulted_candidate_action_count": consulted_candidate_action_count,
+        "consultation_action_reduction_ratio": consultation_action_reduction_ratio,
+        "selected_action_in_consulted_subnet": selected_action_in_consulted_subnet,
+        "base_top_action_subnet": base_top_action_subnet,
+        "final_top_action_subnet": final_top_action_subnet,
         "selected_action_known_service_match": bool(selected_vec[2]) if has_service else None,
         "selected_action_known_process_match": bool(selected_vec[3]) if has_process else None,
         "selected_action_known_os_match": bool(selected_vec[4]) if has_os else None,

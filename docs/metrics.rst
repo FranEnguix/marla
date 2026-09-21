@@ -146,6 +146,24 @@ Run directory contents
     vs. final top action, ``beta``/``alpha``, and whether accepted advice
     changed the top action.
 
+    **Subnet-scoped consultation** (``null`` whenever ``queried`` is
+    false -- nothing was consulted, not a missing measurement):
+    ``consultation_scope`` (the fixed literal ``"subnet_scoped"`` when
+    queried), ``consulted_subnet`` (the routed subnet, or ``null`` in the
+    documented edge case where no non-FINISH candidate existed),
+    ``global_candidate_action_count``/``consulted_candidate_action_count``
+    (equal only when every candidate belongs to one subnet -- see
+    :doc:`architecture`'s "Subnet-scoped consultation" section),
+    ``consultation_action_reduction_ratio`` (consulted/global),
+    ``selected_action_in_consulted_subnet`` (PPO's final action is NOT
+    constrained to the consulted subnet -- sparse advice supplies local
+    evidence, never a hard mask -- so this can legitimately be ``False``;
+    when it is, ``selected_action_plan_maker_rank`` is ``null`` because the
+    Plan Maker never scored the eventually-selected action at all),
+    ``base_top_action_subnet``/``final_top_action_subnet`` (the subnet of
+    whichever action currently ranks first, base vs. final logits --
+    ``null`` for FINISH, which has no subnet).
+
     .. important::
 
        **Value/credit-assignment terminology -- three DIFFERENT

@@ -150,7 +150,7 @@ async def test_assisted_ppo_update_changes_parameters_without_reinvoking_plan_ma
 
     call_count = 0
 
-    async def fake_consult(legal_actions, episode_id, step, source_observation_id, observation):
+    async def fake_consult(legal_actions, episode_id, step, source_observation_id, observation, consulted_subnet, global_candidate_action_count):
         nonlocal call_count
         call_count += 1
         return ConsultationResult(
