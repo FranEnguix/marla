@@ -14,6 +14,7 @@ from pathlib import Path
 
 import pytest
 import torch
+import yaml
 
 from marla.config.loader import load_config, parse_config
 from marla.environment.consultation_scope import extract_action_subnet, select_consulted_subnet
@@ -27,7 +28,9 @@ from marla.learning.rollout import ConsultationResult, RolloutCollector
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 TWO_SUBNET_SCENARIO = str((REPO_ROOT / "NASimEmu/scenarios/sm_entry_dmz_two_subnets.v2.yaml").resolve())
+ID_SCENARIO = "marla://sm_entry_user_three_subnets.solvable.v2.yaml"
 DIAGNOSTIC_SEED = 777001  # arbitrary, local to this file, never 401/402/403
+DIAGNOSTIC_SEED_TRIAL22 = 777003  # distinct from the routing_diagnostic_trial22/ script's own 777101/777102
 
 
 def _assisted_config():
@@ -119,6 +122,91 @@ async def test_replay_at_theta_old_reproduces_old_log_prob_and_has_zero_route_sw
 
     assert all_switches, "expected at least one queried record to have a defined route-switch entry"
     assert not any(all_switches), "route-switch rate must be exactly zero when replaying at theta_old"
+
+
+def _trial22_ppo_hyperparameters() -> dict:
+    """Loaded verbatim from the authoritative provenance file -- never
+    hand-reconstructed. Only ``steps_per_env``/``num_envs`` are overridden
+    by the caller (for test runtime, not because they affect the identity
+    being tested -- the theta_old exact-reproduction property holds for
+    ANY batch size, since nothing about theta has moved regardless of how
+    many transitions were collected)."""
+    hyperparams = yaml.safe_load((REPO_ROOT / "research" / "best_ppo_hyperparameters.yaml").read_text())
+    return hyperparams["policy"]["ppo"]
+
+
+@pytest.mark.asyncio
+async def test_replay_at_theta_old_reproduces_old_log_prob_under_trial22_config_and_real_scenario():
+    """Spec section 12 of the pre-calibration routing-stability pass: the
+    theta_old identity above must ALSO be checked under trial-22's real
+    PPO hyperparameters and the real paper ID scenario, not only the toy
+    two-subnet fixture. steps_per_env/num_envs are reduced for test
+    runtime (see _trial22_ppo_hyperparameters); every other trial-22 value
+    -- gamma, gae_lambda, clip_epsilon, epochs, minibatch_sequences,
+    optimizer type/lr/eps, entropy coefficients, max_grad_norm,
+    representation -- is used verbatim. See
+    research/aamas2027/routing_diagnostic_trial22/ for the full-scale
+    (4x512, ~10-update) version of this same measurement.
+    """
+    torch.manual_seed(DIAGNOSTIC_SEED_TRIAL22)
+    config = load_config(REPO_ROOT / "research" / "configs" / "ppo_best_hpo.yaml")
+    data = config.model_dump()
+    trial22_ppo = _trial22_ppo_hyperparameters()
+    data["policy"]["ppo"] = dict(trial22_ppo)
+    data["policy"]["ppo"]["num_envs"] = 1
+    data["policy"]["ppo"]["steps_per_env"] = 24
+    data["policy"]["ppo"]["total_environment_steps"] = 24
+    data["consultation"] = {"mode": "learned", "cost": 0.10, "max_schema_revisions": 3}
+    data["gatekeeper"] = {"alias": "gatekeeper", "jid": "gk@localhost"}
+    data["agents"] = [
+        {
+            "alias": "plan_maker_1", "jid": "pm@localhost", "role": "plan_maker",
+            "model": {"backend": "local", "name": "x"}, "prompt_version": "v1",
+            "knowledge": {"path": "package://marla/knowledge/nasimemu_rules.yaml", "version": "v1"},
+        }
+    ]
+    data["environment"]["scenario"] = ID_SCENARIO
+    config = parse_config(data)
+
+    # Confirm nothing above accidentally drifted from the real trial-22 values.
+    for field in ("gamma", "gae_lambda", "clip_epsilon", "epochs", "minibatch_sequences", "max_grad_norm"):
+        assert getattr(config.policy.ppo, field) == trial22_ppo[field], field
+    assert config.policy.ppo.optimizer.learning_rate == trial22_ppo["optimizer"]["learning_rate"]
+    assert config.policy.recurrent.visible_target_progress is True
+    assert config.policy.recurrent.visible_subnet_exploration is False
+
+    policy = RecurrentPolicy(config.policy, consultation_enabled=True)
+    from marla.scenarios.uri import resolve_scenario_reference
+
+    scenario_path = resolve_scenario_reference(config.environment.scenario, REPO_ROOT)
+    adapter = NasimEmuAdapter(
+        scenario=scenario_path, max_episode_steps=config.environment.max_episode_steps,
+        completion_reward=config.objective.completion_reward,
+        premature_finish_penalty=config.objective.premature_finish_penalty,
+    )
+    collector = RolloutCollector(
+        adapter, policy, run_id="trial22-identity-test", base_seed=DIAGNOSTIC_SEED_TRIAL22,
+        consultation_enabled=True, consultation_cost=config.consultation.cost, consult_fn=_scripted_consult,
+        overrides=EvaluationOverrides(query_mode="always"),
+    )
+    records, _summaries = await collector.collect(config.policy.ppo.steps_per_env)
+    queried = [r for r in records if r.sampled_query]
+    assert queried, "expected at least one queried transition"
+
+    chunks = build_sequence_chunks(records, [0.0] * len(records), [0.0] * len(records), sequence_length=config.policy.recurrent.sequence_length)
+    device = torch.device("cpu")
+
+    all_switches: list[bool] = []
+    for chunk in chunks:
+        replay = _replay_chunk(policy, chunk, device, consultation_cost=config.consultation.cost)
+        for i, record in enumerate(chunk.records):
+            assert torch.isclose(
+                replay.new_joint_log_probs[i], torch.tensor(record.old_joint_log_probability), atol=1e-5, rtol=1e-4
+            ), f"replay log-prob diverged from old_joint_log_probability at theta_old (trial-22 config) for record {i}"
+        all_switches.extend(replay.route_switches)
+
+    if all_switches:
+        assert not any(all_switches), "route-switch rate must be exactly zero when replaying at theta_old"
 
 
 # --- 4/5. Deterministic route-switch mechanism check ------------------------
