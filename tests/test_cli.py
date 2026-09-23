@@ -22,7 +22,7 @@ def test_help():
 def test_version_command():
     result = runner.invoke(app, ["version"])
     assert result.exit_code == 0
-    assert "marla 0.9.0" in result.output
+    assert "marla 0.10.0" in result.output
 
 
 def test_validate_baseline_ok(baseline_config_path):
