@@ -116,7 +116,7 @@ policy:
     total_environment_steps: 10000
     steps_per_env: 512        # environment transitions collected per stream per PPO update
     epochs: 4                 # PPO passes over each collected rollout
-    minibatch_sequences: 8    # sequence chunks per gradient step
+    minibatch_sequences: 8    # minibatch = minibatch_sequences * sequence_length REAL transitions
     gamma: 0.99                # discount factor, 0 < gamma <= 1
     gae_lambda: 0.95            # GAE lambda, 0 <= lambda <= 1
     clip_epsilon: 0.2           # PPO clipping range, > 0

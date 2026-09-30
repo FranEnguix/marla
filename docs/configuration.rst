@@ -260,7 +260,18 @@ policy
     PPO update, PER environment stream -- the effective batch size across
     all streams is ``num_envs * steps_per_env``.
   - ``epochs`` (int > 0): PPO passes over each collected batch.
-  - ``minibatch_sequences`` (int > 0): sequence chunks per gradient step.
+  - ``minibatch_sequences`` (int > 0): sets the minibatch size in REAL
+    transitions, ``minibatch_sequences * policy.recurrent.sequence_length``
+    (the capacity of that many full-length sequence chunks). Each epoch
+    shuffles whole chunks (a chunk never spans an episode and keeps its
+    stored initial hidden state) and groups them into
+    ``ceil(real_transitions / capacity)`` minibatches of approximately equal
+    real-transition count, so the number of gradient steps per update does
+    not depend on how fragmented the rollout's episodes are. Every real
+    transition is used exactly once per epoch. Before v0.11.0 a minibatch
+    was a fixed ``minibatch_sequences`` CHUNKS, so rollouts of very short
+    episodes (one chunk per episode) ran up to ``sequence_length`` times
+    more gradient steps on proportionally smaller minibatches.
   - ``gamma`` (0 < float <= 1): discount factor.
   - ``gae_lambda`` (0 <= float <= 1): GAE lambda.
   - ``clip_epsilon`` (float > 0): PPO clipping range.

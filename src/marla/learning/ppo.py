@@ -12,7 +12,9 @@ the assisted variant, the exact stored Plan Maker confidence vector is
 reused verbatim; the Plan Maker itself is never re-invoked during replay.
 
 Sequences are batched and shuffled as whole units (never individual
-transitions), and each chunk stays within one episode by construction, so
+transitions) into minibatches sized by REAL transition count
+(:func:`partition_minibatches`, v0.11.0), and each chunk stays within one
+episode by construction, so
 there is no cross-episode hidden-state leakage to mask out. Because MARLA
 does not vectorize environments, chunks are replayed one at a time rather
 than as a single padded tensor -- correctness first, matching the project's
@@ -94,6 +96,49 @@ def build_sequence_chunks(
         )
         start = end
     return chunks
+
+
+def partition_minibatches(
+    chunks: list[SequenceChunk], order: list[int], minibatch_sequences: int, sequence_length: int
+) -> list[list[int]]:
+    """Split the (already shuffled) chunk ``order`` into minibatches of
+    approximately equal REAL-transition count (v0.11.0).
+
+    The minibatch capacity is ``minibatch_sequences * sequence_length`` real
+    transitions -- the most a v0.10.x minibatch of ``minibatch_sequences``
+    full-length chunks could hold. The number of minibatches per epoch is
+    ``ceil(total_real_transitions / capacity)``, which depends only on how
+    many real transitions the rollout has, never on how fragmented its
+    episodes are. v0.10.x instead took a fixed ``minibatch_sequences``
+    CHUNKS per minibatch, so a rollout of 1-step episodes (one chunk per
+    transition) ran up to ``sequence_length``x more optimizer steps than
+    the same number of transitions in long episodes.
+
+    ``order`` is cut into contiguous, non-empty groups: each chunk goes, whole,
+    to the group whose real-transition interval contains the chunk's
+    midpoint. Chunks are never split, merged or reordered, so episode
+    boundaries, stored initial hidden states, per-chunk replay order, old
+    log-probabilities and GAE targets are all exactly as before; every chunk
+    (hence every real transition) appears in exactly one group. When all
+    chunks are full-length and their count is a multiple of
+    ``minibatch_sequences``, the groups coincide exactly with v0.10.x's
+    fixed-count slices.
+    """
+    if minibatch_sequences < 1 or sequence_length < 1:
+        raise ValueError("minibatch_sequences and sequence_length must be >= 1")
+    total = sum(len(chunks[i].records) for i in order)
+    if total == 0:
+        return []
+    num_minibatches = -(-total // (minibatch_sequences * sequence_length))
+    groups: list[list[int]] = [[] for _ in range(num_minibatches)]
+    cumulative = 0
+    for i in order:
+        n = len(chunks[i].records)
+        # floor(midpoint * K / total), in exact integer arithmetic.
+        group = min(num_minibatches - 1, ((2 * cumulative + n) * num_minibatches) // (2 * total))
+        groups[group].append(i)
+        cumulative += n
+    return [g for g in groups if g]
 
 
 def _bernoulli_entropy(probability: Tensor) -> Tensor:
@@ -401,8 +446,8 @@ def critic_refinement(
     for epoch in range(1, critic_refinement_epochs + 1):
         order = list(range(len(chunks)))
         rng.shuffle(order)
-        for minibatch_index, start in enumerate(range(0, len(order), minibatch_sequences), start=1):
-            batch_indices = order[start : start + minibatch_sequences]
+        batches = partition_minibatches(chunks, order, minibatch_sequences, sequence_length)
+        for minibatch_index, batch_indices in enumerate(batches, start=1):
             minibatch = [chunks[i] for i in batch_indices]
             update_metrics = critic_refinement_update(policy, optimizer, minibatch, max_grad_norm, device)
             update_metrics["critic_refinement_epoch"] = epoch
@@ -562,8 +607,9 @@ def ppo_update(
     action_entropies = torch.cat(action_entropy_parts)
 
     # Advantage normalization audit (spec section 19): this happens HERE,
-    # per PPO minibatch (i.e. over exactly the `minibatch_sequences` chunks
-    # -- typically a few hundred timesteps, not the whole rollout), on the
+    # per PPO minibatch (i.e. over exactly the chunks partition_minibatches
+    # grouped together -- about minibatch_sequences * sequence_length real
+    # timesteps, not the whole rollout), on the
     # concatenation of every timestep from every chunk in this minibatch.
     # There is no padding/masking step anywhere in this module: chunks are
     # ragged (0 < len <= sequence_length) and replayed one real timestep at
@@ -700,15 +746,22 @@ def optimize(
     rng: random.Random,
     consultation_cost: float = 0.0,
 ) -> list[dict[str, float]]:
-    """Runs ``ppo_config.epochs`` passes of shuffled-minibatch updates over the rollout."""
+    """Runs ``ppo_config.epochs`` passes of shuffled-minibatch updates over the rollout.
+
+    Each epoch shuffles whole chunks, then groups them into minibatches of
+    approximately ``minibatch_sequences * sequence_length`` REAL transitions
+    (:func:`partition_minibatches`), so optimizer steps per update do not
+    scale with episode fragmentation. Every real transition is used exactly
+    once per epoch.
+    """
     chunks = build_sequence_chunks(records, advantages, returns, sequence_length)
     metrics: list[dict[str, float]] = []
 
     for epoch in range(1, ppo_config.epochs + 1):
         order = list(range(len(chunks)))
         rng.shuffle(order)
-        for minibatch_index, start in enumerate(range(0, len(order), minibatch_sequences), start=1):
-            batch_indices = order[start : start + minibatch_sequences]
+        batches = partition_minibatches(chunks, order, minibatch_sequences, sequence_length)
+        for minibatch_index, batch_indices in enumerate(batches, start=1):
             minibatch = [chunks[i] for i in batch_indices]
             update_metrics = ppo_update(policy, optimizer, minibatch, ppo_config, device, consultation_cost)
             update_metrics["epoch"] = epoch

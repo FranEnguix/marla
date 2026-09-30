@@ -237,6 +237,9 @@ class PPOConfig(MarlaBaseModel):
     # `effective_batch_size` below.
     steps_per_env: int = Field(gt=0)
     epochs: int = Field(gt=0)
+    # Minibatch size in REAL transitions is minibatch_sequences *
+    # policy.recurrent.sequence_length (v0.11.0; see
+    # marla.learning.ppo.partition_minibatches) -- not a fixed chunk count.
     minibatch_sequences: int = Field(gt=0)
     gamma: float = Field(gt=0, le=1)
     gae_lambda: float = Field(ge=0, le=1)
