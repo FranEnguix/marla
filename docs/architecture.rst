@@ -205,9 +205,26 @@ Execution modes
 
 Local (:mod:`marla.runtime.local`)
     Every configured agent runs in one process, one shared ``asyncio``
-    event loop, communicating over SPADE's embedded XMPP server
-    (``pyjabber``) -- still real SPADE messages, never direct Python calls
-    between agents. Zero external setup.
+    event loop, communicating through real SPADE messages over a real XMPP
+    server -- never direct Python calls between agents. Two transport
+    choices (``execution.embedded_xmpp_server``):
+
+    - **Embedded** (``true``, default): the process also starts SPADE's
+      embedded ``pyjabber`` server. Zero external setup.
+    - **External** (``false``): no server is started; the agents connect
+      to an already-running XMPP server (e.g. Prosody). Recommended for
+      long assisted runs.
+
+    Both are local execution: the same agents in the same process, the
+    same multi-environment collector (``num_envs > 1``), the same
+    ``--resume`` support, the same training semantics. Only the owner of
+    the XMPP server differs.
+
+    In every mode, SPADE connects each agent to its own JID's domain on
+    port 5222; ``xmpp.server`` never redirects a connection. In external
+    local mode, config validation requires each agent JID's domain to equal
+    ``xmpp.server`` so that the two cannot silently disagree (see
+    :doc:`configuration`).
 
 Distributed (:mod:`marla.runtime.distributed`)
     One ``marla run ... --agent <alias-or-jid>`` process per agent (or

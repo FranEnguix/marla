@@ -8,11 +8,21 @@ fail fast instead of being silently ignored.
 
 from __future__ import annotations
 
+import re
 from typing import Annotated, Literal, Union
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 SUPPORTED_CONFIG_SCHEMA_VERSIONS = ("1.0",)
+
+# A bare DNS name or IPv4 address -- the only xmpp.server forms compared
+# against agent JID domains (see Config._check_external_xmpp_jid_domains).
+_PLAIN_XMPP_DOMAIN = re.compile(r"[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)*")
+
+
+def _jid_domain(jid: str) -> str:
+    """Domain part of ``node@domain/resource`` (lowercased)."""
+    return jid.split("/", 1)[0].rpartition("@")[2].strip().lower()
 
 
 class MarlaBaseModel(BaseModel):
@@ -28,6 +38,18 @@ class ExperimentConfig(MarlaBaseModel):
 
 class ExecutionConfig(MarlaBaseModel):
     mode: Literal["local", "distributed"]
+    # Local mode only: whether ``marla run`` starts SPADE's embedded
+    # ``pyjabber`` server (True, the default -- zero-setup, identical to
+    # every release before this field existed) or connects every agent to
+    # an already-running external XMPP server instead (False -- e.g.
+    # Prosody, recommended for long assisted runs, see the README's
+    # embedded-server limitation). Either way every configured agent still
+    # runs in this one process; only who owns the XMPP server changes.
+    # Ignored in distributed mode, which never starts an embedded server.
+    # config_hash omits the default True (so pre-existing configs keep
+    # their exact hash) but includes False (see
+    # marla.config.loader.config_hash).
+    embedded_xmpp_server: bool = True
 
 
 class XmppConfig(MarlaBaseModel):
@@ -447,6 +469,34 @@ class Config(MarlaBaseModel):
             raise ValueError(
                 f"policy.ppo.num_envs={self.policy.ppo.num_envs} > 1 requires execution.mode == 'local' -- "
                 "the multi-environment collector is not implemented for distributed mode."
+            )
+        return self
+
+    @model_validator(mode="after")
+    def _check_external_xmpp_jid_domains(self) -> "Config":
+        # SPADE connects every agent to its OWN JID's domain (port 5222);
+        # xmpp.server is never used to route a connection. With an external
+        # server in local mode, a JID domain that differs from xmpp.server
+        # would therefore silently connect that agent somewhere other than
+        # the server the config names -- rejected here instead. Only a
+        # plain hostname/IPv4 xmpp.server is compared; any other form
+        # (host:port, IPv6, ...) is left unvalidated rather than guessed at.
+        if self.execution.mode != "local" or self.execution.embedded_xmpp_server:
+            return self
+        server = self.xmpp.server.strip().lower()
+        if not _PLAIN_XMPP_DOMAIN.fullmatch(server):
+            return self
+        identities = [self.rl_orchestrator, *([self.gatekeeper] if self.gatekeeper else []), *self.agents]
+        mismatched = [
+            f"{identity.alias} ({identity.jid})"
+            for identity in identities
+            if _jid_domain(identity.jid) != server
+        ]
+        if mismatched:
+            raise ValueError(
+                f"execution.embedded_xmpp_server=false: every agent JID's domain must equal xmpp.server "
+                f"({self.xmpp.server!r}) -- SPADE connects each agent to its own JID's domain, not to "
+                f"xmpp.server. Mismatched: {', '.join(mismatched)}"
             )
         return self
 

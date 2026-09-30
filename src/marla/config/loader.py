@@ -129,6 +129,19 @@ def redacted_config_dict(config: Config) -> dict[str, Any]:
 
 
 def config_hash(config: Config) -> str:
-    """Stable SHA-256 hash of the resolved configuration, for metadata.json."""
-    canonical = json.dumps(config.model_dump(mode="json"), sort_keys=True, separators=(",", ":"))
+    """Stable SHA-256 hash of the resolved configuration, for metadata.json.
+
+    ``execution.embedded_xmpp_server`` is dropped from the hashed form only
+    when it is ``True`` -- the backward-compatible default -- so a config
+    that omits the field, or sets it to ``true``, hashes exactly as it did
+    before the field existed. ``False`` (an external XMPP server) is
+    hashed, so a run over external XMPP never shares a hash with the
+    otherwise-identical embedded-server run: transport ownership is part of
+    a run's provenance (wall-clock, failure behavior) even though it does
+    not change decision or learning semantics.
+    """
+    dumped = config.model_dump(mode="json")
+    if dumped["execution"].get("embedded_xmpp_server") is True:
+        del dumped["execution"]["embedded_xmpp_server"]
+    canonical = json.dumps(dumped, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()

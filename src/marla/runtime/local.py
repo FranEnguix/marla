@@ -2,9 +2,12 @@
 
 All configured agents run in one Python process, started from one
 ``spade.run()`` main function, sharing one asyncio event loop -- but they
-still communicate exclusively through real SPADE messages over a real (here,
-embedded) XMPP server, never through direct Python method calls between
-agents.
+still communicate exclusively through real SPADE messages over a real XMPP
+server, never through direct Python method calls between agents. That
+server is either SPADE's embedded ``pyjabber`` (the default) or, with
+``execution.embedded_xmpp_server: false``, an external one (e.g. Prosody)
+that each agent reaches through its own JID domain -- only server ownership
+differs, never which agents run here or how they behave.
 """
 
 from __future__ import annotations
@@ -246,6 +249,11 @@ def run_local(
     aamas2027's staged training) -- ``num_rollouts`` here must already be
     computed as the *remaining* rollouts to the config's target step count,
     not the full target (see cli.py's ``run`` command).
+
+    ``embedded_xmpp_server``: passed straight to ``spade.run()`` -- ``marla
+    run`` supplies ``config.execution.embedded_xmpp_server``. ``False``
+    starts no ``pyjabber`` server; agents then need an external XMPP server
+    already serving their JID domain(s) on port 5222.
 
     SPADE's ``Container`` is a process-wide singleton, and its event loop is
     closed at the end of ``spade.run()`` -- calling ``run_local`` more than

@@ -47,6 +47,14 @@ experiment:
 
 execution:
   mode: local  # local | distributed -- see baseline.yaml's comment
+  # true (default) starts SPADE's embedded pyjabber server: zero setup, but
+  # it has a known presence-subscription race with the three assisted-mode
+  # agents (see the README's embedded-server section). For long assisted
+  # runs set this to false and run a real XMPP server (e.g. Prosody)
+  # serving the `localhost` domain used by the JIDs below, with those three
+  # accounts pre-created. Everything else -- one process, num_envs > 1,
+  # `marla run --resume` -- works identically either way.
+  embedded_xmpp_server: true
 
 # Left as `auto` here (unlike experiment_templates/assisted.yaml's
 # quickstart, which forces `cpu` for a first-run demo where GPU driver

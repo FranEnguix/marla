@@ -84,21 +84,70 @@ execution
 - ``mode``: ``local`` or ``distributed``.
 
   - ``local``: every configured agent runs in one process, one shared
-    ``asyncio`` event loop, over SPADE's embedded XMPP server. Zero
-    external setup; ``xmpp.server`` can just be ``localhost``.
+    ``asyncio`` event loop. Which XMPP server they talk through is set by
+    ``embedded_xmpp_server`` below.
   - ``distributed``: one ``marla run ... --agent <alias-or-jid>`` process
     per agent (or group of agents), connecting to a real, externally
     reachable XMPP server. Requires ``experiment.run_id``. See
     :doc:`architecture`'s distributed-mode section.
 
+- ``embedded_xmpp_server`` (bool, default ``true``; local mode only,
+  ignored in distributed mode): local mode's transport choice.
+
+  - ``true`` -- ``marla run`` starts SPADE's embedded ``pyjabber`` server
+    on ``localhost:5222``. Zero external setup; the behavior of every
+    config that omits this field. Fully reliable for the baseline variant;
+    see the README's known-limitations section for the assisted variant.
+  - ``false`` -- no embedded server is started. Every agent connects to an
+    external XMPP server (Prosody, ejabberd, ...) that must already be
+    running, serve the agents' JID domain on port 5222, and have their
+    accounts created with the passwords held in each ``password_env``
+    variable. Recommended for long assisted runs. Config validation then
+    requires every agent JID's domain to equal ``xmpp.server`` (see
+    `xmpp`_ below).
+
+  Either way this is still *local* execution: all agents run in this one
+  process, ``policy.ppo.num_envs > 1`` and ``marla run --resume`` work
+  exactly as before, and training decision/learning semantics are
+  identical -- only the owner of the XMPP server changes. It is not
+  distributed execution.
+
+  ``config_hash`` (``metadata.json``, checkpoints): the default ``true``
+  -- whether written explicitly or omitted -- is left out of the hash, so
+  every config written before this field existed keeps its exact hash.
+  ``false`` is hashed, so an external-XMPP run never shares a hash with
+  the otherwise-identical embedded-server run: transport ownership is part
+  of a run's provenance (wall-clock, failure behavior).
+
+  An embedded server cannot start while something else (e.g. Prosody)
+  already listens on ``localhost:5222`` -- stop that server, or set
+  ``false``.
+
 xmpp
 ~~~~
 
-- ``server`` (str, required): the XMPP domain/host every agent connects
-  to. ``localhost`` for local mode's embedded server; a real server
-  (Prosody, ejabberd, ...) for distributed mode, or for local *assisted*
-  runs that need better reliability than the embedded server currently
-  provides (see the repository README's known-limitations section).
+- ``server`` (str, required): the XMPP domain the agents' JIDs belong to
+  -- ``localhost`` for the embedded server, or the domain your external
+  server hosts.
+
+  This field does **not** redirect connections. SPADE connects each agent
+  to the host named by *its own JID's domain* (port 5222); ``xmpp.server``
+  is never used to choose where an agent connects. It is a declaration of
+  the domain the JIDs are expected to use:
+
+  - With ``execution.mode: local`` and ``embedded_xmpp_server: false``,
+    validation rejects any agent (``rl_orchestrator``, ``gatekeeper``,
+    every ``agents[]`` entry) whose JID domain differs from
+    ``xmpp.server`` (case-insensitive; a JID resource is ignored). This
+    check applies only when ``xmpp.server`` is a plain DNS name or IPv4
+    address; any other form (``host:port``, an IPv6 literal, a URL) is
+    not interpreted and is left unchecked.
+  - In embedded mode and in distributed mode the JIDs are not checked
+    against this field (unchanged behavior) -- keep them consistent
+    yourself.
+
+  To reach a server on another host, put that host's domain in the JIDs
+  (and here); DNS for that domain must resolve to the server.
 
 environment
 ~~~~~~~~~~~

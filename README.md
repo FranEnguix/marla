@@ -89,22 +89,56 @@ summarize` inspect a study without running anything. Requires the
 
 ## Known limitation: embedded XMPP server flakiness in assisted mode
 
-`execution: local` runs use SPADE's built-in embedded XMPP server
-(`pyjabber`) so `marla run` works with zero setup -- `xmpp.server` can just
-be `localhost`. For the **baseline** variant (no Gatekeeper/Plan Maker) this
-is fully reliable since there is no presence-subscription traffic at all.
+By default, `execution.mode: local` runs use SPADE's built-in embedded XMPP
+server (`pyjabber`) so `marla run` works with zero setup -- `xmpp.server`
+can just be `localhost`. For the **baseline** variant (no Gatekeeper/Plan
+Maker) this is fully reliable since there is no presence-subscription
+traffic at all.
 
 For the **assisted** variant, `pyjabber` has an observed race condition in
 its roster/presence-subscription handling: with 3+ agents connecting and
 subscribing to each other's presence, roughly 1-in-4 runs raise an
 unhandled `sqlite`/`asyncio` error during startup or (less harmfully)
 during shutdown after the run's actual result was already produced. This is
-a `pyjabber` robustness issue, not a MARLA correctness issue -- but for long
-real research runs where a crash mid-training would be costly, point
-`xmpp.server` at a real, separately-deployed XMPP server (e.g. Prosody or
-ejabberd) instead of relying on the embedded one. Distributed mode already
-requires a real reachable XMPP server, so this only matters for assisted
-*local* runs.
+a `pyjabber` robustness issue, not a MARLA correctness issue. On some
+dependency stacks `pyjabber` can also hang outright: it hashes login
+credentials in a forked worker process, and a fork taken while another
+library holds a lock (observed with `huggingface_hub`'s at-fork session
+cleanup) leaves that worker deadlocked, still holding port 5222.
+
+For long real research runs, keep local execution but use an external XMPP
+server instead of the embedded one:
+
+```yaml
+execution:
+  mode: local
+  embedded_xmpp_server: false   # default: true (embedded pyjabber)
+```
+
+With `embedded_xmpp_server: false`, `marla run` starts no XMPP server;
+every agent connects to an already-running server (e.g. Prosody or
+ejabberd) serving its JID domain on port 5222, using the accounts/passwords
+you created there (passwords still come from each agent's `password_env`).
+This is still local execution, not distributed mode: all agents run in the
+one `marla run` process, `policy.ppo.num_envs > 1` and `marla run --resume`
+work exactly as before, and training decision/learning semantics are
+unchanged -- only the owner of the XMPP server differs.
+
+Which server an agent reaches is decided by **its JID's domain**, not by
+`xmpp.server`: SPADE connects each agent to `<jid-domain>:5222`, and
+`xmpp.server` never redirects that connection. In external local mode,
+config validation therefore rejects any agent JID whose domain differs from
+`xmpp.server` (checked when `xmpp.server` is a plain hostname or IPv4
+address; other forms are not interpreted). For a local Prosody that serves
+`localhost`, the default `@localhost` JIDs and `xmpp.server: localhost`
+are all that is needed.
+
+The embedded server and an external server cannot both listen on port
+5222: stop the external server before any run (or test) that uses the
+embedded one. `embedded_xmpp_server: false` configs get a different
+`config_hash` from their embedded twin; the default `true` hashes exactly
+as configs did before this option existed. Distributed mode always
+requires a real reachable XMPP server and ignores this flag.
 
 The same `pyjabber` race shows up in **distributed** mode too, and more
 reliably, when run as a standalone (non-embedded) server: the full

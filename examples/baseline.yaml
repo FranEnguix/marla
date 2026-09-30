@@ -45,6 +45,12 @@ execution:
   # above) and a real, externally reachable XMPP server in `xmpp.server`
   # below instead of `localhost`.
   mode: local
+  # Local mode only. true (default): start SPADE's embedded pyjabber server
+  # on localhost:5222 -- zero setup, and fully reliable for this baseline
+  # variant. false: start no server and connect every agent (still all in
+  # this one process) to an already-running external XMPP server, e.g.
+  # Prosody, reached through each agent's JID domain -- see assisted.yaml.
+  embedded_xmpp_server: true
 
 # cpu | gpu | auto. `auto` uses CUDA if it initializes successfully, else
 # CPU -- safe to leave as `auto` for the baseline variant (unlike the

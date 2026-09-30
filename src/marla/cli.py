@@ -284,6 +284,10 @@ def run(
             )
         else:
             typer.echo(f"Starting local {config.consultation.mode} run: {num_rollouts} rollout(s) of {batch_size} steps each.")
+        if config.execution.embedded_xmpp_server:
+            typer.echo("XMPP: embedded pyjabber server (localhost:5222), started by this process.")
+        else:
+            typer.echo("XMPP: external server (embedded server disabled); agents connect to their JID domains.")
         start_time = datetime.now(timezone.utc)
         # Spec section 2: resolved config, provisional metadata.json, and
         # every metrics CSV's header row exist before a single environment
@@ -296,6 +300,7 @@ def run(
             orchestrator = run_local(
                 config, config_path.parent, num_rollouts=num_rollouts, debug=debug,
                 resume_from=resume, run_dir=run_dir,
+                embedded_xmpp_server=config.execution.embedded_xmpp_server,
             )
         except LocalRunError as exc:
             finalize_run_directory(
