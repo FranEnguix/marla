@@ -31,6 +31,7 @@ from marla.environment.nasimemu_adapter import NasimEmuAdapter
 from marla.evaluation.advisory_cache import AdvisoryCache
 from marla.evaluation.direct_consult import DirectConsultant
 from marla.evaluation.overrides import EvaluationOverrides
+from marla.evaluation.sampling import EVALUATION_RNG_SCHEME, EvaluationPolicyMode, EvaluationSampler
 from marla.learning.checkpoint import load_checkpoint
 from marla.learning.recurrent_policy import RecurrentPolicy
 from marla.learning.rollout import ConsultFn, EpisodeSummary, RolloutCollector, StepRecord
@@ -49,6 +50,30 @@ class EvaluationRunResult:
     num_episodes: int
     cache_hits: int = 0
     cache_misses: int = 0
+    evaluation_policy_mode: EvaluationPolicyMode = EvaluationPolicyMode.GREEDY
+    # STOCHASTIC_POLICY only (None under GREEDY, which draws nothing): the
+    # sampling scheme, the agent seed its streams were derived from, and
+    # how many query/action draws the whole collection window made
+    # (including any episode past num_episodes that collect()'s step
+    # budget started and that was then discarded below).
+    rng_scheme: str | None = None
+    rng_agent_seed: int | None = None
+    rng_draws: dict[str, int] | None = None
+
+    def evaluation_metadata(self) -> dict:
+        """Self-describing evaluation metadata for artifacts (eval_meta.json etc.)."""
+        seeds = [s.seed for s in self.summaries]
+        return {
+            "evaluation_policy_mode": self.evaluation_policy_mode.value,
+            "evaluation_seed_start": self.seed_start,
+            "evaluation_num_episodes": self.num_episodes,
+            "evaluation_seeds": [min(seeds), max(seeds)] if seeds else None,
+            "rng_scheme": self.rng_scheme,
+            "rng_agent_seed": self.rng_agent_seed,
+            "rng_draws": dict(self.rng_draws) if self.rng_draws is not None else None,
+            "consultation_enabled": self.consultation_enabled,
+            "scenario": self.scenario,
+        }
 
 
 def load_run_config(run_dir: Path) -> Config:
@@ -92,12 +117,22 @@ def build_policy(
     a policy purely as a logging scaffold (see overrides.PLAN_MAKER_ONLY):
     action selection never consults it, so using an untrained network
     removes any ambiguity about whether RL learning influenced that
-    condition."""
+    condition.
+
+    When loading a checkpoint, the throwaway random initialization (about
+    to be overwritten by the saved weights) is drawn inside
+    ``torch.random.fork_rng``, so loading a policy for evaluation never
+    advances the caller's global torch RNG (v0.11.0; earlier versions did,
+    with no effect on the evaluated weights or trajectories)."""
     if seed is not None:
         torch.manual_seed(seed)
-    policy = RecurrentPolicy(config.policy, consultation_enabled=consultation_enabled).to(device)
     if checkpoint_path is not None:
+        with torch.random.fork_rng(devices=[]):
+            policy = RecurrentPolicy(config.policy, consultation_enabled=consultation_enabled)
+        policy = policy.to(device)
         load_checkpoint(checkpoint_path, policy, optimizer=None, map_location=device)
+    else:
+        policy = RecurrentPolicy(config.policy, consultation_enabled=consultation_enabled).to(device)
     policy.eval()
     return policy
 
@@ -112,15 +147,27 @@ async def evaluate_checkpoint(
     policy_override: RecurrentPolicy | None = None,
     advisory_cache_path: Path | None = None,
     run_id: str | None = None,
+    policy_mode: EvaluationPolicyMode | str = EvaluationPolicyMode.GREEDY,
 ) -> EvaluationRunResult:
     """Evaluate ``run_dir``'s checkpoint (or ``policy_override``, for a
-    scaffold that was never trained) on ``num_episodes`` deterministic
-    episodes starting at seed ``seed_start`` (a contiguous range --
+    scaffold that was never trained) on ``num_episodes`` episodes starting
+    at seed ``seed_start`` (a contiguous range --
     ``RolloutCollector`` increments its own seed counter by 1 per episode,
     exactly matching how every other MARLA eval seed set in this program is
     specified). No optimizer is constructed; nothing here calls
     ``.backward()``/``.step()``.
+
+    ``policy_mode`` (evaluation invocation metadata, never part of the
+    run's config/config_hash): ``GREEDY`` (default; identical to every
+    earlier release) or ``STOCHASTIC_POLICY`` (sample the learned policy
+    with explicit, reproducible streams derived from the run's
+    ``experiment.seed`` and each episode's seed -- see
+    :mod:`marla.evaluation.sampling`). ``overrides`` keep precedence in
+    both modes: NO_QUERY/ALWAYS_QUERY force the query decision,
+    BETA_ZERO/BETA_ONE change the final logits that are then argmaxed or
+    sampled, and PLAN_MAKER_ONLY always selects by Plan Maker argmax.
     """
+    mode = EvaluationPolicyMode(policy_mode)
     config = load_run_config(run_dir)
     resolved_device = resolve_device(device)
     consultation_enabled = config.consultation.mode == "learned"
@@ -156,6 +203,12 @@ async def evaluate_checkpoint(
         consultant = _build_consult_fn(config, resolved_run_id, device, cache)
         consult_fn = consultant
 
+    sampler = (
+        EvaluationSampler(agent_seed=config.experiment.seed)
+        if mode is EvaluationPolicyMode.STOCHASTIC_POLICY
+        else None
+    )
+
     collector = RolloutCollector(
         adapter=adapter,
         policy=policy,
@@ -164,8 +217,9 @@ async def evaluate_checkpoint(
         consultation_enabled=consultation_enabled,
         consultation_cost=config.consultation.cost,
         consult_fn=consult_fn,
-        deterministic=True,
+        deterministic=mode is EvaluationPolicyMode.GREEDY,
         overrides=overrides,
+        evaluation_sampler=sampler,
     )
     with torch.no_grad():
         records, summaries = await collector.collect(num_episodes * adapter.max_episode_steps)
@@ -189,4 +243,8 @@ async def evaluate_checkpoint(
         num_episodes=num_episodes,
         cache_hits=consultant.cache_hits if consultant is not None else 0,
         cache_misses=consultant.cache_misses if consultant is not None else 0,
+        evaluation_policy_mode=mode,
+        rng_scheme=EVALUATION_RNG_SCHEME if sampler is not None else None,
+        rng_agent_seed=sampler.agent_seed if sampler is not None else None,
+        rng_draws=dict(sampler.draws) if sampler is not None else None,
     )

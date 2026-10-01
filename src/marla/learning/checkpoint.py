@@ -34,6 +34,7 @@ import torch
 
 from marla.environment.consultation_scope import CONSULTATION_SCOPE_VERSION
 from marla.learning.action_encoder import POLICY_REPRESENTATION_VERSION
+from marla.learning.ppo import TRAINING_SEMANTICS_VERSION
 from marla.learning.recurrent_policy import RecurrentPolicy
 
 
@@ -73,6 +74,39 @@ class CheckpointResumeError(Exception):
     goal (research-alpha policy) -- such a checkpoint can still be loaded
     for plain evaluation (``restore_rng_state=False``), just not resumed.
     """
+
+
+class TrainingSemanticsMismatchError(CheckpointResumeError):
+    """Raised when RESUMING training (``restore_rng_state=True``) from a
+    checkpoint saved under a different PPO ``training_semantics_version``
+    (see :data:`marla.learning.ppo.TRAINING_SEMANTICS_VERSION`) -- e.g. a
+    v0.10.x checkpoint (no recorded version: fixed-chunk-count minibatches)
+    resumed under v0.11.0's real-transition minibatching. Weight shapes are
+    identical, so ``load_state_dict`` alone would succeed and silently
+    continue one run under two different optimization procedures. Never
+    raised for a plain evaluation load: evaluation does not optimize, so the
+    same checkpoint still evaluates normally.
+    """
+
+
+def check_training_semantics_resumable(saved_version: int | None, path: str | Path) -> None:
+    """Raise :class:`TrainingSemanticsMismatchError` unless ``saved_version``
+    (a checkpoint's recorded ``training_semantics_version``; ``None`` for a
+    checkpoint saved before the field existed) equals this build's
+    :data:`TRAINING_SEMANTICS_VERSION`. Shared by :func:`load_checkpoint`'s
+    resume branch and ``marla run --resume``'s early pre-flight check.
+    """
+    if saved_version != TRAINING_SEMANTICS_VERSION:
+        raise TrainingSemanticsMismatchError(
+            f"Checkpoint {path} was saved under training_semantics_version={saved_version!r} "
+            "(None means a checkpoint saved before this field existed, i.e. MARLA v0.10.x or "
+            "earlier, whose PPO minibatches were a fixed number of sequence CHUNKS), but this "
+            f"build of MARLA trains with training_semantics_version={TRAINING_SEMANTICS_VERSION} "
+            "(minibatches of approximately minibatch_sequences * sequence_length REAL "
+            "transitions, v0.11.0). Resuming would continue one run under two different PPO "
+            "optimization procedures, so it is refused. The checkpoint can still be loaded for "
+            "evaluation; to train under the current semantics, start a new run."
+        )
 
 
 @dataclass(frozen=True)
@@ -127,6 +161,10 @@ class CheckpointMetadata:
     scheduler_config: dict[str, Any] | None = None
     scheduler_state_dict: dict[str, Any] | None = None
     learning_rate: float | None = None
+    # PPO optimization-semantics version (marla.learning.ppo
+    # .TRAINING_SEMANTICS_VERSION); None for a checkpoint saved before the
+    # field existed (v0.10.x and earlier). Enforced only on resume.
+    training_semantics_version: int | None = None
 
 
 def save_checkpoint(
@@ -178,6 +216,7 @@ def save_checkpoint(
             "scheduler_config": scheduler_config,
             "scheduler_state_dict": scheduler.state_dict() if scheduler is not None else None,
             "learning_rate": optimizer.param_groups[0]["lr"],
+            "training_semantics_version": TRAINING_SEMANTICS_VERSION,
         },
         path,
     )
@@ -204,6 +243,7 @@ def peek_checkpoint_metadata(path: str | Path) -> CheckpointMetadata:
         scheduler_config=data.get("scheduler_config"),
         scheduler_state_dict=data.get("scheduler_state_dict"),
         learning_rate=data.get("learning_rate"),
+        training_semantics_version=data.get("training_semantics_version"),
     )
 
 
@@ -224,7 +264,10 @@ def load_checkpoint(
     :class:`CheckpointResumeError` rather than silently starting the LR
     schedule over (research-alpha policy: no old-checkpoint compatibility
     shims for resume; a plain, non-resuming evaluation load of the same
-    checkpoint still works).
+    checkpoint still works). A resume additionally requires the
+    checkpoint's ``training_semantics_version`` to match this build's
+    (:class:`TrainingSemanticsMismatchError` otherwise -- e.g. any v0.10.x
+    checkpoint); evaluation loads never check it.
     """
     data = torch.load(Path(path), map_location=map_location, weights_only=False)
 
@@ -283,6 +326,11 @@ def load_checkpoint(
             "or evaluated as MARLA_FULL under the new architecture -- retrain from scratch."
         )
 
+    # Resume-only: evaluation never optimizes, so an older checkpoint's
+    # optimization semantics are irrelevant to it and it still loads.
+    if restore_rng_state:
+        check_training_semantics_resumable(data.get("training_semantics_version"), path)
+
     scheduler_state_dict = data.get("scheduler_state_dict")
     if restore_rng_state and scheduler_state_dict is None:
         raise CheckpointResumeError(
@@ -319,4 +367,5 @@ def load_checkpoint(
         scheduler_config=data.get("scheduler_config"),
         scheduler_state_dict=scheduler_state_dict,
         learning_rate=data.get("learning_rate"),
+        training_semantics_version=data.get("training_semantics_version"),
     )

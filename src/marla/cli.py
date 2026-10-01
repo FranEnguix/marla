@@ -249,7 +249,11 @@ def run(
     if config.execution.mode == "local":
         import math
 
-        from marla.learning.checkpoint import peek_checkpoint_metadata
+        from marla.learning.checkpoint import (
+            TrainingSemanticsMismatchError,
+            check_training_semantics_resumable,
+            peek_checkpoint_metadata,
+        )
         from marla.metrics.writer import finalize_run_directory, initialize_run_directory
         from marla.runtime.local import LocalRunError, resolve_run_dir, run_local
 
@@ -260,7 +264,16 @@ def run(
             if not resume.is_file():
                 typer.secho(f"--resume checkpoint not found: {resume}", fg=typer.colors.RED, err=True)
                 raise typer.Exit(code=1)
-            already_done = peek_checkpoint_metadata(resume).environment_steps
+            resume_metadata = peek_checkpoint_metadata(resume)
+            # Pre-flight: refuse a checkpoint trained under different PPO
+            # optimization semantics (e.g. v0.10.x) before any run directory
+            # is touched; load_checkpoint re-checks this on the actual resume.
+            try:
+                check_training_semantics_resumable(resume_metadata.training_semantics_version, resume)
+            except TrainingSemanticsMismatchError as exc:
+                typer.secho(str(exc), fg=typer.colors.RED, err=True)
+                raise typer.Exit(code=1) from exc
+            already_done = resume_metadata.environment_steps
             if already_done >= ppo.total_environment_steps:
                 typer.secho(
                     f"--resume checkpoint already has {already_done} environment steps, "

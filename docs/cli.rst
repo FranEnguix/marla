@@ -65,7 +65,16 @@ Runs an experiment.
   saved before the action/target compatibility features existed) raises
   :class:`marla.learning.checkpoint.PolicyRepresentationMismatchError`
   loudly, before any weights are touched, rather than silently partially
-  loading a shape-incompatible ``ActionEncoder``.
+  loading a shape-incompatible ``ActionEncoder``. Likewise, every
+  checkpoint records the PPO ``training_semantics_version``
+  (:data:`marla.learning.ppo.TRAINING_SEMANTICS_VERSION`; ``2`` since
+  v0.11.0, whose minibatches hold a fixed number of real transitions
+  rather than a fixed number of sequence chunks). ``--resume`` refuses a
+  checkpoint saved under different training semantics, including every
+  v0.10.x checkpoint, which has no such field, with
+  :class:`marla.learning.checkpoint.TrainingSemanticsMismatchError` before
+  any run directory is created. Weight shapes are unaffected, so the same
+  checkpoint still loads for evaluation.
 
 Before any agent -- RL Orchestrator, Gatekeeper, Plan Maker, or the
 embedded XMPP server -- is started, ``marla run`` resolves the configured

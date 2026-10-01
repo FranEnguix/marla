@@ -38,6 +38,7 @@ from marla.environment.visible_facts import (
     extract_visible_network_exploration,
 )
 from marla.evaluation.overrides import EvaluationOverrides
+from marla.evaluation.sampling import EvaluationSampler
 from marla.messaging import telemetry
 from marla.learning.decision import (
     FinalDecision,
@@ -277,8 +278,9 @@ class EpisodeSummary:
     # (successful_finish) where both exist -- see spec section 5. Not
     # meaningful (left None) for a premature finish or a timeout.
     finish_delay_steps: int | None = None
-    # True for a deterministic (greedy) evaluation episode from
-    # run_evaluation_episodes, contributing nothing to the PPO buffer.
+    # True for an evaluation episode -- deterministic (greedy, e.g. from
+    # run_evaluation_episodes) or STOCHASTIC_POLICY evaluation with an
+    # explicit EvaluationSampler -- contributing nothing to the PPO buffer.
     # False for an ordinary stochastic training episode.
     is_eval: bool = False
     # True the moment adapter.objective_satisfied() ever becomes True
@@ -326,6 +328,7 @@ class RolloutCollector:
         overrides: EvaluationOverrides | None = None,
         episode_id_offset: int = 0,
         env_index: int | None = None,
+        evaluation_sampler: EvaluationSampler | None = None,
     ) -> None:
         """``episode_id_offset``/``env_index``: multi-environment PPO
         collection support (spec: the 2048-transition, 4-independent-
@@ -348,9 +351,19 @@ class RolloutCollector:
         ``env_index`` is purely a diagnostic/reporting field (per-
         environment metrics, spec section 41) -- no GAE, chunking, or PPO
         logic ever reads it.
+
+        ``evaluation_sampler``: STOCHASTIC_POLICY evaluation only (see
+        :mod:`marla.evaluation.sampling`). When given, every query/action
+        draw this collector makes comes from the sampler's explicit
+        per-episode streams instead of torch's global RNG; the
+        distributions sampled from are unchanged. ``None`` (training, and
+        GREEDY evaluation) leaves behavior exactly as before. Mutually
+        exclusive with ``deterministic=True``.
         """
         if consultation_enabled and consult_fn is None:
             raise ValueError("consult_fn is required when consultation_enabled=True")
+        if deterministic and evaluation_sampler is not None:
+            raise ValueError("evaluation_sampler (stochastic evaluation) cannot be combined with deterministic=True")
 
         self._adapter = adapter
         self._policy = policy
@@ -371,6 +384,7 @@ class RolloutCollector:
         self._fallback_rng = random.Random(overrides.fallback_rng_seed) if overrides is not None else None
         self._episode_id_offset = episode_id_offset
         self._env_index = env_index
+        self._evaluation_sampler = evaluation_sampler
 
         self._episode_id = episode_id_offset
         self._state: EnvironmentState | None = None
@@ -406,6 +420,8 @@ class RolloutCollector:
         self._rstate = self._policy.initial_recurrent_state()
         self._episode_id += 1
         self._episode_seed = seed
+        if self._evaluation_sampler is not None:
+            self._evaluation_sampler.start_episode(seed)
         self._episode_start_time = time.monotonic()
         self._episode_nasimemu_return = 0.0
         self._episode_training_return = 0.0
@@ -656,7 +672,7 @@ class RolloutCollector:
                         consultation_count=self._episode_consultation_count,
                         consultation_cost=self._episode_consultation_cost_total,
                         schema_rejection_count=self._episode_schema_rejection_count,
-                        is_eval=self._deterministic,
+                        is_eval=self._deterministic or self._evaluation_sampler is not None,
                         objective_reached=objective_reached,
                         successful_finish=successful_finish,
                         episode_success=successful_finish,
@@ -682,7 +698,14 @@ class RolloutCollector:
         if not self._consultation_enabled:
             probs = step_out.base_probs.detach()
             distribution = torch.distributions.Categorical(probs=probs)
-            sampled = probs.argmax() if self._deterministic else distribution.sample()
+            if self._deterministic:
+                sampled = probs.argmax()
+            elif self._evaluation_sampler is not None:
+                sampled = torch.tensor(
+                    self._evaluation_sampler.sample_action(distribution.probs), dtype=torch.long, device=probs.device
+                )
+            else:
+                sampled = distribution.sample()
             action_index = int(sampled.item())
             action_log_prob = float(distribution.log_prob(sampled))
             return {
@@ -722,6 +745,9 @@ class RolloutCollector:
             sampled_query = True
         elif self._deterministic:
             sampled_query = bool(query_probability.detach().item() >= 0.5)
+        elif self._evaluation_sampler is not None:
+            query_dist = torch.distributions.Bernoulli(probs=query_probability.detach())
+            sampled_query = self._evaluation_sampler.sample_query(query_dist.probs)
         else:
             query_dist = torch.distributions.Bernoulli(probs=query_probability.detach())
             sampled_query = bool(query_dist.sample().item())
@@ -835,6 +861,9 @@ class RolloutCollector:
             final_probs = torch.softmax(final_decision.final_logits.detach(), dim=-1)
             if self._deterministic:
                 action_index = int(final_probs.argmax().item())
+            elif self._evaluation_sampler is not None:
+                action_dist = torch.distributions.Categorical(probs=final_probs)
+                action_index = self._evaluation_sampler.sample_action(action_dist.probs)
             else:
                 action_dist = torch.distributions.Categorical(probs=final_probs)
                 action_index = int(action_dist.sample().item())

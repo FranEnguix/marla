@@ -94,6 +94,40 @@ Run directory contents
     an explicit FINISH is unchanged, ``successful_finish``/``episode_success``/
     ``goal_success`` all still require it; only ``objective_reached`` does not.
 
+    See `Task-success terminology`_ below for how these relate to
+    ``premature_finish`` and what each one measures.
+
+.. _Task-success terminology:
+
+**Task-success terminology.** Every episode ends in exactly one of: a
+FINISH after the objective was reached, a FINISH before it was reached, or
+a timeout (``finish_reason == "truncated"``), the last of which can happen
+with or without the objective having been reached.
+
+- ``objective_reached``: true once every configured sensitive objective
+  has been achieved (all sensitive targets at the objective's required
+  access), regardless of whether the policy subsequently selects FINISH.
+- ``successful_finish``: the policy selects FINISH after
+  ``objective_reached`` (while the objective holds).
+- ``premature_finish``: the policy selects FINISH before
+  ``objective_reached`` (``finish_reason == "finish"`` and not
+  ``successful_finish``; ``summary.json``'s ``premature_finish_rate``).
+
+``objective_reached`` measures environment task accomplishment.
+``successful_finish`` additionally evaluates *stopping*: whether the policy
+recognises, from its own observations, that the task is done and ends the
+episode. The two are not equivalent, and ``successful_finish`` should not
+be read as "the network objective was achieved". The policy acts under
+partial observability: whether the objective is complete is simulator
+truth, and the policy's observation does not always determine it. For
+example, an undiscovered subnet, or a visible host whose sensitivity has
+not yet been revealed, can make a completed and an incomplete state look
+identical. Depending on the scenario, completion may be inferable only
+after additional information-gathering actions, or only with some
+probability. A low ``successful_finish`` rate alongside a high
+``objective_reached`` rate is therefore a statement about stopping under
+partial observability, not necessarily about attack competence.
+
 ``decisions.csv``
     One row per environment step (omitted if
     ``metrics.record_decisions: false``). Identity/progress columns
@@ -891,6 +925,60 @@ train/test scenario sets). It's what gives ``episode_returns.png`` and
 ``episode_efficiency.png`` their eval series. It costs real wall-clock time
 -- in assisted mode, each eval episode's queried steps still consult the
 Plan Maker -- which is why it defaults to ``0`` (disabled).
+
+Checkpoint evaluation
+------------------------
+
+:func:`marla.evaluation.checkpoint_eval.evaluate_checkpoint` re-evaluates a
+finished run's ``checkpoint.pt`` (optionally on another scenario, and
+optionally under an :class:`~marla.evaluation.overrides.EvaluationOverrides`
+ablation such as ``NO_QUERY``/``ALWAYS_QUERY``/``BETA_ZERO``/``BETA_ONE``/
+``PLAN_MAKER_ONLY``) on a contiguous range of environment seeds, with no
+optimizer and no gradient step. Its ``policy_mode`` selects how the frozen
+policy's decisions become actions
+(:class:`marla.evaluation.sampling.EvaluationPolicyMode`):
+
+``GREEDY`` (default)
+    ``q_t = [p_t^q >= 0.5]``, ``a_t = argmax pi_t``. Evaluates a
+    deterministic controller derived from the learned policy. This is the
+    behavior of every earlier release, unchanged when no mode is given. When
+    several actions share the maximum probability, ``argmax`` takes the
+    first of them.
+
+``STOCHASTIC_POLICY``
+    ``q_t ~ Bernoulli(p_t^q)``, ``a_t ~ pi_t``, where for MARLA_FULL
+    ``pi_t`` is the final distribution (after any accepted advice). Estimates
+    performance under the learned stochastic policy itself, the policy PPO
+    actually optimizes. Results are a sample: report them over enough
+    episodes and seeds to estimate their spread.
+
+Neither mode is universally better; they measure different things.
+Overrides keep precedence in both modes: ``NO_QUERY``/``ALWAYS_QUERY``
+force the query decision (consuming no query randomness), ``BETA_ZERO``/
+``BETA_ONE`` fix ``beta`` in the final logits that are then argmaxed or
+sampled, and ``PLAN_MAKER_ONLY`` always selects the Plan Maker's top-scored
+consulted action (never a policy sample).
+
+``STOCHASTIC_POLICY`` is exactly reproducible and never touches torch's,
+Python's or NumPy's global RNG. Each evaluation episode has two
+independent streams, one per purpose ``"query"`` and ``"action"``:
+``seed = int.from_bytes(sha256("marla-stochastic-eval|<agent_seed>|<eval_seed>|<purpose>")[:8], "little")``,
+``rng = numpy.random.default_rng(seed)``. Here ``agent_seed`` is the run's
+``experiment.seed`` and ``eval_seed`` is the episode's environment seed. A
+query draw is ``u < p_t^q``. An action draw inverts the cumulative
+distribution of ``pi_t`` at ``u * sum(pi_t)``. The same checkpoint, seeds and
+mode always give the same trajectory, query draws never shift action draws,
+and PPO_ONLY consumes no query draws. Loading a checkpoint for evaluation
+does not advance the caller's global RNG either.
+
+The returned :class:`~marla.evaluation.checkpoint_eval.EvaluationRunResult`
+records ``evaluation_policy_mode``, the seed range, and, for
+``STOCHASTIC_POLICY``, the RNG scheme identifier, the agent seed the streams
+were derived from and the number of draws.
+:meth:`~marla.evaluation.checkpoint_eval.EvaluationRunResult.evaluation_metadata`
+returns all of this as a dict to store next to the evaluation's CSVs. The
+evaluation mode is an argument of the evaluation call, not part of the
+training config, so it never changes a run's ``config_hash``.
 
 Beyond a single run
 ----------------------

@@ -68,8 +68,10 @@ Every environment step in the assisted variant is a *compound decision*
    function of the recurrent state, base-policy entropy, top-two-action
    margin, candidate-set size, and the configured consultation cost --
    never a fixed schedule or a rule.
-2. That probability is sampled (training) or thresholded at 0.5
-   (deterministic evaluation, see :func:`marla.learning.rollout.run_evaluation_episodes`).
+2. That probability is sampled (training, and ``STOCHASTIC_POLICY``
+   checkpoint evaluation) or thresholded at 0.5 (deterministic/``GREEDY``
+   evaluation, see :func:`marla.learning.rollout.run_evaluation_episodes`
+   and the "Checkpoint evaluation" section of :doc:`metrics`).
    Most steps are *not* queried -- consultation is on-demand, not every
    step -- which is exactly what the learned query gate is for: to learn
    when consulting is worth its configured cost.

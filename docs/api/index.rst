@@ -10,6 +10,7 @@ Auto-generated from docstrings. Organized by subpackage, matching
    agents
    config
    environment
+   evaluation
    knowledge
    learning
    messaging

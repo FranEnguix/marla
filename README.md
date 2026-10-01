@@ -69,6 +69,15 @@ evaluation episodes between training rollouts, at zero cost when disabled
 the run's aggregate statistics and writes every plot to `RUN_DIRECTORY/plots/`
 -- see `docs/metrics.rst` for what each plot/CSV column means.
 
+A finished run's checkpoint can be re-evaluated without any gradient step
+via `marla.evaluation.checkpoint_eval.evaluate_checkpoint`, either `GREEDY`
+(default: thresholded query gate, argmax action) or `STOCHASTIC_POLICY`
+(samples the learned policy from reproducible, explicitly seeded streams).
+`objective_reached` (the network objective was achieved) and
+`successful_finish` (the policy also chose FINISH afterwards) are reported
+separately -- see `docs/metrics.rst`'s "Task-success terminology" and
+"Checkpoint evaluation" sections.
+
 ## Resource and carbon telemetry
 
 `metrics.resource_monitoring` (on by default) records CPU/RAM/GPU usage

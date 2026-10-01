@@ -98,6 +98,17 @@ def build_sequence_chunks(
     return chunks
 
 
+# Version of PPO's OPTIMIZATION semantics (how a collected rollout is turned
+# into optimizer steps), recorded in every checkpoint and required to match
+# when training is RESUMED (marla.learning.checkpoint.load_checkpoint with
+# restore_rng_state=True). It never affects weight shapes or evaluation:
+#   1 -- implicit, never written (the checkpoint has no such field): v0.10.x
+#        and earlier, a minibatch was a fixed `minibatch_sequences` CHUNKS.
+#   2 -- v0.11.0: minibatches of ~minibatch_sequences * sequence_length REAL
+#        transitions (partition_minibatches below).
+TRAINING_SEMANTICS_VERSION = 2
+
+
 def partition_minibatches(
     chunks: list[SequenceChunk], order: list[int], minibatch_sequences: int, sequence_length: int
 ) -> list[list[int]]:
