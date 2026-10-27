@@ -172,6 +172,15 @@ def run(
             "the checkpoint (research/aamas2027's staged-training design)."
         ),
     ),
+    accept_unverified_finish_reward: bool = typer.Option(
+        False,
+        "--accept-unverified-finish-reward",
+        help=(
+            "With --resume: allow resuming a checkpoint saved before FINISH-reward semantics were recorded. "
+            "Its reward cannot be verified, so set the config's objective FINISH-reward fields to the values "
+            "it was trained with. A checkpoint whose recorded semantics differ is always refused."
+        ),
+    ),
 ) -> None:
     """Run an experiment (baseline or assisted, local or distributed)."""
     _configure_progress_logging()
@@ -250,7 +259,8 @@ def run(
         import math
 
         from marla.learning.checkpoint import (
-            TrainingSemanticsMismatchError,
+            CheckpointResumeError,
+            check_finish_reward_resumable,
             check_training_semantics_resumable,
             peek_checkpoint_metadata,
         )
@@ -270,7 +280,11 @@ def run(
             # is touched; load_checkpoint re-checks this on the actual resume.
             try:
                 check_training_semantics_resumable(resume_metadata.training_semantics_version, resume)
-            except TrainingSemanticsMismatchError as exc:
+                check_finish_reward_resumable(
+                    resume_metadata.finish_reward_semantics, config.objective.effective_finish_reward(), resume,
+                    allow_unverified=accept_unverified_finish_reward,
+                )
+            except CheckpointResumeError as exc:
                 typer.secho(str(exc), fg=typer.colors.RED, err=True)
                 raise typer.Exit(code=1) from exc
             already_done = resume_metadata.environment_steps
@@ -314,6 +328,7 @@ def run(
                 config, config_path.parent, num_rollouts=num_rollouts, debug=debug,
                 resume_from=resume, run_dir=run_dir,
                 embedded_xmpp_server=config.execution.embedded_xmpp_server,
+                accept_unverified_finish_reward=accept_unverified_finish_reward,
             )
         except LocalRunError as exc:
             finalize_run_directory(
@@ -467,6 +482,13 @@ def summarize(
             f"timeout rate: {_fmt(summary.get('timeout_rate'))}"
         )
     typer.echo(f"  mean benchmark return: {_fmt(summary['mean_benchmark_return'])}")
+    if summary.get("mean_native_return") is not None:
+        typer.echo(
+            f"    = native NASimEmu {_fmt(summary['mean_native_return'])} + FINISH reward "
+            f"{_fmt(summary.get('mean_finish_reward'))}; training return {_fmt(summary.get('mean_training_return'))}"
+        )
+    if summary.get("mean_target_completion_fraction") is not None:
+        typer.echo(f"  mean target completion fraction: {_fmt(summary['mean_target_completion_fraction'])}")
     typer.echo(f"  mean episode duration: {format_quantity(summary['mean_episode_duration_seconds'], 's')}")
     typer.echo(f"  total consultations: {summary['total_consultations']}")
     if summary.get("queries_per_successful_episode") is not None:

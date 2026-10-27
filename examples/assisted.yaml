@@ -132,9 +132,10 @@ consultation:
   # Subtracted from the training reward (not the reported NASimEmu/
   # benchmark reward) every time the query gate decides to consult -- this
   # is what actually gives the query gate something to weigh "is asking
-  # worth it" against. 0.10 is a meaningful fraction of this scenario's
-  # rewards (completion_reward defaults to 1.0), so consulting on every
-  # single step is not a free lunch.
+  # worth it" against. 0.10 is comparable to NASimEmu's per-action costs
+  # (the default FINISH reward is +50 per sensitive target on success,
+  # -100 per remaining target otherwise), so consulting on every single
+  # step is not a free lunch.
   cost: 0.10
   # How many correction attempts the Gatekeeper gives the Plan Maker (a
   # schema-invalid or wrong-action-ID-coverage response gets a

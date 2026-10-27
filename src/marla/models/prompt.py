@@ -11,13 +11,16 @@ from __future__ import annotations
 import json
 
 from marla.knowledge.retriever import KnowledgeRule
-from marla.messaging.schemas import AdvisoryActionDescriptor, AdvisoryObjective
+from marla.messaging.schemas import AdvisoryActionDescriptor, AdvisoryObjective, FinishRewardSpec
 
-# Bumped from "nasimemu-plan-maker-v1": subnet-scoped consultation changes
-# prompt semantics (a subset of candidates, not the complete legal action
-# space) -- see the template's own CONSULTED SUBNET/GLOBAL PROGRESS/LOCAL
-# VISIBLE OBSERVATION/CONSULTED CANDIDATE ACTIONS sections below.
-PROMPT_VERSION = "nasimemu-plan-maker-v2-subnet-scoped"
+# v2 ("-subnet-scoped"): subnet-scoped consultation changed prompt semantics
+# (a subset of candidates, not the complete legal action space) -- see the
+# template's CONSULTED SUBNET/GLOBAL PROGRESS/LOCAL VISIBLE OBSERVATION/
+# CONSULTED CANDIDATE ACTIONS sections below.
+# v3 ("-finish-reward"): the template now states the default target-dependent
+# FINISH reward (see marla.environment.finish). Part of the advisory-cache key,
+# so responses cached under v2 are never reused for v3 prompts.
+PROMPT_VERSION = "nasimemu-plan-maker-v3-finish-reward"
 
 _TEMPLATE = """You are the MARLA Plan Maker. You provide advisory confidence scores for
 a SUBSET of the currently legal NASimEmu actions. You do not execute actions.
@@ -34,10 +37,15 @@ action ID that is not listed in CONSULTED CANDIDATE ACTIONS below.
 GOAL (always true for this task): gain root access on every host in the
 network with "is_sensitive_target": true. GLOBAL PROGRESS below is visible
 across the WHOLE network (not just the consulted subnet) and tells you
-directly how much of that is already done. The special "finish" action ends
-the episode immediately with no further reward -- it is only a good choice
-once visible_sensitive_targets_remaining == 0; choosing it earlier ends the
-episode without completing the objective.
+directly how much of that is already done.
+
+The special "finish" action ends the episode immediately. {finish_reward_description}
+Gaining root on the last sensitive target does NOT by itself grant the
+completion reward: "finish" must be chosen explicitly to receive it.
+Therefore, once visible_sensitive_targets_remaining == 0, score "finish"
+highest instead of suggesting further actions; score it low while any visible
+sensitive target still lacks root access (visible counts cover only
+discovered hosts).
 
 NASIMEMU KNOWLEDGE
 {retrieved_rules}
@@ -75,6 +83,28 @@ action ID not listed in CONSULTED CANDIDATE ACTIONS. Return strict JSON
 mapping each action ID to its confidence score, and no explanatory text."""
 
 
+def describe_finish_reward(spec: FinishRewardSpec | None) -> str:
+    """One-paragraph FINISH reward description rendered from the run's resolved configuration
+    (precedence as in ``ObjectiveConfig``: a fixed ``completion_reward`` wins over the per-target
+    value). ``None`` (callers that do not pass a spec) describes the defaults, labelled as such."""
+    label = "With the configured reward"
+    if spec is None:
+        spec, label = FinishRewardSpec(), "With the default reward configuration"
+    if spec.completion_reward is not None:
+        success = f"it pays {spec.completion_reward:+g}"
+    else:
+        success = f"it pays {spec.completion_reward_per_target:+g} per sensitive target in the network"
+    fixed, per = spec.premature_finish_penalty, spec.premature_finish_penalty_per_remaining_target
+    if per != 0 and fixed != 0:
+        premature = f"{fixed:+g} plus {per:+g} for each sensitive target still lacking root access"
+    elif per != 0:
+        premature = f"{per:+g} for each sensitive target still lacking root access"
+    else:
+        premature = f"{fixed:+g}"
+    return (f"{label} {success} if every sensitive target already has root access, and otherwise "
+            f"{premature} (user access does not count as root).")
+
+
 def build_prompt(
     retrieved_rules: list[KnowledgeRule],
     objective: AdvisoryObjective,
@@ -103,6 +133,7 @@ def build_prompt(
         candidate_actions=candidate_actions_text,
         consulted_subnet=consulted_subnet,
         global_candidate_action_count=global_candidate_action_count,
+        finish_reward_description=describe_finish_reward(objective.finish_reward),
     )
 
 

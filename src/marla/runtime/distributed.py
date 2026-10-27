@@ -76,6 +76,7 @@ async def _build_and_run(
             completion_reward=config.objective.completion_reward,
             premature_finish_penalty=config.objective.premature_finish_penalty,
             premature_finish_penalty_per_remaining_target=config.objective.premature_finish_penalty_per_remaining_target,
+            completion_reward_per_target=config.objective.completion_reward_per_target,
         )
         orchestrator_password = resolve_password(config.rl_orchestrator.password_env, config.rl_orchestrator.alias)
         orchestrator = RLOrchestratorAgent(

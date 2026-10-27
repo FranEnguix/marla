@@ -66,6 +66,19 @@ Run directory contents
     or immediately followed, for an eval episode -- this row, so returns
     can be bucketed by training progress rather than raw episode index).
 
+    **Reward decomposition** (original NASimEmu reward vs. MARLA's
+    synthetic FINISH reward vs. what PPO optimizes):
+    ``benchmark_return`` (= ``nasimemu_return``) = ``native_return`` +
+    ``finish_reward``, where ``native_return`` is the sum of NASimEmu's own
+    per-action rewards and ``finish_reward`` is the FINISH reward of
+    ``objective.*`` (0 for a timeout; the FINISH transition performs no
+    NASimEmu action). ``training_return`` = ``benchmark_return`` minus the
+    episode's consultation costs (assisted agents only). Use
+    ``native_return`` to compare against unmodified NASimEmu results,
+    independently of the FINISH reward configuration.
+    ``target_completion_fraction`` = ``sensitive_targets_with_root_final /
+    sensitive_targets_total`` (empty when the scenario has no targets).
+
     **Success semantics -- three related but distinct fields, never
     conflated:**
 
@@ -570,7 +583,13 @@ partial observability, not necessarily about attack competence.
     collapsed into one, since they answer different questions (see
     ``episodes.csv``'s success-semantics note above). ``goal_success_rate``
     is kept, deprecated, identical to ``successful_finish_rate``. Also:
-    premature-finish and timeout rates,
+    ``premature_finish_rate`` (FINISH with sensitive targets still lacking
+    ROOT) and ``timeout_rate`` (episodes truncated at
+    ``environment.max_episode_steps`` without FINISH -- the signal for an
+    agent avoiding FINISH), ``mean_environment_steps`` (mean episode
+    length), ``mean_target_completion_fraction``, the return decomposition
+    ``mean_native_return`` + ``mean_finish_reward`` = ``mean_benchmark_return``
+    and ``mean_training_return`` (what PPO optimizes),
     mean/median return, mean/median ``finish_delay_steps`` and mean
     successful ``steps_to_goal``, action-type frequencies, consultation
     totals and rates (including queries-per-successful-episode and the

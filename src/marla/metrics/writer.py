@@ -76,6 +76,10 @@ _EPISODES_FIELDS = [
     # episode end (whichever way it ended), not a running/cached value.
     "objective_reached", "successful_finish", "episode_success",
     "sensitive_targets_total", "sensitive_targets_with_root_final", "sensitive_targets_remaining_final",
+    # Reward decomposition: nasimemu_return/benchmark_return = native_return
+    # (NASimEmu's own per-action rewards) + finish_reward (MARLA's synthetic
+    # FINISH reward); training_return additionally subtracts consultation costs.
+    "finish_reward", "native_return", "target_completion_fraction",
 ]
 
 _DECISIONS_FIELDS = [
@@ -646,7 +650,17 @@ def _episode_row(config: Config, summary: EpisodeSummary) -> dict[str, Any]:
         "sensitive_targets_total": summary.sensitive_targets_total,
         "sensitive_targets_with_root_final": summary.sensitive_targets_with_root_final,
         "sensitive_targets_remaining_final": summary.sensitive_targets_remaining_final,
+        "finish_reward": summary.finish_reward,
+        "native_return": summary.nasimemu_return - summary.finish_reward,
+        "target_completion_fraction": _target_completion_fraction(summary),
     }
+
+
+def _target_completion_fraction(summary: EpisodeSummary) -> float | None:
+    """Fraction of sensitive targets at ROOT when the episode ended (None if unknown or no targets)."""
+    if not summary.sensitive_targets_total or summary.sensitive_targets_with_root_final is None:
+        return None
+    return summary.sensitive_targets_with_root_final / summary.sensitive_targets_total
 
 
 def build_episode_rows(config: Config, summaries: list[EpisodeSummary]) -> list[dict[str, Any]]:
@@ -1010,6 +1024,13 @@ def write_summary_json(
         "premature_finish_rate": _mean([1.0 if is_premature_finish(s) else 0.0 for s in episode_summaries]),
         "timeout_rate": _mean([1.0 if is_timeout(s) else 0.0 for s in episode_summaries]),
         "mean_benchmark_return": _mean([s.nasimemu_return for s in episode_summaries]),
+        # Reward decomposition (benchmark = native + finish; training = benchmark - consultation cost).
+        "mean_native_return": _mean([s.nasimemu_return - s.finish_reward for s in episode_summaries]),
+        "mean_finish_reward": _mean([s.finish_reward for s in episode_summaries]),
+        "mean_training_return": _mean([s.training_return for s in episode_summaries]),
+        "mean_target_completion_fraction": _mean(
+            [f for f in (_target_completion_fraction(s) for s in episode_summaries) if f is not None]
+        ),
         "median_benchmark_return": _median([s.nasimemu_return for s in episode_summaries]),
         "mean_environment_steps": _mean([float(s.environment_steps) for s in episode_summaries]),
         "mean_steps_to_goal": _mean([float(s.steps_to_goal) for s in episode_summaries if s.steps_to_goal is not None]),
@@ -1297,6 +1318,7 @@ def _save_final_checkpoints(run_dir: Path, config: Config, result: TrainingResul
             steps_per_env=config.policy.ppo.steps_per_env,
             scheduler=result.scheduler,
             scheduler_config=config.policy.ppo.optimizer.scheduler.model_dump(),
+            finish_reward_semantics=config.objective.effective_finish_reward(),
         )
 
 

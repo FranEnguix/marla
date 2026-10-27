@@ -451,6 +451,7 @@ async def run_training_loop(
             completion_reward=adapters[0].completion_reward,
             premature_finish_penalty=adapters[0].premature_finish_penalty,
             premature_finish_penalty_per_remaining_target=adapters[0].premature_finish_penalty_per_remaining_target,
+            completion_reward_per_target=adapters[0].completion_reward_per_target,
         )
         if eval_episodes > 0
         else None
@@ -839,6 +840,7 @@ def _update_checkpoints(
         steps_per_env=config.policy.ppo.steps_per_env,
         scheduler=result.scheduler,
         scheduler_config=config.policy.ppo.optimizer.scheduler.model_dump(),
+        finish_reward_semantics=config.objective.effective_finish_reward(),
     )
 
     if not eval_summaries:
@@ -860,6 +862,7 @@ def _update_checkpoints(
             steps_per_env=config.policy.ppo.steps_per_env,
             scheduler=result.scheduler,
             scheduler_config=config.policy.ppo.optimizer.scheduler.model_dump(),
+            finish_reward_semantics=config.objective.effective_finish_reward(),
         )
 
 
@@ -898,6 +901,7 @@ async def run_baseline_training(
             completion_reward=config.objective.completion_reward,
             premature_finish_penalty=config.objective.premature_finish_penalty,
             premature_finish_penalty_per_remaining_target=config.objective.premature_finish_penalty_per_remaining_target,
+            completion_reward_per_target=config.objective.completion_reward_per_target,
         )
         for _ in range(config.policy.ppo.num_envs)
     ]

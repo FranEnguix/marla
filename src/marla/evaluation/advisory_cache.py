@@ -37,19 +37,22 @@ def compute_cache_key(
     model_revision: str,
     prompt_version: str,
     knowledge_version: str,
+    objective: dict[str, Any] | None = None,
 ) -> str:
-    canonical = json.dumps(
-        {
-            "observation": observation,
-            "legal_action_ids": sorted(legal_action_ids),
-            "model_name": model_name,
-            "model_revision": model_revision,
-            "prompt_version": prompt_version,
-            "knowledge_version": knowledge_version,
-        },
-        sort_keys=True,
-        separators=(",", ":"),
-    )
+    """``objective`` (the advisory objective, incl. its FINISH-reward spec) is part of the prompt,
+    so it is part of the key: runs whose FINISH rewards differ never share cached responses.
+    Omitted (None) it leaves the key exactly as computed before the parameter existed."""
+    payload = {
+        "observation": observation,
+        "legal_action_ids": sorted(legal_action_ids),
+        "model_name": model_name,
+        "model_revision": model_revision,
+        "prompt_version": prompt_version,
+        "knowledge_version": knowledge_version,
+    }
+    if objective is not None:
+        payload["objective"] = objective
+    canonical = json.dumps(payload, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 

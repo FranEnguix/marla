@@ -101,7 +101,7 @@ def _build_consult_fn(config: Config, run_id: str, device: DeviceRequest, cache:
         backend=backend,
         knowledge_base=knowledge_base,
         model_version=plan_maker_cfg.model.name,
-        objective=AdvisoryObjective(type=config.objective.type, description=config.objective.description),
+        objective=AdvisoryObjective.from_config(config.objective),
         run_id=run_id,
         max_schema_revisions=config.consultation.max_schema_revisions or 0,
         cache=cache,
@@ -194,6 +194,7 @@ async def evaluate_checkpoint(
         completion_reward=config.objective.completion_reward,
         premature_finish_penalty=config.objective.premature_finish_penalty,
         premature_finish_penalty_per_remaining_target=config.objective.premature_finish_penalty_per_remaining_target,
+        completion_reward_per_target=config.objective.completion_reward_per_target,
     )
 
     consult_fn: ConsultFn | None = None

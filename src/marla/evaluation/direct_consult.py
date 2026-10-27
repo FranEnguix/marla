@@ -82,6 +82,7 @@ class DirectConsultant:
             model_revision=self._model_version,  # see AUDIT.md: no separate HF revision is pinned
             prompt_version=PROMPT_VERSION,
             knowledge_version=self._knowledge_base.version,
+            objective=self._objective.model_dump(mode="json"),
         )
         if self._cache is not None:
             cached = self._cache.get(cache_key)

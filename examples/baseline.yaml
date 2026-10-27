@@ -90,9 +90,14 @@ environment:
 objective:
   type: capture_target  # only supported value: all sensitive/value hosts compromised
   description: Obtain the configured target access
-  # completion_reward (default 1.0) / premature_finish_penalty (default
-  # -1.0) are left at their defaults here -- not shown below, but
-  # overridable if you want a different reward shape for FINISH.
+  # FINISH reward (defaults shown; omit them to get the same values).
+  # Successful FINISH (every sensitive target at ROOT) = +50 * N targets;
+  # premature FINISH = -100 per sensitive target still lacking ROOT.
+  # Setting a fixed `completion_reward` instead of the per-target value
+  # restores a constant successful-FINISH reward (see docs/configuration.rst).
+  completion_reward_per_target: 50.0
+  premature_finish_penalty: 0.0
+  premature_finish_penalty_per_remaining_target: -100.0
 
 policy:
   algorithm: recurrent_ppo  # only supported value

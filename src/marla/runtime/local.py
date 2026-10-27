@@ -82,6 +82,7 @@ async def _build_and_run(
     debug: bool = False,
     resume_from: Path | None = None,
     run_dir: Path | None = None,
+    accept_unverified_finish_reward: bool = False,
 ) -> "object":
     from marla.agents.gatekeeper import GatekeeperAgent
     from marla.agents.orchestrator import RLOrchestratorAgent
@@ -118,7 +119,9 @@ async def _build_and_run(
     resumed_seed = config.experiment.seed
     if resume_from is not None:
         metadata = load_checkpoint(
-            resume_from, policy, optimizer, map_location=resolved_device.torch_device, restore_rng_state=True
+            resume_from, policy, optimizer, map_location=resolved_device.torch_device, restore_rng_state=True,
+            expected_finish_reward=config.objective.effective_finish_reward(),
+            allow_unverified_finish_reward=accept_unverified_finish_reward,
         )
         initial_environment_steps = metadata.environment_steps
         initial_update_count = metadata.update_count
@@ -144,6 +147,7 @@ async def _build_and_run(
             completion_reward=config.objective.completion_reward,
             premature_finish_penalty=config.objective.premature_finish_penalty,
             premature_finish_penalty_per_remaining_target=config.objective.premature_finish_penalty_per_remaining_target,
+            completion_reward_per_target=config.objective.completion_reward_per_target,
         )
         for _ in range(config.policy.ppo.num_envs)
     ]
@@ -237,6 +241,7 @@ def run_local(
     debug: bool = False,
     resume_from: Path | None = None,
     run_dir: Path | None = None,
+    accept_unverified_finish_reward: bool = False,
 ):
     """Run a local-mode experiment; blocks until the RL Orchestrator finishes.
 
@@ -248,7 +253,10 @@ def run_local(
     from and continue training rather than starting fresh (research/
     aamas2027's staged training) -- ``num_rollouts`` here must already be
     computed as the *remaining* rollouts to the config's target step count,
-    not the full target (see cli.py's ``run`` command).
+    not the full target (see cli.py's ``run`` command). The resume refuses a
+    checkpoint whose recorded FINISH-reward semantics differ from ``config``'s,
+    and one with no recorded semantics unless ``accept_unverified_finish_reward``
+    (see :func:`marla.learning.checkpoint.check_finish_reward_resumable`).
 
     ``embedded_xmpp_server``: passed straight to ``spade.run()`` -- ``marla
     run`` supplies ``config.execution.embedded_xmpp_server``. ``False``
@@ -269,7 +277,8 @@ def run_local(
     async def main() -> None:
         try:
             result["orchestrator"] = await _build_and_run(
-                config, config_dir, num_rollouts, debug=debug, resume_from=resume_from, run_dir=run_dir
+                config, config_dir, num_rollouts, debug=debug, resume_from=resume_from, run_dir=run_dir,
+                accept_unverified_finish_reward=accept_unverified_finish_reward,
             )
         except Exception as exc:
             # SPADE's container.run() swallows exceptions raised in main()

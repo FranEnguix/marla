@@ -18,7 +18,16 @@ from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
-MESSAGE_SCHEMA_VERSION = "1.1"  # AdvisoryRequestPayload: legal_actions -> candidate_actions, + consulted_subnet/global_candidate_action_count (subnet-scoped consultation)
+from marla.config.models import (
+    DEFAULT_COMPLETION_REWARD_PER_TARGET,
+    DEFAULT_PREMATURE_FINISH_PENALTY,
+    DEFAULT_PREMATURE_FINISH_PENALTY_PER_REMAINING_TARGET,
+    ObjectiveConfig,
+)
+
+# 1.1: AdvisoryRequestPayload legal_actions -> candidate_actions, + consulted_subnet/global_candidate_action_count
+# (subnet-scoped consultation). 1.2: AdvisoryObjective.finish_reward (resolved FINISH-reward settings for the prompt).
+MESSAGE_SCHEMA_VERSION = "1.2"
 
 
 class MessageType(str, Enum):
@@ -79,11 +88,38 @@ class MessageValidationError(Exception):
 # --- Advisory request/response payloads (spec section 9) -------------------
 
 
+class FinishRewardSpec(BaseModel):
+    """The run's resolved FINISH-reward settings (``ObjectiveConfig`` fields), sent to the Plan
+    Maker so its prompt describes the reward actually in force -- never a hardcoded default."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    completion_reward: float | None = None
+    completion_reward_per_target: float = DEFAULT_COMPLETION_REWARD_PER_TARGET
+    premature_finish_penalty: float = DEFAULT_PREMATURE_FINISH_PENALTY
+    premature_finish_penalty_per_remaining_target: float = DEFAULT_PREMATURE_FINISH_PENALTY_PER_REMAINING_TARGET
+
+
 class AdvisoryObjective(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     type: str
     description: str
+    # None only for callers predating this field; the prompt then states the defaults as such.
+    finish_reward: FinishRewardSpec | None = None
+
+    @classmethod
+    def from_config(cls, objective: ObjectiveConfig) -> "AdvisoryObjective":
+        return cls(
+            type=objective.type,
+            description=objective.description,
+            finish_reward=FinishRewardSpec(
+                completion_reward=objective.completion_reward,
+                completion_reward_per_target=objective.completion_reward_per_target,
+                premature_finish_penalty=objective.premature_finish_penalty,
+                premature_finish_penalty_per_remaining_target=objective.premature_finish_penalty_per_remaining_target,
+            ),
+        )
 
 
 class AdvisoryActionDescriptor(BaseModel):

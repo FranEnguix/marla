@@ -182,20 +182,92 @@ objective
   goal (all sensitive/value hosts compromised).
 - ``description`` (str, required): free-text objective description, sent
   to the Plan Maker verbatim as context.
-- ``completion_reward`` (float, default ``1.0``): reward for FINISH when
-  the objective is satisfied.
-- ``premature_finish_penalty`` (float, default ``-1.0``): fixed component
-  of the reward for FINISH when the objective isn't satisfied.
+FINISH reward (applied only on the transition where the agent explicitly
+selects FINISH; rooting the last target with any other action earns only
+NASimEmu's own reward for that action). With :math:`N` sensitive targets in
+the episode's scenario instance and :math:`M` of them still lacking ROOT
+access (USER access does not count; ordinary hosts never count), the
+default is
+
+.. math::
+
+   R_{\text{FINISH}} =
+   \begin{cases}
+   50N, & \text{if all sensitive targets have ROOT access } (M = 0)\\
+   -100M, & \text{otherwise}
+   \end{cases}
+
+- ``completion_reward_per_target`` (float, default ``50.0``): successful-FINISH
+  reward per sensitive target in the scenario (reward = value × N).
+- ``completion_reward`` (float or null, default ``null``): optional *fixed*
+  successful-FINISH reward. If set, it takes precedence and the reward no
+  longer scales with N -- this is how configs written before
+  ``completion_reward_per_target`` existed keep their exact behavior. When
+  both are present, ``completion_reward`` wins and
+  ``completion_reward_per_target`` is ignored.
+- ``premature_finish_penalty`` (float, default ``0.0``): fixed component of
+  the reward for FINISH when the objective isn't satisfied.
 - ``premature_finish_penalty_per_remaining_target`` (float, default
-  ``0.0``): additional reward per sensitive/value target not yet at ROOT
-  access (USER access does not count) at the moment of a premature FINISH.
-  The two terms add: effective premature-FINISH reward is
-  ``premature_finish_penalty + premature_finish_penalty_per_remaining_target
-  * remaining_sensitive_targets``. Leaving this at its default ``0.0``
-  preserves the old fixed-penalty-only behavior exactly. For a *pure*
-  proportional penalty with no fixed component (e.g. -20 per remaining
-  target), set ``premature_finish_penalty: 0.0`` alongside a non-zero
-  per-target value.
+  ``-100.0``): additional reward per sensitive target not yet at ROOT access.
+  The two premature terms add: ``premature_finish_penalty +
+  premature_finish_penalty_per_remaining_target * M``.
+
+Explicit values always override these defaults. Configs that omit all four
+fields get the target-dependent reward above; configs that set them keep
+exactly the values they set (e.g. ``completion_reward: 1.0``,
+``premature_finish_penalty: -1.0`` reproduces the fixed rewards of MARLA <= 0.11.0,
+whose defaults were ``completion_reward: 1.0``, ``premature_finish_penalty:
+-1.0``, ``premature_finish_penalty_per_remaining_target: 0.0``). The FINISH
+reward enters ``nasimemu_reward``/``benchmark_return`` once; for assisted
+agents the consultation cost is still subtracted only in the training
+reward. No target-state information is added to the agent's observations.
+
+**FINISH must be selected explicitly.** The completion reward is paid only on
+the FINISH transition; an episode that roots every target but never selects
+FINISH ends by time-limit truncation with no FINISH reward
+(``finish_reason: truncated``; counted in ``timeout_rate``).
+
+**Plan Maker prompt and response caching.** The Plan Maker prompt describes
+the FINISH reward from the run's resolved ``objective`` values (the advisory
+request carries them as ``objective.finish_reward``), so explicit overrides
+are described correctly. The prompt version is
+``nasimemu-plan-maker-v3-finish-reward``; it is part of the evaluation
+advisory-cache key, so responses cached under earlier prompt versions are
+never reused, and the key also includes the advisory objective, so runs with
+different FINISH rewards never share cached responses. Existing cache files
+remain readable but produce no hits for v3 requests (expected one-time
+cache misses).
+
+**Resuming checkpoints.** New checkpoints record the run's *effective*
+FINISH-reward semantics (``finish_reward_semantics``: fixed vs. per-target
+completion reward with precedence applied, plus both premature terms).
+``marla run --resume`` compares them with the resuming config and refuses a
+mismatch, so a run can never silently continue under a different reward
+objective; differences that pay identical rewards (e.g. an unused
+``completion_reward_per_target`` next to a fixed ``completion_reward``) are
+not mismatches. Checkpoints saved before this field existed carry no
+semantics: resuming them is refused unless you set the objective's FINISH
+fields to the values the checkpoint was trained with (MARLA <= 0.11.0
+defaults: ``completion_reward: 1.0``, ``premature_finish_penalty: -1.0``,
+``premature_finish_penalty_per_remaining_target: 0.0``, unless the original
+config set other values) and pass ``--accept-unverified-finish-reward``.
+Evaluation loads never check reward semantics.
+
+**Reward scale and PPO (review notes).** The default FINISH rewards (e.g.
++150 or -300 for 3 targets) are two orders of magnitude larger than
+NASimEmu's per-action costs. No implementation change is required: FINISH is
+a true terminal transition (GAE uses next value 0), time-limit truncation is
+bootstrapped from the critic, and advantages are normalized per PPO
+minibatch, so the actor update is scale-invariant. Expected behavioral
+effects to monitor: (1) critic targets reach hundreds while PPO's value
+clipping range (``clip_epsilon``, in reward units) limits each update's value
+change, so the critic tracks large returns slowly; (2) the value loss can
+dominate the shared global gradient-norm clip, shrinking the actor's share of
+each update; (3) premature FINISH costs -100 per remaining target while a
+timeout costs nothing, so a policy unsure whether all targets are rooted may
+learn to avoid FINISH -- monitor ``timeout_rate`` alongside
+``successful_finish_rate``. Reward/return scaling is deliberately not
+applied automatically.
 
 policy
 ~~~~~~

@@ -65,3 +65,27 @@ def test_put_is_idempotent_and_does_not_duplicate_on_disk(tmp_path):
 def test_get_missing_key_returns_none(tmp_path):
     cache = AdvisoryCache(tmp_path / "advisory_cache.jsonl")
     assert cache.get("nonexistent") is None
+
+
+def test_cache_key_separates_objectives_but_is_unchanged_without_one():
+    from marla.config.models import ObjectiveConfig
+    from marla.messaging.schemas import AdvisoryObjective
+
+    base = dict(observation={"hosts": []}, legal_action_ids=["finish"], model_name="m", model_revision="r",
+                prompt_version="p", knowledge_version="k")
+    default = AdvisoryObjective.from_config(ObjectiveConfig(type="capture_target", description="d"))
+    legacy = AdvisoryObjective.from_config(ObjectiveConfig(type="capture_target", description="d", completion_reward=1.0,
+                                                           premature_finish_penalty=-1.0,
+                                                           premature_finish_penalty_per_remaining_target=0.0))
+    key_default = compute_cache_key(objective=default.model_dump(mode="json"), **base)
+    key_legacy = compute_cache_key(objective=legacy.model_dump(mode="json"), **base)
+    assert key_default != key_legacy  # different FINISH rewards never share cached responses
+    assert compute_cache_key(objective=default.model_dump(mode="json"), **base) == key_default  # deterministic
+    assert compute_cache_key(**base) not in (key_default, key_legacy)  # objective-less key = pre-existing form
+
+
+def test_prompt_version_bump_changes_cache_key():
+    base = dict(observation={"hosts": []}, legal_action_ids=["finish"], model_name="m", model_revision="r",
+                knowledge_version="k")
+    assert compute_cache_key(prompt_version="nasimemu-plan-maker-v2-subnet-scoped", **base) != compute_cache_key(
+        prompt_version="nasimemu-plan-maker-v3-finish-reward", **base)

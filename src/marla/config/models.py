@@ -73,14 +73,54 @@ class EnvironmentConfig(MarlaBaseModel):
     max_episode_steps: int = Field(gt=0)
 
 
+# Default FINISH reward (target-dependent), see marla.environment.finish:
+#   successful FINISH: +DEFAULT_COMPLETION_REWARD_PER_TARGET * total sensitive targets
+#   premature FINISH:  DEFAULT_PREMATURE_FINISH_PENALTY
+#                      + DEFAULT_PREMATURE_FINISH_PENALTY_PER_REMAINING_TARGET * targets still lacking ROOT
+DEFAULT_COMPLETION_REWARD_PER_TARGET = 50.0
+DEFAULT_PREMATURE_FINISH_PENALTY = 0.0
+DEFAULT_PREMATURE_FINISH_PENALTY_PER_REMAINING_TARGET = -100.0
+
+
+def effective_finish_reward(
+    completion_reward: float | None,
+    completion_reward_per_target: float,
+    premature_finish_penalty: float,
+    premature_finish_penalty_per_remaining_target: float,
+) -> dict:
+    """Canonical *effective* FINISH-reward semantics (precedence applied).
+
+    A fixed ``completion_reward`` makes ``completion_reward_per_target``
+    irrelevant, so it is omitted -- two configurations compare equal exactly
+    when they pay the same FINISH rewards. Persisted in checkpoints and
+    compared on resume (see ``marla.learning.checkpoint``).
+    """
+    if completion_reward is not None:
+        successful = {"mode": "fixed", "value": float(completion_reward)}
+    else:
+        successful = {"mode": "per_target", "value": float(completion_reward_per_target)}
+    return {
+        "version": 1,
+        "successful_finish": successful,
+        "premature_finish": {"fixed": float(premature_finish_penalty),
+                             "per_remaining_target": float(premature_finish_penalty_per_remaining_target)},
+    }
+
+
 class ObjectiveConfig(MarlaBaseModel):
     type: Literal["capture_target"]
     description: str
-    # objective_satisfied() == NASimEmu's native goal: all sensitive/value
-    # hosts compromised (see environment/nasimemu_adapter.py). Not shown in
-    # the spec's example YAML; defaulted here so those examples still
-    # validate as-is while remaining overridable per experiment.
-    completion_reward: float = 1.0
+    # Successful-FINISH reward (objective satisfied == NASimEmu's native goal:
+    # every sensitive/value host at ROOT, see environment/nasimemu_adapter.py).
+    # Precedence: an explicit fixed `completion_reward` (legacy configs) wins
+    # and `completion_reward_per_target` is then unused; when
+    # `completion_reward` is omitted (None), the reward is
+    # `completion_reward_per_target * total sensitive targets`. (Not an
+    # error when both are present: model_dump()/parse round-trips always
+    # write the per-target default, so precedence -- not rejection -- keeps
+    # legacy configs loadable.)
+    completion_reward: float | None = None
+    completion_reward_per_target: float = DEFAULT_COMPLETION_REWARD_PER_TARGET
     # Effective reward for selecting FINISH before the objective is
     # satisfied is a base term plus a per-remaining-target term:
     #
@@ -89,15 +129,15 @@ class ObjectiveConfig(MarlaBaseModel):
     #
     # "remaining" means a sensitive/value host not yet at ROOT access --
     # USER access does not count (see NasimEmuAdapter.sensitive_target_status,
-    # matching NASimEmu's own all_sensitive_hosts_compromised()). The
-    # per-target term defaults to 0.0, so an older config using only the
-    # fixed `premature_finish_penalty` keeps its exact old semantics
-    # unchanged. To get a *pure* proportional penalty with no fixed
-    # component (e.g. -20 per remaining target and nothing else), set
-    # `premature_finish_penalty: 0.0` alongside a non-zero per-target value
-    # -- there is no separate "mode" switch; the two terms simply add.
-    premature_finish_penalty: float = -1.0
-    premature_finish_penalty_per_remaining_target: float = 0.0
+    # matching NASimEmu's own all_sensitive_hosts_compromised()). The two
+    # terms simply add; the default is a pure proportional penalty
+    # (0.0 fixed, -100.0 per remaining target).
+    premature_finish_penalty: float = DEFAULT_PREMATURE_FINISH_PENALTY
+    premature_finish_penalty_per_remaining_target: float = DEFAULT_PREMATURE_FINISH_PENALTY_PER_REMAINING_TARGET
+
+    def effective_finish_reward(self) -> dict:
+        return effective_finish_reward(self.completion_reward, self.completion_reward_per_target,
+                                       self.premature_finish_penalty, self.premature_finish_penalty_per_remaining_target)
 
 
 class GraphEncoderConfig(MarlaBaseModel):

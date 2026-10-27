@@ -231,7 +231,10 @@ def test_resume_path_identical_for_embedded_and_external(tmp_path, recorded_run_
         config = load_config(config_path)
         policy, optimizer = build_policy_and_optimizer(config, torch.device("cpu"))
         checkpoint = mode_dir / "checkpoint.pt"
-        save_checkpoint(checkpoint, policy, optimizer, update_count=3, environment_steps=512, config_hash=config_hash(config))
+        # Recorded like a checkpoint written by current training code (the FINISH-reward resume guard
+        # refuses checkpoints without recorded reward semantics; covered in test_finish_reward_resume_guard).
+        save_checkpoint(checkpoint, policy, optimizer, update_count=3, environment_steps=512, config_hash=config_hash(config),
+                        finish_reward_semantics=config.objective.effective_finish_reward())
 
         result = runner.invoke(app, ["run", str(config_path), "--resume", str(checkpoint)])
         assert result.exit_code == 1  # the recorder fails the run on purpose

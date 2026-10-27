@@ -298,6 +298,11 @@ class EpisodeSummary:
     # separate, explicitly-documented field rather than expecting every
     # reader to know that definition (spec section 20).
     episode_success: bool = False
+    # The synthetic FINISH reward included in nasimemu_return (the FINISH
+    # transition performs no NASimEmu action, so its whole reward comes from
+    # marla.environment.finish); 0.0 for a timeout. nasimemu_return -
+    # finish_reward is the native NASimEmu return.
+    finish_reward: float = 0.0
     # Final simulator state at episode end (whether ended by FINISH or by
     # truncation) -- a direct query, not a running/cached value, so it is
     # correct even when FINISH (which itself performs no simulator action)
@@ -393,6 +398,7 @@ class RolloutCollector:
         self._episode_start_time = 0.0
         self._episode_nasimemu_return = 0.0
         self._episode_training_return = 0.0
+        self._episode_finish_reward = 0.0
         self._episode_steps = 0
         self._steps_to_goal: int | None = None
         self._finish_step: int | None = None
@@ -425,6 +431,7 @@ class RolloutCollector:
         self._episode_start_time = time.monotonic()
         self._episode_nasimemu_return = 0.0
         self._episode_training_return = 0.0
+        self._episode_finish_reward = 0.0
         self._episode_steps = 0
         self._steps_to_goal = None
         self._finish_step = None
@@ -618,6 +625,8 @@ class RolloutCollector:
 
             self._episode_nasimemu_return += transition.nasimemu_reward
             self._episode_training_return += training_reward
+            if selected.is_finish:
+                self._episode_finish_reward = transition.nasimemu_reward
             self._episode_steps += 1
             if decision["sampled_query"]:
                 self._episode_consultation_count += 1
@@ -663,6 +672,7 @@ class RolloutCollector:
                         goal_success=successful_finish,
                         nasimemu_return=self._episode_nasimemu_return,
                         training_return=self._episode_training_return,
+                        finish_reward=self._episode_finish_reward,
                         environment_steps=self._episode_steps,
                         steps_to_goal=self._steps_to_goal,
                         finish_step=self._finish_step,

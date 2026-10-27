@@ -17,7 +17,12 @@ from nasimemu.nasim.envs.host_vector import HostVector
 from nasimemu.nasim.envs.utils import AccessLevel
 
 from marla.environment.actions import ActionDescriptor, build_legal_actions, parse_host_target_key, resolve_action_target
-from marla.environment.finish import compute_finish_reward
+from marla.environment.finish import (
+    DEFAULT_COMPLETION_REWARD_PER_TARGET,
+    DEFAULT_PREMATURE_FINISH_PENALTY,
+    DEFAULT_PREMATURE_FINISH_PENALTY_PER_REMAINING_TARGET,
+    compute_finish_reward,
+)
 from marla.environment.graph import GraphObservation, build_graph_observation
 
 
@@ -58,13 +63,20 @@ class NasimEmuAdapter:
         self,
         scenario: str,
         max_episode_steps: int,
-        completion_reward: float,
-        premature_finish_penalty: float,
-        premature_finish_penalty_per_remaining_target: float = 0.0,
+        completion_reward: float | None = None,
+        premature_finish_penalty: float = DEFAULT_PREMATURE_FINISH_PENALTY,
+        premature_finish_penalty_per_remaining_target: float = DEFAULT_PREMATURE_FINISH_PENALTY_PER_REMAINING_TARGET,
+        completion_reward_per_target: float = DEFAULT_COMPLETION_REWARD_PER_TARGET,
     ) -> None:
+        """FINISH reward parameters mirror :class:`marla.config.models.ObjectiveConfig`
+        (same defaults and precedence): a non-None ``completion_reward`` is a fixed
+        successful-FINISH reward; otherwise it is ``completion_reward_per_target``
+        times the scenario's sensitive-target count. See :mod:`marla.environment.finish`.
+        """
         self._scenario = scenario
         self._max_episode_steps = max_episode_steps
         self._completion_reward = completion_reward
+        self._completion_reward_per_target = completion_reward_per_target
         self._premature_finish_penalty = premature_finish_penalty
         self._premature_finish_penalty_per_remaining_target = premature_finish_penalty_per_remaining_target
         self._env = NASimEmuEnv(
@@ -88,8 +100,12 @@ class NasimEmuAdapter:
         return self._scenario
 
     @property
-    def completion_reward(self) -> float:
+    def completion_reward(self) -> float | None:
         return self._completion_reward
+
+    @property
+    def completion_reward_per_target(self) -> float:
+        return self._completion_reward_per_target
 
     @property
     def premature_finish_penalty(self) -> float:
@@ -177,6 +193,8 @@ class NasimEmuAdapter:
                 self._premature_finish_penalty,
                 self._premature_finish_penalty_per_remaining_target,
                 remaining_targets,
+                completion_reward_per_target=self._completion_reward_per_target,
+                total_sensitive_targets=total_targets,
             )
             return TransitionResult(
                 state=None,

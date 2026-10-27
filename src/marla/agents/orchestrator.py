@@ -243,9 +243,7 @@ class OrchestratorLifecycleBehaviour(OneShotBehaviour):
             episode_id=episode_id,
             step=step,
             source_observation_id=source_observation_id,
-            objective=AdvisoryObjective(
-                type=agent.config.objective.type, description=agent.config.objective.description
-            ),
+            objective=AdvisoryObjective.from_config(agent.config.objective),
             observation=observation,
             candidate_actions=[
                 AdvisoryActionDescriptor(

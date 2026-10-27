@@ -26,6 +26,7 @@ thing evaluation needs.
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -36,6 +37,8 @@ from marla.environment.consultation_scope import CONSULTATION_SCOPE_VERSION
 from marla.learning.action_encoder import POLICY_REPRESENTATION_VERSION
 from marla.learning.ppo import TRAINING_SEMANTICS_VERSION
 from marla.learning.recurrent_policy import RecurrentPolicy
+
+logger = logging.getLogger(__name__)
 
 
 class PolicyRepresentationMismatchError(Exception):
@@ -109,6 +112,52 @@ def check_training_semantics_resumable(saved_version: int | None, path: str | Pa
         )
 
 
+class FinishRewardMismatchError(CheckpointResumeError):
+    """Raised when RESUMING training from a checkpoint whose recorded *effective* FINISH-reward
+    semantics (``ObjectiveConfig.effective_finish_reward()``) differ from the resuming config's:
+    continuing would silently optimize a different reward objective. Never raised for evaluation.
+    """
+
+
+class FinishRewardUnverifiedError(CheckpointResumeError):
+    """Raised when RESUMING training from a checkpoint saved before FINISH-reward semantics were
+    recorded: its reward cannot be verified (it may have used the old fixed +1/-1 defaults or
+    explicit values), so resuming requires explicit acknowledgement
+    (``allow_unverified_finish_reward=True`` / ``marla run --resume ... --accept-unverified-finish-reward``).
+    """
+
+
+def check_finish_reward_resumable(
+    saved: dict | None, expected: dict, path: str | Path, allow_unverified: bool = False
+) -> None:
+    """Resume-time guard: ``saved`` is the checkpoint's recorded ``finish_reward_semantics`` (None for
+    a checkpoint saved before the field existed), ``expected`` the resuming config's
+    ``objective.effective_finish_reward()``. Compares effective semantics, so representational
+    differences that pay identical rewards (e.g. an unused per-target value under a fixed
+    ``completion_reward``) are not mismatches. Shared by :func:`load_checkpoint` and the CLI pre-flight.
+    """
+    if saved is None:
+        message = (
+            f"Checkpoint {path} records no FINISH-reward semantics (saved before they were persisted), so "
+            f"the reward it was trained under cannot be verified against the current objective {expected}. "
+            "Older MARLA versions defaulted to completion_reward=1.0, premature_finish_penalty=-1.0, "
+            "premature_finish_penalty_per_remaining_target=0.0 unless the config set other values. Set the "
+            "objective's FINISH-reward fields explicitly to the values the checkpoint was trained with, and "
+            "acknowledge with allow_unverified_finish_reward=True (CLI: --accept-unverified-finish-reward)."
+        )
+        if not allow_unverified:
+            raise FinishRewardUnverifiedError(message)
+        logger.warning("%s Proceeding because the unverified reward was explicitly accepted.", message)
+        return
+    if saved != expected:
+        raise FinishRewardMismatchError(
+            f"Checkpoint {path} was trained with FINISH-reward semantics {saved}, but the resuming config "
+            f"specifies {expected}. Resuming would continue one run under a different reward objective, so it "
+            "is refused. Set the objective's FINISH-reward fields to the checkpoint's values to resume, or start "
+            "a new run. (Evaluation loads are unaffected.)"
+        )
+
+
 @dataclass(frozen=True)
 class CheckpointMetadata:
     update_count: int
@@ -165,6 +214,10 @@ class CheckpointMetadata:
     # .TRAINING_SEMANTICS_VERSION); None for a checkpoint saved before the
     # field existed (v0.10.x and earlier). Enforced only on resume.
     training_semantics_version: int | None = None
+    # Effective FINISH-reward semantics the run trained under
+    # (ObjectiveConfig.effective_finish_reward()); None for older checkpoints.
+    # Enforced only on resume (check_finish_reward_resumable).
+    finish_reward_semantics: dict[str, Any] | None = None
 
 
 def save_checkpoint(
@@ -181,6 +234,7 @@ def save_checkpoint(
     steps_per_env: int | None = None,
     scheduler: torch.optim.lr_scheduler.LRScheduler | None = None,
     scheduler_config: dict[str, Any] | None = None,
+    finish_reward_semantics: dict[str, Any] | None = None,
 ) -> None:
     """``scheduler``/``scheduler_config`` are optional only for callers
     that genuinely have no scheduler (rare -- direct unit tests of the
@@ -217,6 +271,7 @@ def save_checkpoint(
             "scheduler_state_dict": scheduler.state_dict() if scheduler is not None else None,
             "learning_rate": optimizer.param_groups[0]["lr"],
             "training_semantics_version": TRAINING_SEMANTICS_VERSION,
+            "finish_reward_semantics": finish_reward_semantics,
         },
         path,
     )
@@ -244,6 +299,7 @@ def peek_checkpoint_metadata(path: str | Path) -> CheckpointMetadata:
         scheduler_state_dict=data.get("scheduler_state_dict"),
         learning_rate=data.get("learning_rate"),
         training_semantics_version=data.get("training_semantics_version"),
+        finish_reward_semantics=data.get("finish_reward_semantics"),
     )
 
 
@@ -253,6 +309,8 @@ def load_checkpoint(
     optimizer: torch.optim.Optimizer | None = None,
     map_location: str | torch.device = "cpu",
     restore_rng_state: bool = False,
+    expected_finish_reward: dict[str, Any] | None = None,
+    allow_unverified_finish_reward: bool = False,
 ) -> CheckpointMetadata:
     """``restore_rng_state=True`` sets torch's *global* RNG stream to the
     saved state (``torch.set_rng_state``) -- only meaningful when actually
@@ -330,6 +388,12 @@ def load_checkpoint(
     # optimization semantics are irrelevant to it and it still loads.
     if restore_rng_state:
         check_training_semantics_resumable(data.get("training_semantics_version"), path)
+        # FINISH-reward guard (resume only): callers that resume training pass the resuming
+        # config's objective.effective_finish_reward(); evaluation loads never do.
+        if expected_finish_reward is not None:
+            check_finish_reward_resumable(
+                data.get("finish_reward_semantics"), expected_finish_reward, path, allow_unverified_finish_reward
+            )
 
     scheduler_state_dict = data.get("scheduler_state_dict")
     if restore_rng_state and scheduler_state_dict is None:
@@ -368,4 +432,5 @@ def load_checkpoint(
         scheduler_state_dict=scheduler_state_dict,
         learning_rate=data.get("learning_rate"),
         training_semantics_version=data.get("training_semantics_version"),
+        finish_reward_semantics=data.get("finish_reward_semantics"),
     )

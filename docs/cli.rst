@@ -25,7 +25,7 @@ overwrite existing files unless ``--force`` is given.
 
 .. code-block:: text
 
-   marla run CONFIG_PATH [--agent ALIAS_OR_JID ...] [--debug] [--resume CHECKPOINT_PATH]
+   marla run CONFIG_PATH [--agent ALIAS_OR_JID ...] [--debug] [--resume CHECKPOINT_PATH] [--accept-unverified-finish-reward]
 
 Runs an experiment.
 
@@ -75,6 +75,15 @@ Runs an experiment.
   :class:`marla.learning.checkpoint.TrainingSemanticsMismatchError` before
   any run directory is created. Weight shapes are unaffected, so the same
   checkpoint still loads for evaluation.
+  ``--resume`` also compares the checkpoint's recorded FINISH-reward
+  semantics with the config's effective ``objective`` FINISH rewards and
+  refuses a mismatch
+  (:class:`marla.learning.checkpoint.FinishRewardMismatchError`). A
+  checkpoint saved before these semantics were recorded is refused
+  (:class:`marla.learning.checkpoint.FinishRewardUnverifiedError`) unless
+  ``--accept-unverified-finish-reward`` is given -- set the config's FINISH
+  fields to the values the checkpoint was trained with first (see
+  :doc:`configuration`, ``objective``). Evaluation loads are unaffected.
 
 Before any agent -- RL Orchestrator, Gatekeeper, Plan Maker, or the
 embedded XMPP server -- is started, ``marla run`` resolves the configured
