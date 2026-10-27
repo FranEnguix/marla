@@ -44,6 +44,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+import torch
 import yaml
 
 from marla.config.loader import config_hash, redacted_config_dict
@@ -51,7 +52,9 @@ from marla.config.models import Config
 from marla.environment.action_compatibility import CompatibilityStatus, compatibility_status_from_vector
 from marla.environment.consultation_scope import extract_action_subnet
 from marla.learning.checkpoint import save_checkpoint
+from marla.learning.decision import hierarchical_action_probabilities
 from marla.learning.masking import masked_entropy
+from marla.learning.ppo import completion_prediction_metrics, stop_probability_metrics
 from marla.learning.query_gate import compute_top_two_margin
 from marla.learning.rollout import EpisodeSummary, StepRecord
 from marla.learning.trainer import TrainingResult
@@ -91,8 +94,16 @@ _DECISIONS_FIELDS = [
     # (the default, unchanged) -- see StepRecord.env_index's own docstring.
     "env_index",
     "legal_action_count", "selected_action_id", "selected_action_type",
+    # Probabilities/ranks/entropies below are over the COMPLETE hierarchical
+    # distribution (FINISH = p_stop, ordinary a = (1 - p_stop) * pi_action(a));
+    # base_top_two_margin is over the ordinary-action logits only.
     "base_policy_entropy", "base_top_two_margin", "selected_action_base_probability",
     "selected_action_final_probability", "selected_action_base_rank", "selected_action_final_rank",
+    # Hierarchical stop decision and completion predictor (collection time).
+    # completion_label is the decision-time simulator truth
+    # (== objective_satisfied_before_action), used only as the predictor's
+    # training target; completion_probability is None when it is disabled.
+    "stop_probability", "stop_selected", "completion_probability", "completion_label",
     "final_policy_entropy", "base_top_action_id", "final_top_action_id",
     "critic_value", "gae_advantage", "return_target",
     "nasimemu_reward", "training_reward", "consultation_cost",
@@ -138,8 +149,9 @@ _DECISIONS_FIELDS = [
     # base_/final_finish_* mirror the existing selected_action_base/final_*
     # fields but for the one FINISH action specifically, regardless of
     # whether FINISH was selected. Ranks: 1 = highest probability/logit.
-    # For PPO_ONLY, base_finish_* == final_finish_* always (no advice ever
-    # perturbs the logits).
+    # base_finish_probability == final_finish_probability == stop_probability
+    # always: advice reshapes only the conditional ordinary-action
+    # distribution, never p_stop.
     "base_finish_probability", "final_finish_probability",
     "base_finish_rank", "final_finish_rank",
     "base_finish_is_argmax", "final_finish_is_argmax",
@@ -249,6 +261,13 @@ _ROLLOUTS_FIELDS = [
     "base_finish_argmax_rate_objective_not_reached", "base_finish_argmax_rate_objective_reached",
     "final_finish_argmax_rate_objective_not_reached", "final_finish_argmax_rate_objective_reached",
     "finish_selected_rate_objective_not_reached", "finish_selected_rate_objective_reached",
+    # Completion predictor and stop head at collection time (decisions of
+    # this rollout, labels = decision-time objective_satisfied_before_action).
+    # Precision/recall are for the completed class; null when undefined.
+    "completion_probability", "completion_prediction_accuracy", "completion_prediction_precision",
+    "completion_prediction_recall", "completion_prediction_brier",
+    "completion_label_positive_count", "completion_label_negative_count",
+    "stop_probability", "stop_probability_when_complete", "stop_probability_when_incomplete",
     # Observable subnet-exploration progress aggregates (spec section 22).
     "mean_fraction_known_subnets_scanned", "mean_known_subnets_unscanned", "known_frontier_remaining_rate",
     # Simple frontier-only FINISH split (not conditioned on target
@@ -321,6 +340,16 @@ _UPDATES_FIELDS = [
     "mean_raw_advantage_non_finish", "max_raw_advantage_non_finish",
     "mean_raw_advantage_successful_finish", "mean_raw_advantage_premature_finish",
     "finish_advantage_z_max",
+    # Hierarchical policy / completion predictor (current parameters, this
+    # minibatch). action_entropy above = stop_entropy + continuation-weighted
+    # conditional_action_entropy. completion_prediction_loss is the
+    # auxiliary BCE before its loss_coefficient; null when disabled.
+    "stop_entropy", "conditional_action_entropy",
+    "stop_probability", "stop_probability_when_complete", "stop_probability_when_incomplete",
+    "completion_prediction_loss", "completion_positive_class_weight",
+    "completion_label_positive_count", "completion_label_negative_count", "completion_label_positive_fraction",
+    "completion_probability", "completion_prediction_accuracy", "completion_prediction_precision",
+    "completion_prediction_recall", "completion_prediction_brier",
     # State-N-conditioned per-minibatch diagnostics (no-visible-target-
     # FINISH collapse investigation, spec sections 26-28). "real_sample_count"
     # names this exactly (this minibatch's true timestep count -- no
@@ -419,11 +448,16 @@ def _decision_row(record: StepRecord, advantage: float, return_target: float) ->
     logits are available, per spec section 3.
     """
     action_ids = [a.action_id for a in record.legal_action_descriptors]
-    base_scores = record.base_logits.tolist()
-    final_scores = record.final_logits.tolist()
-    base_probs = record.base_logits.softmax(dim=-1)
-    final_probs = record.final_logits.softmax(dim=-1)
-    mask = record.base_logits.new_ones(record.base_logits.shape)
+    # Complete hierarchical distributions over legal_action_descriptors
+    # (FINISH last, probability p_stop; ordinary actions (1 - p_stop) *
+    # softmax(logits)) -- "base" without advice, "final" as actually sampled
+    # from. Ranks/argmax/entropy/probabilities below are all over these.
+    stop_logit = torch.tensor(record.stop_logit, device=record.base_logits.device)
+    base_probs = hierarchical_action_probabilities(stop_logit, record.base_logits)
+    final_probs = hierarchical_action_probabilities(stop_logit, record.final_logits)
+    base_scores = base_probs.tolist()
+    final_scores = final_probs.tolist()
+    mask = base_probs.new_ones(base_probs.shape)
 
     base_top_index = max(range(len(base_scores)), key=lambda i: base_scores[i])
     final_top_index = max(range(len(final_scores)), key=lambda i: final_scores[i])
@@ -432,28 +466,18 @@ def _decision_row(record: StepRecord, advantage: float, return_target: float) ->
     final_rank = _rank_descending(final_scores, record.selected_action_index)
 
     # FINISH diagnostics (spec: "measure P(FINISH) directly, don't infer it
-    # from successful_finish_rate"). MARLA always offers exactly one FINISH
-    # candidate (actions.build_legal_actions appends finish_descriptor()
-    # unconditionally) -- but this is read defensively (None fields) rather
-    # than asserted, so a malformed legal-action list degrades this one
-    # row instead of crashing the whole write.
-    finish_index = next((i for i, a in enumerate(record.legal_action_descriptors) if a.is_finish), None)
-    if finish_index is not None:
-        base_finish_probability = float(base_probs[finish_index])
-        final_finish_probability = float(final_probs[finish_index])
-        base_finish_rank = _rank_descending(base_scores, finish_index)
-        final_finish_rank = _rank_descending(final_scores, finish_index)
-        base_finish_is_argmax = finish_index == base_top_index
-        final_finish_is_argmax = finish_index == final_top_index
-        finish_selected = record.selected_action_index == finish_index
-    else:
-        base_finish_probability = None
-        final_finish_probability = None
-        base_finish_rank = None
-        final_finish_rank = None
-        base_finish_is_argmax = None
-        final_finish_is_argmax = None
-        finish_selected = None
+    # from successful_finish_rate"). FINISH is always the last legal action
+    # (see marla.environment.actions.count_ordinary_actions); its
+    # probability is the stop head's p_stop, identical for base and final
+    # (advice reshapes only the conditional ordinary-action distribution).
+    finish_index = len(action_ids) - 1
+    base_finish_probability = float(base_probs[finish_index])
+    final_finish_probability = float(final_probs[finish_index])
+    base_finish_rank = _rank_descending(base_scores, finish_index)
+    final_finish_rank = _rank_descending(final_scores, finish_index)
+    base_finish_is_argmax = finish_index == base_top_index
+    final_finish_is_argmax = finish_index == final_top_index
+    finish_selected = record.stop_selected
 
     plan_maker_top_id = None
     plan_maker_rank = None
@@ -520,7 +544,13 @@ def _decision_row(record: StepRecord, advantage: float, return_target: float) ->
         "selected_action_id": selected_id,
         "selected_action_type": record.selected_action_type,
         "base_policy_entropy": float(masked_entropy(base_probs.clamp_min(1e-12).log(), mask)),
+        # Margin of the ordinary-action logits (the query gate's input).
         "base_top_two_margin": float(compute_top_two_margin(record.base_logits)),
+        "stop_probability": record.old_stop_probability,
+        "stop_selected": record.stop_selected,
+        "completion_probability": record.completion_probability,
+        # Decision-time simulator truth, the completion predictor's label.
+        "completion_label": record.objective_satisfied_before_action,
         "selected_action_base_probability": float(base_probs[record.selected_action_index]),
         "selected_action_final_probability": float(final_probs[record.selected_action_index]),
         "selected_action_base_rank": base_rank,
@@ -885,6 +915,27 @@ def build_rollout_row(
             mean_finish_probability_visible_complete_frontier_remaining
         ),
         "mean_finish_probability_visible_complete_no_frontier": mean_finish_probability_visible_complete_no_frontier,
+        **_completion_and_stop_aggregates(records),
+    }
+
+
+def _completion_and_stop_aggregates(records: list[StepRecord]) -> dict[str, Any]:
+    """Collection-time completion-predictor and stop-head diagnostics over a
+    rollout's decisions (same definitions as the per-minibatch updates.csv
+    fields, see marla.learning.ppo)."""
+    labels = torch.tensor([float(r.objective_satisfied_before_action) for r in records])
+    stop = torch.tensor([r.old_stop_probability for r in records])
+    predicted = [r.completion_probability for r in records if r.completion_probability is not None]
+    if len(predicted) == len(records):
+        completion = completion_prediction_metrics(torch.tensor(predicted), labels)
+    else:
+        completion = completion_prediction_metrics(labels.new_zeros(0), labels.new_zeros(0))
+    positives = int(labels.sum().item())
+    return {
+        **completion,
+        "completion_label_positive_count": positives,
+        "completion_label_negative_count": len(records) - positives,
+        **stop_probability_metrics(stop, labels),
     }
 
 

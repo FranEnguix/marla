@@ -72,7 +72,12 @@ PARAMETER_FEATURE_DIM = 2  # [has_service_or_process_param, has_os_param]
 #     this integer alone is NOT sufficient identity for RecurrentCore's
 #     actual input width; marla.learning.checkpoint additionally records
 #     and checks both flags directly (see CheckpointMetadata).
-POLICY_REPRESENTATION_VERSION = 4
+# v5: hierarchical policy -- FINISH leaves the ordinary-action softmax and is
+#     decided by a dedicated PPO-trained stop head fed by z_t and an
+#     auxiliary completion predictor (see marla.learning.recurrent_policy).
+#     Whether the completion head exists is recorded and checked separately
+#     (CheckpointMetadata.completion_predictor_enabled).
+POLICY_REPRESENTATION_VERSION = 5
 
 
 def action_type_id(action_type: str) -> int:

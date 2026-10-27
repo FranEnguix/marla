@@ -100,8 +100,6 @@ async def test_replay_at_theta_old_reproduces_old_log_prob_and_has_zero_route_sw
     adapter = NasimEmuAdapter(
         scenario=TWO_SUBNET_SCENARIO,
         max_episode_steps=config.environment.max_episode_steps,
-        completion_reward=config.objective.completion_reward,
-        premature_finish_penalty=config.objective.premature_finish_penalty,
     )
     records = await _collect_all_queried(policy, adapter)
 
@@ -149,8 +147,10 @@ async def test_replay_at_theta_old_reproduces_old_log_prob_under_trial22_config_
     (4x512, ~10-update) version of this same measurement.
     """
     torch.manual_seed(DIAGNOSTIC_SEED_TRIAL22)
-    config = load_config(REPO_ROOT / "research" / "configs" / "ppo_best_hpo.yaml")
-    data = config.model_dump()
+    # The research config predates the per-target FINISH reward fields; only its
+    # objective block is replaced (the reward does not affect the identity tested).
+    data = yaml.safe_load((REPO_ROOT / "research" / "configs" / "ppo_best_hpo.yaml").read_text())
+    data["objective"] = {"type": "capture_target", "description": data["objective"]["description"]}
     trial22_ppo = _trial22_ppo_hyperparameters()
     data["policy"]["ppo"] = dict(trial22_ppo)
     data["policy"]["ppo"]["num_envs"] = 1
@@ -181,8 +181,6 @@ async def test_replay_at_theta_old_reproduces_old_log_prob_under_trial22_config_
     scenario_path = resolve_scenario_reference(config.environment.scenario, REPO_ROOT)
     adapter = NasimEmuAdapter(
         scenario=scenario_path, max_episode_steps=config.environment.max_episode_steps,
-        completion_reward=config.objective.completion_reward,
-        premature_finish_penalty=config.objective.premature_finish_penalty,
     )
     collector = RolloutCollector(
         adapter, policy, run_id="trial22-identity-test", base_seed=DIAGNOSTIC_SEED_TRIAL22,
@@ -227,8 +225,6 @@ async def test_route_switch_diagnostic_detects_an_engineered_route_change():
     adapter = NasimEmuAdapter(
         scenario=TWO_SUBNET_SCENARIO,
         max_episode_steps=config.environment.max_episode_steps,
-        completion_reward=config.objective.completion_reward,
-        premature_finish_penalty=config.objective.premature_finish_penalty,
     )
 
     call_count = 0
@@ -381,8 +377,6 @@ async def test_route_switch_fraction_starts_at_zero_and_stays_well_formed_across
     adapter = NasimEmuAdapter(
         scenario=TWO_SUBNET_SCENARIO,
         max_episode_steps=config.environment.max_episode_steps,
-        completion_reward=config.objective.completion_reward,
-        premature_finish_penalty=config.objective.premature_finish_penalty,
     )
     collector = RolloutCollector(
         adapter, policy, run_id="route-switch-probe", base_seed=DIAGNOSTIC_SEED,

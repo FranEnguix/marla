@@ -8,6 +8,7 @@ adapter. Nothing outside :mod:`marla.environment` should import
 
 from __future__ import annotations
 
+import hashlib
 import random
 from dataclasses import dataclass, field
 
@@ -18,12 +19,20 @@ from nasimemu.nasim.envs.utils import AccessLevel
 
 from marla.environment.actions import ActionDescriptor, build_legal_actions, parse_host_target_key, resolve_action_target
 from marla.environment.finish import (
-    DEFAULT_COMPLETION_REWARD_PER_TARGET,
-    DEFAULT_PREMATURE_FINISH_PENALTY,
-    DEFAULT_PREMATURE_FINISH_PENALTY_PER_REMAINING_TARGET,
+    DEFAULT_PREMATURE_FINISH_REWARD_PER_REMAINING_TARGET,
+    DEFAULT_SUCCESSFUL_FINISH_REWARD_PER_TARGET,
     compute_finish_reward,
 )
 from marla.environment.graph import GraphObservation, build_graph_observation
+
+
+# See NasimEmuAdapter.reset.
+MAX_ZERO_TARGET_REGENERATIONS = 100
+
+
+def _regeneration_seed(seed: int, attempt: int) -> int:
+    digest = hashlib.sha256(f"marla-zero-target-regeneration|{seed}|{attempt}".encode()).digest()
+    return int.from_bytes(digest[:4], "little")
 
 
 @dataclass(frozen=True)
@@ -63,22 +72,16 @@ class NasimEmuAdapter:
         self,
         scenario: str,
         max_episode_steps: int,
-        completion_reward: float | None = None,
-        premature_finish_penalty: float = DEFAULT_PREMATURE_FINISH_PENALTY,
-        premature_finish_penalty_per_remaining_target: float = DEFAULT_PREMATURE_FINISH_PENALTY_PER_REMAINING_TARGET,
-        completion_reward_per_target: float = DEFAULT_COMPLETION_REWARD_PER_TARGET,
+        successful_finish_reward_per_target: float = DEFAULT_SUCCESSFUL_FINISH_REWARD_PER_TARGET,
+        premature_finish_reward_per_remaining_target: float = DEFAULT_PREMATURE_FINISH_REWARD_PER_REMAINING_TARGET,
     ) -> None:
-        """FINISH reward parameters mirror :class:`marla.config.models.ObjectiveConfig`
-        (same defaults and precedence): a non-None ``completion_reward`` is a fixed
-        successful-FINISH reward; otherwise it is ``completion_reward_per_target``
-        times the scenario's sensitive-target count. See :mod:`marla.environment.finish`.
+        """FINISH reward coefficients mirror :class:`marla.config.models.ObjectiveConfig`
+        (same defaults); see :mod:`marla.environment.finish`.
         """
         self._scenario = scenario
         self._max_episode_steps = max_episode_steps
-        self._completion_reward = completion_reward
-        self._completion_reward_per_target = completion_reward_per_target
-        self._premature_finish_penalty = premature_finish_penalty
-        self._premature_finish_penalty_per_remaining_target = premature_finish_penalty_per_remaining_target
+        self._successful_finish_reward_per_target = successful_finish_reward_per_target
+        self._premature_finish_reward_per_remaining_target = premature_finish_reward_per_remaining_target
         self._env = NASimEmuEnv(
             scenario_name=scenario,
             emulate=False,
@@ -100,20 +103,12 @@ class NasimEmuAdapter:
         return self._scenario
 
     @property
-    def completion_reward(self) -> float | None:
-        return self._completion_reward
+    def successful_finish_reward_per_target(self) -> float:
+        return self._successful_finish_reward_per_target
 
     @property
-    def completion_reward_per_target(self) -> float:
-        return self._completion_reward_per_target
-
-    @property
-    def premature_finish_penalty(self) -> float:
-        return self._premature_finish_penalty
-
-    @property
-    def premature_finish_penalty_per_remaining_target(self) -> float:
-        return self._premature_finish_penalty_per_remaining_target
+    def premature_finish_reward_per_remaining_target(self) -> float:
+        return self._premature_finish_reward_per_remaining_target
 
     def reset(self, seed: int | None = None) -> EnvironmentState:
         """Start a new episode, generating a fresh scenario instance.
@@ -122,14 +117,33 @@ class NasimEmuAdapter:
         internally only at env construction time; to get reproducible
         per-episode scenario generation we (re-)seed immediately before
         calling ``reset()``, which is what actually regenerates the scenario.
-        """
-        if seed is not None:
-            random.seed(seed)
-            np.random.seed(seed)
 
-        self._successfully_scanned_subnets = set()
-        raw_observation = self._env.reset()
-        return self._make_state(raw_observation)
+        The capture_target objective needs at least one sensitive target:
+        with none, ``goal_reached()`` is vacuously true and FINISH on the
+        first step would count as a successful termination. NASimEmu draws
+        each host's sensitivity independently, so a randomized scenario can
+        occasionally generate an instance without any; such an instance is
+        discarded and regenerated from a seed derived deterministically from
+        ``seed`` and the attempt number (episodes are therefore conditioned
+        on having >= 1 sensitive target). A scenario that never produces a
+        target raises ``ValueError`` after ``MAX_ZERO_TARGET_REGENERATIONS``
+        attempts (``marla run``'s preflight already rejects scenarios whose
+        objective is vacuous on every realization).
+        """
+        for attempt in range(MAX_ZERO_TARGET_REGENERATIONS + 1):
+            attempt_seed = seed if attempt == 0 or seed is None else _regeneration_seed(seed, attempt)
+            if attempt_seed is not None:
+                random.seed(attempt_seed)
+                np.random.seed(attempt_seed)
+            self._successfully_scanned_subnets = set()
+            raw_observation = self._env.reset()
+            if self._env.env.network.sensitive_addresses:
+                return self._make_state(raw_observation)
+        raise ValueError(
+            f"Scenario {self._scenario!r} generated no sensitive target in "
+            f"{MAX_ZERO_TARGET_REGENERATIONS + 1} attempts (seed={seed}); the capture_target objective "
+            "needs at least one sensitive host"
+        )
 
     def legal_actions(self, state: EnvironmentState) -> list[ActionDescriptor]:
         return build_legal_actions(self._env, state.host_addresses)
@@ -188,13 +202,10 @@ class NasimEmuAdapter:
             satisfied = self.objective_satisfied()
             total_targets, remaining_targets = self.sensitive_target_status()
             reward = compute_finish_reward(
-                satisfied,
-                self._completion_reward,
-                self._premature_finish_penalty,
-                self._premature_finish_penalty_per_remaining_target,
+                total_targets,
                 remaining_targets,
-                completion_reward_per_target=self._completion_reward_per_target,
-                total_sensitive_targets=total_targets,
+                self._successful_finish_reward_per_target,
+                self._premature_finish_reward_per_remaining_target,
             )
             return TransitionResult(
                 state=None,

@@ -53,7 +53,7 @@ class EvaluationRunResult:
     evaluation_policy_mode: EvaluationPolicyMode = EvaluationPolicyMode.GREEDY
     # STOCHASTIC_POLICY only (None under GREEDY, which draws nothing): the
     # sampling scheme, the agent seed its streams were derived from, and
-    # how many query/action draws the whole collection window made
+    # how many stop/query/action draws the whole collection window made
     # (including any episode past num_episodes that collect()'s step
     # budget started and that was then discarded below).
     rng_scheme: str | None = None
@@ -191,10 +191,8 @@ async def evaluate_checkpoint(
     adapter = NasimEmuAdapter(
         scenario=target_scenario,
         max_episode_steps=config.environment.max_episode_steps,
-        completion_reward=config.objective.completion_reward,
-        premature_finish_penalty=config.objective.premature_finish_penalty,
-        premature_finish_penalty_per_remaining_target=config.objective.premature_finish_penalty_per_remaining_target,
-        completion_reward_per_target=config.objective.completion_reward_per_target,
+        successful_finish_reward_per_target=config.objective.successful_finish_reward_per_target,
+        premature_finish_reward_per_remaining_target=config.objective.premature_finish_reward_per_remaining_target,
     )
 
     consult_fn: ConsultFn | None = None

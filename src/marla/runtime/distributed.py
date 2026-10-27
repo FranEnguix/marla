@@ -73,10 +73,8 @@ async def _build_and_run(
         adapter = NasimEmuAdapter(
             scenario=scenario_path,
             max_episode_steps=config.environment.max_episode_steps,
-            completion_reward=config.objective.completion_reward,
-            premature_finish_penalty=config.objective.premature_finish_penalty,
-            premature_finish_penalty_per_remaining_target=config.objective.premature_finish_penalty_per_remaining_target,
-            completion_reward_per_target=config.objective.completion_reward_per_target,
+            successful_finish_reward_per_target=config.objective.successful_finish_reward_per_target,
+            premature_finish_reward_per_remaining_target=config.objective.premature_finish_reward_per_remaining_target,
         )
         orchestrator_password = resolve_password(config.rl_orchestrator.password_env, config.rl_orchestrator.alias)
         orchestrator = RLOrchestratorAgent(

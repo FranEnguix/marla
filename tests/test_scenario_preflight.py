@@ -18,7 +18,9 @@ from marla.cli import app
 runner = CliRunner()
 REPO_ROOT = Path(__file__).resolve().parent.parent
 UNSOLVABLE_SCENARIO = str((REPO_ROOT / "NASimEmu/scenarios/sm_entry_user_three_subnets.v2.yaml").resolve())
-SOLVABLE_SCENARIO = str((REPO_ROOT / "NASimEmu/scenarios/sm_entry_dmz_one_subnet.v2.yaml").resolve())
+SOLVABLE_SCENARIO = str((REPO_ROOT / "tests/data/scenarios/sm_entry_dmz_one_target.v2.yaml").resolve())
+# Structurally "solvable" only vacuously: no sensitive host on any realization.
+VACUOUS_SCENARIO = str((REPO_ROOT / "NASimEmu/scenarios/sm_entry_dmz_one_subnet.v2.yaml").resolve())
 
 
 def _write_config(tmp_path: Path, scenario: str, run_id: str) -> Path:
@@ -115,3 +117,17 @@ def test_preflight_output_is_quiet_on_success(tmp_path, monkeypatch):
     assert "Scenario solvability: PASSED" in result.output
     assert "Failure class" not in result.output
     assert "Possible sensitive-host locations" not in result.output
+
+
+def test_preflight_rejects_a_vacuous_objective_without_starting_agents(tmp_path, monkeypatch):
+    config_path = _write_config(tmp_path, VACUOUS_SCENARIO, "preflight-vacuous")
+    monkeypatch.setenv("MARLA_RL_ORCHESTRATOR_PASSWORD", "testpass")
+    called = []
+    monkeypatch.setattr("marla.runtime.local.run_local", lambda *a, **k: called.append(True))
+
+    result = runner.invoke(app, ["run", str(config_path)])
+
+    assert result.exit_code == 1
+    assert called == []
+    assert "no sensitive targets on any realization" in result.output
+    assert not (tmp_path / "runs").exists()

@@ -71,7 +71,7 @@ import yaml
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 sys.path.insert(0, str(REPO_ROOT / "src"))
 
-SMALL_SCENARIO = str((REPO_ROOT / "NASimEmu/scenarios/sm_entry_dmz_one_subnet.v2.yaml").resolve())
+SMALL_SCENARIO = str((REPO_ROOT / "tests/data/scenarios/sm_entry_dmz_one_target.v2.yaml").resolve())
 ARTIFACTS_ROOT = REPO_ROOT / "artifacts" / "smoke_test"
 SMOKE_SEED = 20260916  # deterministic, arbitrary, documented -- never a paper/tuning seed
 
@@ -151,8 +151,6 @@ def _phase_direct_adapter(result: SmokeResult, log: logging.Logger) -> list[dict
         adapter = NasimEmuAdapter(
             scenario=SMALL_SCENARIO,
             max_episode_steps=8,
-            completion_reward=1.0,
-            premature_finish_penalty=-1.0,
         )
         log.info("Phase 1: NasimEmuAdapter constructed for scenario %s", SMALL_SCENARIO)
     except Exception as exc:  # noqa: BLE001 -- smoke test must report, not crash

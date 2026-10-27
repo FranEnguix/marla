@@ -6,14 +6,31 @@ probabilities under updated parameters for the PPO ratio. Sharing this
 module is what makes that guarantee structural rather than a matter of
 remembering to keep two implementations in sync.
 
-Replay never samples: it reuses the stored ``sampled_query`` flag, the
-stored ``selected_action_index``, and (critically) the exact stored Plan
-Maker confidence vector -- never recomputing or re-fetching any of them.
+Replay never samples: it reuses the stored ``stop_selected`` and
+``sampled_query`` flags, the stored ``selected_action_index``, and
+(critically) the exact stored Plan Maker confidence vector -- never
+recomputing or re-fetching any of them.
+
+**Hierarchical decision** (see :mod:`marla.learning.recurrent_policy`). The
+complete decision's log-probability is::
+
+    FINISH:    log p_t = log sigma(s_t)
+    CONTINUE:  log p_t = log sigma(-s_t) + log pi^q(q_t|z_t)
+                         + (1-q_t) log pi^0(a_t) + q_t log pi^PM(a_t)
+
+with ``s_t`` the stop logit (log-sigmoid, numerically stable at any
+logit), the query term present only for the assisted variant, and
+``pi^0``/``pi^PM`` softmaxes over the ORDINARY actions only. FINISH involves
+no query decision and no consultation. With no ordinary action legal,
+FINISH is forced (``log p_t = 0``). PPO uses this one joint
+log-probability, so the stop and action decisions share one ratio and one
+advantage.
 
 **PPO-ratio consistency of subnet routing (subnet-scoped consultation,
-design audit)**: the joint log-probability this module computes is::
+design audit)**: for a CONTINUE decision, the action part of the joint
+log-probability is::
 
-    log p_t = log pi^q(q_t|z_t) + (1-q_t) log pi^0(a_t) + q_t log pi^PM(a_t)
+    log pi^q(q_t|z_t) + (1-q_t) log pi^0(a_t) + q_t log pi^PM(a_t)
 
 **Classification: PIECEWISE_EXACT_SEMIGRADIENT** (not an unconditionally
 exact PPO policy ratio -- see the two-tier argument below and
@@ -122,6 +139,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 import torch
+import torch.nn.functional as F
 from torch import Tensor
 
 from marla.learning.query_gate import compute_base_entropy, compute_top_two_margin
@@ -130,12 +148,13 @@ from marla.learning.recurrent_policy import PolicyStepOutput, RecurrentPolicy
 _EPSILON = 1e-12
 
 
-def compute_query_probability(policy: RecurrentPolicy, step_output: PolicyStepOutput, num_actions: int, kappa: float) -> Tensor:
-    """p_t^q, before sampling (spec section 14)."""
+def compute_query_probability(policy: RecurrentPolicy, step_output: PolicyStepOutput, kappa: float) -> Tensor:
+    """p_t^q, before sampling (spec section 14) -- over the ordinary actions
+    only: the gate is consulted only after a CONTINUE decision."""
     device = step_output.z.device
     entropy = compute_base_entropy(step_output.base_probs)
     margin = compute_top_two_margin(step_output.base_logits)
-    num_actions_t = torch.tensor(float(num_actions), device=device)
+    num_actions_t = torch.tensor(float(step_output.num_ordinary_actions), device=device)
     kappa_t = torch.tensor(float(kappa), device=device)
     return policy.query_gate(step_output.z, entropy, margin, num_actions_t, kappa_t)
 
@@ -160,7 +179,7 @@ def compute_final_decision(
     ``consulted_indices`` (a LongTensor of positions into ``base_logits``)
     is required exactly when ``plan_maker_confidence`` is not None --
     subnet-scoped consultation (spec sections 2-10) always scores a
-    SUBSET of the global candidates (that subnet's actions plus FINISH),
+    SUBSET of the ordinary candidates (that subnet's actions; never FINISH),
     never the full action vector, so there is no longer a "confidence
     covers every action" case to fall back to.
 
@@ -194,28 +213,113 @@ def compute_final_decision(
 @dataclass
 class JointLogProbability:
     joint_log_prob: Tensor
-    query_log_prob: Tensor
-    action_log_prob: Tensor
+    # log pi(stop decision actually taken): log sigma(s) for FINISH,
+    # log sigma(-s) for CONTINUE, 0 when FINISH was forced.
+    stop_log_prob: Tensor
+    # Both None for a FINISH decision (no query, no ordinary action).
+    query_log_prob: Tensor | None
+    action_log_prob: Tensor | None
 
 
 def compute_joint_log_probability(
-    query_probability: Tensor, sampled_query: bool, final_logits: Tensor, selected_action_index: int
+    stop_logit: Tensor,
+    num_ordinary_actions: int,
+    stop_selected: bool,
+    final_logits: Tensor | None = None,
+    selected_action_index: int | None = None,
+    query_probability: Tensor | None = None,
+    sampled_query: bool = False,
 ) -> JointLogProbability:
-    """log p_t = log pi^q(q_t|z_t) + (1-q_t) log pi^0(a_t) + q_t log pi^PM(a_t) (spec section 16).
+    """Log-probability of one complete hierarchical decision (module docstring).
 
-    The single ``final_logits`` softmax already *is* pi^0 when not queried
-    (or when advice was rejected, since beta=0) and pi^PM when queried and
-    accepted, so one formula covers both branches of the spec's piecewise
-    definition without a special case.
+    For CONTINUE, ``final_logits`` (``(K,)`` ordinary-action logits: base, or
+    advised when queried and accepted) and ``selected_action_index`` (< K) are
+    required; ``query_probability`` is given exactly for the assisted
+    variant. The single ``final_logits`` softmax already *is* pi^0 when not
+    queried (or when advice was rejected, since beta=0) and pi^PM when queried
+    and accepted, so one formula covers both branches.
     """
-    query_prob_used = query_probability if sampled_query else (1 - query_probability)
-    query_log_prob = torch.log(query_prob_used.clamp_min(_EPSILON))
+    if num_ordinary_actions == 0:
+        if not stop_selected:
+            raise ValueError("CONTINUE is impossible with no ordinary action")
+        zero = stop_logit.new_zeros(())
+        return JointLogProbability(joint_log_prob=zero, stop_log_prob=zero, query_log_prob=None, action_log_prob=None)
+    if stop_selected:
+        stop_log_prob = F.logsigmoid(stop_logit)
+        return JointLogProbability(
+            joint_log_prob=stop_log_prob, stop_log_prob=stop_log_prob, query_log_prob=None, action_log_prob=None
+        )
 
-    log_probs_all = torch.log(torch.softmax(final_logits, dim=-1).clamp_min(_EPSILON))
-    action_log_prob = log_probs_all[selected_action_index]
-
+    if final_logits is None or selected_action_index is None:
+        raise ValueError("final_logits and selected_action_index are required for a CONTINUE decision")
+    if not 0 <= selected_action_index < num_ordinary_actions:
+        raise ValueError(f"selected_action_index={selected_action_index} is not an ordinary action")
+    stop_log_prob = F.logsigmoid(-stop_logit)
+    action_log_prob = F.log_softmax(final_logits, dim=-1)[selected_action_index]
+    joint = stop_log_prob + action_log_prob
+    query_log_prob = None
+    if query_probability is not None:
+        query_prob_used = query_probability if sampled_query else (1 - query_probability)
+        query_log_prob = torch.log(query_prob_used.clamp_min(_EPSILON))
+        joint = joint + query_log_prob
     return JointLogProbability(
-        joint_log_prob=query_log_prob + action_log_prob,
-        query_log_prob=query_log_prob,
+        joint_log_prob=joint, stop_log_prob=stop_log_prob, query_log_prob=query_log_prob,
         action_log_prob=action_log_prob,
     )
+
+
+def bernoulli_entropy_from_logit(logit: Tensor) -> Tensor:
+    """H(Bernoulli(sigma(logit))), stable for any finite logit."""
+    p = torch.sigmoid(logit)
+    return -(p * F.logsigmoid(logit) + (1 - p) * F.logsigmoid(-logit))
+
+
+@dataclass
+class HierarchicalEntropy:
+    # H_stop + (1 - p_stop) * H(pi_action): entropy of the stop/action part of
+    # the decision (the query decision is reported separately).
+    action_entropy: Tensor
+    stop_entropy: Tensor
+    conditional_action_entropy: Tensor  # H(pi_action), not continuation-weighted
+    # (1 - p_stop) * H(pi^q); None without a query gate.
+    query_entropy: Tensor | None
+
+
+def compute_hierarchical_entropy(
+    stop_logit: Tensor, final_logits: Tensor, query_probability: Tensor | None = None
+) -> HierarchicalEntropy:
+    """Entropy of the hierarchical distribution at one decision state.
+
+    ``final_logits`` is the conditional ordinary-action distribution of the
+    decision's own branch (base when not queried). The conditional terms are
+    continuation-weighted by ``1 - p_stop``, the probability that the
+    ordinary-action (and query) decision is reached at all. With no ordinary
+    action, FINISH is forced and every term is 0.
+    """
+    zero = stop_logit.new_zeros(())
+    if final_logits.numel() == 0:
+        return HierarchicalEntropy(zero, zero, zero, zero if query_probability is not None else None)
+    stop_entropy = bernoulli_entropy_from_logit(stop_logit)
+    continue_probability = torch.sigmoid(-stop_logit)
+    log_probs = F.log_softmax(final_logits, dim=-1)
+    conditional = -(log_probs.exp() * log_probs).sum()
+    query_entropy = None
+    if query_probability is not None:
+        q = query_probability.clamp(1e-6, 1 - 1e-6)
+        query_entropy = continue_probability * -(q * torch.log(q) + (1 - q) * torch.log(1 - q))
+    return HierarchicalEntropy(
+        action_entropy=stop_entropy + continue_probability * conditional,
+        stop_entropy=stop_entropy,
+        conditional_action_entropy=conditional,
+        query_entropy=query_entropy,
+    )
+
+
+def hierarchical_action_probabilities(stop_logit: Tensor, ordinary_logits: Tensor) -> Tensor:
+    """The complete distribution over ``legal_actions`` (``(K+1,)``, FINISH
+    last): ``(1 - p_stop) * softmax(ordinary_logits)`` followed by
+    ``p_stop`` -- or ``[1.0]`` when no ordinary action exists. Sums to 1."""
+    if ordinary_logits.numel() == 0:
+        return stop_logit.new_ones(1)
+    p_stop = torch.sigmoid(stop_logit)
+    return torch.cat([(1 - p_stop) * torch.softmax(ordinary_logits, dim=-1), p_stop.reshape(1)])

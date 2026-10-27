@@ -10,7 +10,12 @@ action's preconditions aren't met.
 
 MARLA's legal action set is therefore: every host address currently visible
 in the observation, crossed with every entry of the scenario's action list,
-plus the MARLA-level ``finish`` action. Illegal attempts (missing services,
+plus the MARLA-level ``finish`` action, always LAST. FINISH is part of the
+environment's action set but not of the policy's ordinary-action softmax:
+the hierarchical policy (``marla.learning.recurrent_policy``) decides
+FINISH-vs-CONTINUE with a dedicated stop head and scores only the ordinary
+actions ``legal_actions[:-1]`` -- so an ordinary action's index is the same
+in the full legal list and in the ordinary-action logits. Illegal attempts (missing services,
 unreachable targets, etc.) stay in the candidate set by design -- the Plan
 Maker's knowledge base is expected to down-weight them via visible
 prerequisites, and the environment itself charges their cost on failure.
@@ -62,6 +67,17 @@ def finish_descriptor() -> ActionDescriptor:
         parameters={},
         is_finish=True,
     )
+
+
+def count_ordinary_actions(legal_actions: list[ActionDescriptor]) -> int:
+    """Number of non-FINISH actions, validating the hierarchical-policy layout:
+    exactly one FINISH, and it is the last entry (so ordinary action ``i`` has
+    the same index in ``legal_actions`` and in the ordinary-action logits)."""
+    if not legal_actions or not legal_actions[-1].is_finish:
+        raise ValueError("legal_actions must end with the FINISH action")
+    if any(a.is_finish for a in legal_actions[:-1]):
+        raise ValueError("legal_actions must contain exactly one FINISH action")
+    return len(legal_actions) - 1
 
 
 # (id_prefix, action_type) for each of the four fixed per-host scan actions,

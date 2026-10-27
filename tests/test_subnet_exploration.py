@@ -57,7 +57,7 @@ def test_failed_subnet_scan_does_not_mark_the_subnet_scanned():
     successfully scanned."""
     adapter = NasimEmuAdapter(
         scenario=str(diagnostic_scenario_path("micro_d_exploration_frontier.v2.yaml")),
-        max_episode_steps=30, completion_reward=1.0, premature_finish_penalty=0.0,
+        max_episode_steps=30,
     )
     state = adapter.reset(seed=1)
     entry_key = f"host-{state.host_addresses[0][0]}-{state.host_addresses[0][1]}"
@@ -75,7 +75,7 @@ def test_successful_zero_discovery_subnet_scan_still_counts_as_scanned():
     subnet as scanned -- never inferred from subnet_graph changing."""
     adapter = NasimEmuAdapter(
         scenario=str(diagnostic_scenario_path("micro_d_exploration_frontier.v2.yaml")),
-        max_episode_steps=30, completion_reward=1.0, premature_finish_penalty=0.0,
+        max_episode_steps=30,
     )
     state, entry_key = _reach_entry_user(adapter)
     legal = adapter.legal_actions(state)
@@ -101,7 +101,7 @@ def test_successful_zero_discovery_subnet_scan_still_counts_as_scanned():
 def test_new_episode_resets_successfully_scanned_subnets():
     adapter = NasimEmuAdapter(
         scenario=str(diagnostic_scenario_path("micro_d_exploration_frontier.v2.yaml")),
-        max_episode_steps=30, completion_reward=1.0, premature_finish_penalty=0.0,
+        max_episode_steps=30,
     )
     state, entry_key = _reach_entry_user(adapter)
     legal = adapter.legal_actions(state)
@@ -198,7 +198,7 @@ def _dummy_host_rows(host_addresses: list[tuple[int, int]]):
     """
     adapter = NasimEmuAdapter(
         scenario=str(diagnostic_scenario_path("micro_d_exploration_frontier.v2.yaml")),
-        max_episode_steps=5, completion_reward=1.0, premature_finish_penalty=0.0,
+        max_episode_steps=5,
     )
     state = adapter.reset(seed=1)
     template_row = state.host_rows[0]
@@ -221,7 +221,7 @@ def test_host_nodes_never_receive_the_subnet_scan_completed_bit():
     feature is per-subnet, never per-host (spec section 14)."""
     adapter = NasimEmuAdapter(
         scenario=str(diagnostic_scenario_path("micro_d_exploration_frontier.v2.yaml")),
-        max_episode_steps=30, completion_reward=1.0, premature_finish_penalty=0.0,
+        max_episode_steps=30,
     )
     state, entry_key = _reach_entry_user(adapter)
     legal = adapter.legal_actions(state)
@@ -243,7 +243,7 @@ def test_include_subnet_scan_feature_false_forces_zero_regardless_of_real_state(
     must never see this signal indirectly through GraphSAGE."""
     adapter = NasimEmuAdapter(
         scenario=str(diagnostic_scenario_path("micro_d_exploration_frontier.v2.yaml")),
-        max_episode_steps=30, completion_reward=1.0, premature_finish_penalty=0.0,
+        max_episode_steps=30,
     )
     state, entry_key = _reach_entry_user(adapter)
     legal = adapter.legal_actions(state)
@@ -314,7 +314,7 @@ def test_plan_maker_summary_and_ppo_exploration_facts_agree():
     same authoritative source, per spec section 32."""
     adapter = NasimEmuAdapter(
         scenario=str(diagnostic_scenario_path("micro_d_exploration_frontier.v2.yaml")),
-        max_episode_steps=30, completion_reward=1.0, premature_finish_penalty=0.0,
+        max_episode_steps=30,
     )
     state, entry_key = _reach_entry_user(adapter)
     legal = adapter.legal_actions(state)
@@ -362,8 +362,6 @@ async def test_ppo_replay_reuses_stored_visible_progress_verbatim(monkeypatch):
     adapter = NasimEmuAdapter(
         scenario=str(diagnostic_scenario_path("micro_d_exploration_frontier.v2.yaml")),
         max_episode_steps=config.environment.max_episode_steps,
-        completion_reward=config.objective.completion_reward,
-        premature_finish_penalty=config.objective.premature_finish_penalty,
     )
     collector = RolloutCollector(adapter, policy, run_id="test-run", base_seed=1)
     records, _summaries = await collector.collect(8)
@@ -429,7 +427,7 @@ def test_decision_row_carries_exploration_metrics_from_a_real_rollout():
     policy = RecurrentPolicy(config.policy)
     adapter = NasimEmuAdapter(
         scenario=str(diagnostic_scenario_path("micro_d_exploration_frontier.v2.yaml")),
-        max_episode_steps=20, completion_reward=1.0, premature_finish_penalty=0.0,
+        max_episode_steps=20,
     )
     collector = RolloutCollector(adapter, policy, run_id="t", base_seed=1)
 
@@ -495,6 +493,8 @@ def test_rollout_row_frontier_conditional_finish_split_uses_visible_completion_o
             previous_training_reward=0.0, previous_query=False,
             base_logits=torch.zeros(1), final_logits=torch.zeros(1), selected_action_index=0,
             old_action_log_probability=0.0, old_joint_log_probability=0.0, critic_value=0.0,
+            stop_logit=0.0, old_stop_probability=0.5, stop_selected=False, old_stop_log_probability=0.0,
+            completion_probability=None,
             nasimemu_reward=0.0, consultation_cost=0.0, training_reward=0.0,
             terminated=False, truncated=False,
         )

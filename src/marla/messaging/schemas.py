@@ -19,15 +19,15 @@ from typing import Any
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from marla.config.models import (
-    DEFAULT_COMPLETION_REWARD_PER_TARGET,
-    DEFAULT_PREMATURE_FINISH_PENALTY,
-    DEFAULT_PREMATURE_FINISH_PENALTY_PER_REMAINING_TARGET,
+    DEFAULT_PREMATURE_FINISH_REWARD_PER_REMAINING_TARGET,
+    DEFAULT_SUCCESSFUL_FINISH_REWARD_PER_TARGET,
     ObjectiveConfig,
 )
 
 # 1.1: AdvisoryRequestPayload legal_actions -> candidate_actions, + consulted_subnet/global_candidate_action_count
 # (subnet-scoped consultation). 1.2: AdvisoryObjective.finish_reward (resolved FINISH-reward settings for the prompt).
-MESSAGE_SCHEMA_VERSION = "1.2"
+# 1.3: FinishRewardSpec reduced to the two per-target coefficients; candidate_actions never include FINISH.
+MESSAGE_SCHEMA_VERSION = "1.3"
 
 
 class MessageType(str, Enum):
@@ -94,10 +94,8 @@ class FinishRewardSpec(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    completion_reward: float | None = None
-    completion_reward_per_target: float = DEFAULT_COMPLETION_REWARD_PER_TARGET
-    premature_finish_penalty: float = DEFAULT_PREMATURE_FINISH_PENALTY
-    premature_finish_penalty_per_remaining_target: float = DEFAULT_PREMATURE_FINISH_PENALTY_PER_REMAINING_TARGET
+    successful_finish_reward_per_target: float = DEFAULT_SUCCESSFUL_FINISH_REWARD_PER_TARGET
+    premature_finish_reward_per_remaining_target: float = DEFAULT_PREMATURE_FINISH_REWARD_PER_REMAINING_TARGET
 
 
 class AdvisoryObjective(BaseModel):
@@ -114,10 +112,8 @@ class AdvisoryObjective(BaseModel):
             type=objective.type,
             description=objective.description,
             finish_reward=FinishRewardSpec(
-                completion_reward=objective.completion_reward,
-                completion_reward_per_target=objective.completion_reward_per_target,
-                premature_finish_penalty=objective.premature_finish_penalty,
-                premature_finish_penalty_per_remaining_target=objective.premature_finish_penalty_per_remaining_target,
+                successful_finish_reward_per_target=objective.successful_finish_reward_per_target,
+                premature_finish_reward_per_remaining_target=objective.premature_finish_reward_per_remaining_target,
             ),
         )
 
@@ -135,7 +131,8 @@ class AdvisoryActionDescriptor(BaseModel):
 
 class AdvisoryRequestPayload(BaseModel):
     """Subnet-scoped consultation (schema 1.1+): ``candidate_actions`` is the
-    CONSULTED subset only (one subnet's actions plus FINISH), never the
+    CONSULTED subset only (one subnet's ordinary actions; never FINISH, which the policy
+    decides with its own stop head before consulting), never the
     full global candidate set -- renamed from ``legal_actions`` because that
     name implied completeness this payload no longer has. ``consulted_subnet``/
     ``global_candidate_action_count`` are accounting-only fields for the

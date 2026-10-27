@@ -25,7 +25,7 @@ overwrite existing files unless ``--force`` is given.
 
 .. code-block:: text
 
-   marla run CONFIG_PATH [--agent ALIAS_OR_JID ...] [--debug] [--resume CHECKPOINT_PATH] [--accept-unverified-finish-reward]
+   marla run CONFIG_PATH [--agent ALIAS_OR_JID ...] [--debug] [--resume CHECKPOINT_PATH]
 
 Runs an experiment.
 
@@ -76,14 +76,13 @@ Runs an experiment.
   any run directory is created. Weight shapes are unaffected, so the same
   checkpoint still loads for evaluation.
   ``--resume`` also compares the checkpoint's recorded FINISH-reward
-  semantics with the config's effective ``objective`` FINISH rewards and
+  semantics with the config's ``objective`` FINISH-reward coefficients and
   refuses a mismatch
-  (:class:`marla.learning.checkpoint.FinishRewardMismatchError`). A
-  checkpoint saved before these semantics were recorded is refused
-  (:class:`marla.learning.checkpoint.FinishRewardUnverifiedError`) unless
-  ``--accept-unverified-finish-reward`` is given -- set the config's FINISH
-  fields to the values the checkpoint was trained with first (see
-  :doc:`configuration`, ``objective``). Evaluation loads are unaffected.
+  (:class:`marla.learning.checkpoint.FinishRewardMismatchError`; see
+  :doc:`configuration`, ``objective``). Checkpoints saved before the
+  hierarchical stop head (``policy_representation_version`` < 5) cannot be
+  loaded at all (:class:`marla.learning.checkpoint.PolicyRepresentationMismatchError`).
+  Evaluation loads never check reward semantics.
 
 Before any agent -- RL Orchestrator, Gatekeeper, Plan Maker, or the
 embedded XMPP server -- is started, ``marla run`` resolves the configured
@@ -97,7 +96,10 @@ prints a full diagnostic (the structural reason, an example unsolvable
 host configuration, and the exact ``marla scenario repair ...`` command to
 fix it), exits non-zero, and -- this is a hard rule, not a convenience --
 **no MARLA agent of any kind is started**. ``marla run`` never repairs a
-scenario itself; see :ref:`scenario-repair`.
+scenario itself; see :ref:`scenario-repair`. A scenario that is solvable
+only vacuously -- no sensitive target on any realization, e.g. NASimEmu's
+``sm_entry_dmz_one_subnet.v2.yaml`` -- is also refused, since its
+``capture_target`` objective would be "complete" before any action.
 
 Exit code ``1`` on: invalid configuration, an unresolvable device request
 (``device: gpu`` without working CUDA), a proven-unsolvable (or

@@ -163,7 +163,7 @@ async def test_generate_plots_on_a_run_with_the_new_nullable_columns_emits_no_dt
     from marla.metrics.writer import write_episodes_csv, write_rollouts_csv, write_updates_csv, _write_csv, _DECISIONS_FIELDS, build_decision_rows
 
     REPO_ROOT = Path(__file__).resolve().parent.parent
-    SMALL_SCENARIO = str((REPO_ROOT / "NASimEmu/scenarios/sm_entry_dmz_one_subnet.v2.yaml").resolve())
+    SMALL_SCENARIO = str((REPO_ROOT / "tests/data/scenarios/sm_entry_dmz_one_target.v2.yaml").resolve())
 
     config = load_config(REPO_ROOT / "examples" / "baseline.yaml")
     data = config.model_dump()

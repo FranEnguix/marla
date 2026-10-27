@@ -1,0 +1,64 @@
+# MARLA test scenario: NASimEmu's sm_entry_dmz_one_subnet.v2.yaml with the
+# single DMZ host made sensitive (exactly one sensitive target per episode).
+# The original assigns sensitive-host probability 0 everywhere, so its
+# capture_target objective is vacuous (no target to root), which MARLA now
+# rejects; this keeps the same small topology with a real objective. Linux
+# only (windows services/exploits removed), so every DMZ realization is
+# rootable (USER exploit + pe_kernel).
+# This is special scenario format, that leaves some variables to chance. Not compatible with the original nasim generator/loader.
+
+subnets: [1, 2-5] # ranges of hosts in subnets
+# address_space_bounds: (2, 8)  # max number of subnets & hosts in a subnet
+address_space_bounds: (5, 10) # fix for the experiment - all scenarios have to have the same bounds
+topology: [[ 1, 1, 0],
+           [ 1, 1, 1],
+           [ 0, 1, 1]]
+subnet_labels: # useful only for visualization and debugging
+  1: DMZ
+  2: user
+sensitive_hosts:  # probabilities of sensitive hosts in specific subnets
+  1: 1.0  # DMZ: its single host is the one sensitive target
+  2: 0.   # user subnet
+os:
+  - linux
+services:
+  - 21_linux_proftpd
+  - 80_linux_drupal
+  - 80_linux_phpwiki
+  - 3306_any_mysql
+sensitive_services:
+  - 3306_any_mysql
+processes:
+  - ~
+exploits:
+  e_proftpd:
+    service: 21_linux_proftpd
+    os: linux
+    prob: 1.0
+    cost: 1
+    access: user
+  e_drupal:
+    service: 80_linux_drupal
+    os: linux
+    prob: 1.0
+    cost: 1
+    access: user
+  e_phpwiki:
+    service: 80_linux_phpwiki
+    os: linux
+    prob: 1.0
+    cost: 1
+    access: user
+privilege_escalation:
+  pe_kernel:
+    process: ~
+    os: linux
+    prob: 1.0
+    cost: 1
+    access: root
+service_scan_cost: 1
+os_scan_cost: 1
+subnet_scan_cost: 1
+process_scan_cost: 1
+host_configurations: _random
+firewall: _subnets

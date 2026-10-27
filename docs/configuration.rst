@@ -184,90 +184,75 @@ objective
   to the Plan Maker verbatim as context.
 FINISH reward (applied only on the transition where the agent explicitly
 selects FINISH; rooting the last target with any other action earns only
-NASimEmu's own reward for that action). With :math:`N` sensitive targets in
-the episode's scenario instance and :math:`M` of them still lacking ROOT
-access (USER access does not count; ordinary hosts never count), the
-default is
+NASimEmu's own reward for that action, and every non-FINISH action keeps
+NASimEmu's original reward). With :math:`N` sensitive targets in the
+episode's scenario instance and :math:`M` of them still lacking ROOT access
+(USER access does not count; non-sensitive hosts never count):
 
 .. math::
 
    R_{\text{FINISH}} =
    \begin{cases}
-   50N, & \text{if all sensitive targets have ROOT access } (M = 0)\\
-   -100M, & \text{otherwise}
+   +c_{\text{success}} \cdot N, & M = 0 \text{ (successful FINISH)}\\
+   c_{\text{premature}} \cdot M, & M > 0 \text{ (premature FINISH)}
    \end{cases}
 
-- ``completion_reward_per_target`` (float, default ``50.0``): successful-FINISH
-  reward per sensitive target in the scenario (reward = value × N).
-- ``completion_reward`` (float or null, default ``null``): optional *fixed*
-  successful-FINISH reward. If set, it takes precedence and the reward no
-  longer scales with N -- this is how configs written before
-  ``completion_reward_per_target`` existed keep their exact behavior. When
-  both are present, ``completion_reward`` wins and
-  ``completion_reward_per_target`` is ignored.
-- ``premature_finish_penalty`` (float, default ``0.0``): fixed component of
-  the reward for FINISH when the objective isn't satisfied.
-- ``premature_finish_penalty_per_remaining_target`` (float, default
-  ``-100.0``): additional reward per sensitive target not yet at ROOT access.
-  The two premature terms add: ``premature_finish_penalty +
-  premature_finish_penalty_per_remaining_target * M``.
+- ``successful_finish_reward_per_target`` (float >= 0, default ``1.0``):
+  :math:`c_{\text{success}}`.
+- ``premature_finish_reward_per_remaining_target`` (float <= 0, default
+  ``-1.0``): :math:`c_{\text{premature}}`.
 
-Explicit values always override these defaults. Configs that omit all four
-fields get the target-dependent reward above; configs that set them keep
-exactly the values they set (e.g. ``completion_reward: 1.0``,
-``premature_finish_penalty: -1.0`` reproduces the fixed rewards of MARLA <= 0.11.0,
-whose defaults were ``completion_reward: 1.0``, ``premature_finish_penalty:
--1.0``, ``premature_finish_penalty_per_remaining_target: 0.0``). The FINISH
-reward enters ``nasimemu_reward``/``benchmark_return`` once; for assisted
-agents the consultation cost is still subtracted only in the training
-reward. No target-state information is added to the agent's observations.
+With the defaults, FINISH pays ``+N`` (e.g. ``+3`` for 3 rooted targets) or
+``-M`` (``-1`` with one target missing). There are no fixed completion
+bonuses or premature-termination penalties; the obsolete parameters
+(``completion_reward``, ``completion_reward_per_target``,
+``premature_finish_penalty``, ``premature_finish_penalty_per_remaining_target``)
+are rejected as unknown keys. FINISH terminates the episode (no NASimEmu
+action is executed). The FINISH reward enters ``nasimemu_reward``/
+``benchmark_return`` once; for assisted agents the consultation cost is
+subtracted only in the training reward. No target-state information is
+added to the agent's observations.
 
-**FINISH must be selected explicitly.** The completion reward is paid only on
-the FINISH transition; an episode that roots every target but never selects
-FINISH ends by time-limit truncation with no FINISH reward
-(``finish_reason: truncated``; counted in ``timeout_rate``).
+**Zero-target instances.** The objective needs at least one sensitive target
+-- with none, "all targets rooted" is vacuously true. ``marla run``'s
+preflight rejects a scenario that has no sensitive target on any
+realization. NASimEmu draws each host's sensitivity independently, so a
+randomized scenario can occasionally generate an instance without targets;
+:meth:`NasimEmuAdapter.reset <marla.environment.nasimemu_adapter.NasimEmuAdapter.reset>`
+discards such an instance and regenerates it from a seed derived
+deterministically from the episode seed (episodes are conditioned on having
+at least one target), and raises after 101 attempts.
 
-**Plan Maker prompt and response caching.** The Plan Maker prompt describes
-the FINISH reward from the run's resolved ``objective`` values (the advisory
-request carries them as ``objective.finish_reward``), so explicit overrides
-are described correctly. The prompt version is
-``nasimemu-plan-maker-v3-finish-reward``; it is part of the evaluation
-advisory-cache key, so responses cached under earlier prompt versions are
-never reused, and the key also includes the advisory objective, so runs with
-different FINISH rewards never share cached responses. Existing cache files
-remain readable but produce no hits for v3 requests (expected one-time
-cache misses).
+**FINISH must be selected explicitly.** The reward is paid only on the FINISH
+transition; an episode that roots every target but never selects FINISH ends
+by time-limit truncation with no FINISH reward (``finish_reason:
+truncated``; counted in ``timeout_rate``). FINISH is decided by the policy's
+dedicated stop head, not by the ordinary-action softmax (see ``policy``
+below and :doc:`architecture`).
 
-**Resuming checkpoints.** New checkpoints record the run's *effective*
-FINISH-reward semantics (``finish_reward_semantics``: fixed vs. per-target
-completion reward with precedence applied, plus both premature terms).
-``marla run --resume`` compares them with the resuming config and refuses a
-mismatch, so a run can never silently continue under a different reward
-objective; differences that pay identical rewards (e.g. an unused
-``completion_reward_per_target`` next to a fixed ``completion_reward``) are
-not mismatches. Checkpoints saved before this field existed carry no
-semantics: resuming them is refused unless you set the objective's FINISH
-fields to the values the checkpoint was trained with (MARLA <= 0.11.0
-defaults: ``completion_reward: 1.0``, ``premature_finish_penalty: -1.0``,
-``premature_finish_penalty_per_remaining_target: 0.0``, unless the original
-config set other values) and pass ``--accept-unverified-finish-reward``.
-Evaluation loads never check reward semantics.
+**Plan Maker prompt and response caching.** FINISH is never a consulted
+candidate: the Plan Maker is consulted only after the stop head chose
+CONTINUE and scores ordinary actions only. The prompt still describes the
+FINISH reward (from the run's ``objective`` values, carried in the advisory
+request as ``objective.finish_reward``) for context. The prompt version is
+``nasimemu-plan-maker-v4-hierarchical-stop``; it and the advisory objective
+are part of the evaluation advisory-cache key, so responses cached under an
+earlier prompt version or a different reward are never reused.
 
-**Reward scale and PPO (review notes).** The default FINISH rewards (e.g.
-+150 or -300 for 3 targets) are two orders of magnitude larger than
-NASimEmu's per-action costs. No implementation change is required: FINISH is
-a true terminal transition (GAE uses next value 0), time-limit truncation is
-bootstrapped from the critic, and advantages are normalized per PPO
-minibatch, so the actor update is scale-invariant. Expected behavioral
-effects to monitor: (1) critic targets reach hundreds while PPO's value
-clipping range (``clip_epsilon``, in reward units) limits each update's value
-change, so the critic tracks large returns slowly; (2) the value loss can
-dominate the shared global gradient-norm clip, shrinking the actor's share of
-each update; (3) premature FINISH costs -100 per remaining target while a
-timeout costs nothing, so a policy unsure whether all targets are rooted may
-learn to avoid FINISH -- monitor ``timeout_rate`` alongside
-``successful_finish_rate``. Reward/return scaling is deliberately not
-applied automatically.
+**Resuming checkpoints.** Checkpoints record the run's FINISH-reward
+semantics (``finish_reward_semantics``: both coefficients). ``marla run
+--resume`` refuses a checkpoint whose recorded semantics differ from the
+resuming config's, so a run can never silently continue under a different
+reward objective. Evaluation loads never check reward semantics.
+
+**Reward scale and PPO.** The default FINISH reward (``+N``/``-M``) is on the
+scale of NASimEmu's own rewards (a rooted sensitive host is worth about
+``+10`` after NASimEmu's ``/10`` scaling, an action costs about ``-0.1``), so
+FINISH does not dominate value targets. FINISH is a true terminal transition
+(GAE uses next value 0) and time-limit truncation is bootstrapped from the
+critic. A timeout still earns no FINISH reward while a premature FINISH
+costs ``-M``, so monitor ``timeout_rate`` alongside
+``successful_finish_rate``.
 
 policy
 ~~~~~~
@@ -349,9 +334,11 @@ policy
   - ``clip_epsilon`` (float > 0): PPO clipping range.
   - ``value_coefficient`` (float >= 0): value-loss weight in the total loss.
   - ``query_entropy_coefficient`` (float >= 0): entropy bonus weight for
-    the query gate (assisted variant only; harmless if set for baseline).
+    the query gate, ``(1 - p_stop) * H(query)`` (assisted variant only;
+    harmless if set for baseline).
   - ``action_entropy_coefficient`` (float >= 0): entropy bonus weight for
-    the action distribution.
+    the hierarchical stop/action decision, ``H(stop) + (1 - p_stop) *
+    H(pi_action)`` (see :doc:`architecture`).
   - ``max_grad_norm`` (float > 0): gradient clipping norm.
   - ``optimizer``: only ``adam`` is supported -- an unrecognized ``type``
     is rejected rather than silently falling back to something else.
@@ -410,6 +397,32 @@ policy
     is an exact behavioral no-op: every existing config/checkpoint is
     unaffected, and this remains ``0`` in every production/paper config
     unless a future experiment justifies changing it.
+- ``completion_predictor`` (all fields optional): the auxiliary
+  mission-completion predictor, a head on the recurrent state ``z_t``
+  predicting whether every sensitive target currently has ROOT. Supervised
+  during PPO updates with the simulator's decision-time
+  ``objective_satisfied()`` label (training only -- never an observation or
+  policy input); its probability is one input of the stop head.
+
+  - ``enabled`` (bool, default ``true``): ``false`` removes the head and its
+    loss and feeds the stop head a constant ``0`` instead (an ablation;
+    recorded in checkpoints, a mismatch is rejected on load).
+  - ``loss_coefficient`` (float >= 0, default ``0.1``): :math:`\lambda` in
+    :math:`L = L_{\text{PPO}} + \lambda L_{\text{completion}}`.
+  - ``positive_class_weight`` (``balanced`` or float > 0, default
+    ``balanced``): BCE weight of completed (positive) states. ``balanced``
+    uses ``n_negative / n_positive`` of the current minibatch, clamped to
+    ``[1, max_positive_class_weight]`` (``1`` when the minibatch has no
+    positive label). The weighted loss is normalized by the total sample
+    weight, so reweighting changes the class balance, not the loss scale.
+  - ``max_positive_class_weight`` (float >= 1, default ``10.0``): cap for
+    ``balanced``.
+- ``stop_head``:
+
+  - ``initial_stop_probability`` (0 < float < 1, default ``0.05``): the stop
+    head's output bias at initialization is ``logit(initial_stop_probability)``,
+    so an untrained policy explores instead of stopping on half of its
+    decisions. PPO trains the stop probability from there.
 
 consultation
 ~~~~~~~~~~~~
@@ -421,6 +434,8 @@ consultation
 - ``cost`` (float >= 0, required when ``mode: learned``): per-consultation
   reward penalty, subtracted from the training reward (not the reported
   benchmark/NASimEmu reward) every time the query gate decides to consult.
+  The query gate runs only after a CONTINUE decision, so FINISH never
+  consults and never pays this cost.
 - ``max_schema_revisions`` (int >= 0, required when ``mode: learned``):
   how many correction attempts the Gatekeeper gives the Plan Maker before
   giving up and reporting ``schema_rejected`` back to the RL Orchestrator.

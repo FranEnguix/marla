@@ -139,17 +139,9 @@ def config_hash(config: Config) -> str:
     otherwise-identical embedded-server run: transport ownership is part of
     a run's provenance (wall-clock, failure behavior) even though it does
     not change decision or learning semantics.
-
-    ``objective.completion_reward_per_target`` is dropped when an explicit
-    fixed ``objective.completion_reward`` is set: the per-target value is
-    then unused (fixed reward takes precedence), so a legacy config that sets
-    its FINISH rewards explicitly hashes exactly as it did before the field
-    existed.
     """
     dumped = config.model_dump(mode="json")
     if dumped["execution"].get("embedded_xmpp_server") is True:
         del dumped["execution"]["embedded_xmpp_server"]
-    if dumped["objective"].get("completion_reward") is not None:
-        dumped["objective"].pop("completion_reward_per_target", None)
     canonical = json.dumps(dumped, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()

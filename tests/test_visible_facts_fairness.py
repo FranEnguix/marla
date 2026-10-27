@@ -32,8 +32,6 @@ def _adapter() -> NasimEmuAdapter:
     return NasimEmuAdapter(
         scenario=str(diagnostic_scenario_path("micro_c_mixed_os_discrimination.v2.yaml")),
         max_episode_steps=20,
-        completion_reward=1.0,
-        premature_finish_penalty=0.0,
     )
 
 

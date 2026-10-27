@@ -124,6 +124,13 @@ policy:
       scheduler:  # see baseline.yaml's comment
         type: linear
         end_factor: 0.0
+  completion_predictor:  # see baseline.yaml's comment
+    enabled: true
+    loss_coefficient: 0.1
+    positive_class_weight: balanced
+    max_positive_class_weight: 10.0
+  stop_head:
+    initial_stop_probability: 0.05
 
 consultation:
   # learned: requires exactly one `gatekeeper:` and one `agents[]` entry
@@ -133,9 +140,10 @@ consultation:
   # benchmark reward) every time the query gate decides to consult -- this
   # is what actually gives the query gate something to weigh "is asking
   # worth it" against. 0.10 is comparable to NASimEmu's per-action costs
-  # (the default FINISH reward is +50 per sensitive target on success,
-  # -100 per remaining target otherwise), so consulting on every single
-  # step is not a free lunch.
+  # (the default FINISH reward is +1 per sensitive target on success,
+  # -1 per remaining target otherwise), so consulting on every single
+  # step is not a free lunch. Consultation happens only after the stop head
+  # chose CONTINUE: a FINISH decision never consults or pays this cost.
   cost: 0.10
   # How many correction attempts the Gatekeeper gives the Plan Maker (a
   # schema-invalid or wrong-action-ID-coverage response gets a

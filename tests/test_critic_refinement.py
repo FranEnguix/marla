@@ -38,7 +38,7 @@ from marla.learning.recurrent_policy import RecurrentPolicy
 from marla.learning.rollout import RolloutCollector
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
-SMALL_SCENARIO = str((REPO_ROOT / "NASimEmu/scenarios/sm_entry_dmz_one_subnet.v2.yaml").resolve())
+SMALL_SCENARIO = str((REPO_ROOT / "tests/data/scenarios/sm_entry_dmz_one_target.v2.yaml").resolve())
 
 
 def _tiny_config(critic_refinement_epochs: int = 0):
@@ -61,8 +61,6 @@ async def _collect_records(config, seed: int = 1, steps: int | None = None):
     adapter = NasimEmuAdapter(
         scenario=SMALL_SCENARIO,
         max_episode_steps=config.environment.max_episode_steps,
-        completion_reward=config.objective.completion_reward,
-        premature_finish_penalty=config.objective.premature_finish_penalty,
     )
     collector = RolloutCollector(adapter, policy, run_id="test-run", base_seed=seed)
     records, _summaries = await collector.collect(steps or config.policy.ppo.steps_per_env)
@@ -371,8 +369,6 @@ async def test_critic_refinement_rows_are_persisted_to_updates_csv(tmp_path):
     adapter = NasimEmuAdapter(
         scenario=SMALL_SCENARIO,
         max_episode_steps=config.environment.max_episode_steps,
-        completion_reward=config.objective.completion_reward,
-        premature_finish_penalty=config.objective.premature_finish_penalty,
     )
 
     await run_training_loop(

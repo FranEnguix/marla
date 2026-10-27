@@ -21,13 +21,16 @@ from marla.metrics.writer import build_decision_rows, write_run_artifacts
 from marla.runtime.device import resolve_device
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
-SMALL_SCENARIO = str((REPO_ROOT / "NASimEmu/scenarios/sm_entry_dmz_one_subnet.v2.yaml").resolve())
+SMALL_SCENARIO = str((REPO_ROOT / "tests/data/scenarios/sm_entry_dmz_one_target.v2.yaml").resolve())
 
 
 def _tiny_config():
     config = load_config(REPO_ROOT / "examples" / "baseline.yaml")
     data = config.model_dump()
     data["policy"]["ppo"]["steps_per_env"] = 12
+    # Short episodes so the tiny run always completes some (the untrained
+    # stop head finishes only ~5% of decisions).
+    data["environment"]["max_episode_steps"] = 5
     data["policy"]["ppo"]["epochs"] = 1
     data["policy"]["ppo"]["minibatch_sequences"] = 2
     data["policy"]["recurrent"]["sequence_length"] = 4
@@ -201,9 +204,11 @@ def test_decision_row_persists_sensitive_target_counts_and_finish_reward():
         visible_progress=torch.zeros(VISIBLE_PROGRESS_DIM),
         initial_gru_hidden_state=torch.zeros(2), previous_action_embedding=torch.zeros(2),
         previous_training_reward=0.0, previous_query=False,
-        base_logits=torch.zeros(1), final_logits=torch.zeros(1), selected_action_index=0,
-        old_action_log_probability=0.0, old_joint_log_probability=0.0, critic_value=0.0,
-        nasimemu_reward=-40.0, consultation_cost=0.0, training_reward=-40.0,
+        base_logits=torch.zeros(0), final_logits=torch.zeros(0), selected_action_index=0,  # only FINISH legal
+        old_action_log_probability=None, old_joint_log_probability=0.0, critic_value=0.0,
+        stop_logit=0.0, old_stop_probability=1.0, stop_selected=True, old_stop_log_probability=0.0,
+        completion_probability=0.2,
+        nasimemu_reward=-2.0, consultation_cost=0.0, training_reward=-2.0,
         terminated=True, truncated=False,
         selected_action_type="finish", objective_satisfied=False, objective_became_satisfied=False,
         sensitive_targets_total=2, sensitive_targets_with_root=0, sensitive_targets_remaining=2,
@@ -214,9 +219,11 @@ def test_decision_row_persists_sensitive_target_counts_and_finish_reward():
     assert row["sensitive_targets_total"] == 2
     assert row["sensitive_targets_with_root"] == 0
     assert row["sensitive_targets_remaining"] == 2
-    assert row["nasimemu_reward"] == -40.0  # -20 * 2 remaining, per AAMAS-style config
-    assert row["training_reward"] == -40.0
+    assert row["nasimemu_reward"] == -2.0  # -1 * 2 remaining (default coefficient)
+    assert row["training_reward"] == -2.0
     assert row["objective_satisfied"] is False
+    assert row["base_finish_probability"] == 1.0 and row["finish_selected"] is True  # forced FINISH
+    assert row["completion_probability"] == 0.2 and row["completion_label"] is False
 
 
 def test_decisions_csv_omitted_when_record_decisions_is_false(tmp_path):
@@ -452,6 +459,9 @@ def written_assisted_run_dir(tmp_path):
     data["environment"]["scenario"] = SMALL_SCENARIO
     data["environment"]["max_episode_steps"] = 50
     data["policy"]["ppo"]["steps_per_env"] = 12
+    # Short episodes so the tiny run always completes some (the untrained
+    # stop head finishes only ~5% of decisions).
+    data["environment"]["max_episode_steps"] = 5
     data["policy"]["ppo"]["epochs"] = 1
     data["policy"]["ppo"]["minibatch_sequences"] = 2
     data["policy"]["recurrent"]["sequence_length"] = 4
@@ -473,8 +483,6 @@ def written_assisted_run_dir(tmp_path):
     adapter = NasimEmuAdapter(
         scenario=SMALL_SCENARIO,
         max_episode_steps=config.environment.max_episode_steps,
-        completion_reward=config.objective.completion_reward,
-        premature_finish_penalty=config.objective.premature_finish_penalty,
     )
 
     async def consult_fn(legal_actions, episode_id, step, source_observation_id, observation, consulted_subnet, global_candidate_action_count):

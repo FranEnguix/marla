@@ -92,19 +92,17 @@ def test_no_non_finish_candidate_yields_none_subnet_not_a_crash():
     assert select_consulted_subnet(actions, base_logits) is None
 
 
-# --- 5/6. scoped action membership + FINISH included exactly once ----------
+# --- 5/6. scoped action membership; FINISH is never consulted --------------
+# (the hierarchical policy's stop head decides FINISH before any consultation)
 
 
-def test_select_consulted_actions_membership_and_finish_exactly_once():
+def test_select_consulted_actions_membership_excludes_finish():
     actions = [_scan(1, 1), _scan(1, 2), _exploit(2, 1), _privesc(3, 1), finish_descriptor()]
     scope = select_consulted_actions(actions, consulted_subnet=1)
 
-    non_finish_consulted = [a for a in scope.consulted_actions if not a.is_finish]
-    assert all(extract_action_subnet(a) == 1 for a in non_finish_consulted)
-    assert len(non_finish_consulted) == 2
-
-    finish_count = sum(1 for a in scope.consulted_actions if a.is_finish)
-    assert finish_count == 1
+    assert all(extract_action_subnet(a) == 1 for a in scope.consulted_actions)
+    assert len(scope.consulted_actions) == 2
+    assert not any(a.is_finish for a in scope.consulted_actions)
 
     # every non-consulted global action must be absent from the scope, but
     # nothing here removes it from the GLOBAL action list PPO still sees --
@@ -112,21 +110,22 @@ def test_select_consulted_actions_membership_and_finish_exactly_once():
     consulted_ids = {a.action_id for a in scope.consulted_actions}
     assert actions[2].action_id not in consulted_ids  # subnet-2 exploit excluded
     assert actions[3].action_id not in consulted_ids  # subnet-3 privesc excluded
-    assert scope.global_candidate_action_count == len(actions)
+    assert scope.global_candidate_action_count == len(actions) - 1  # ordinary candidates only
 
 
 def test_select_consulted_actions_preserves_global_order_and_stable_indices():
-    actions = [_scan(2, 1), finish_descriptor(), _scan(2, 2), _scan(1, 1)]
+    actions = [_scan(2, 1), _scan(1, 1), _scan(2, 2), finish_descriptor()]
     scope = select_consulted_actions(actions, consulted_subnet=2)
-    assert scope.consulted_indices == [0, 1, 2]  # global order, never reordered
+    assert scope.consulted_indices == [0, 2]  # global order, never reordered
     assert [actions[i] for i in scope.consulted_indices] == scope.consulted_actions
 
 
-def test_no_consulted_subnet_edge_case_yields_finish_only():
-    actions = [_scan(1, 1), _scan(2, 1), finish_descriptor()]
-    scope = select_consulted_actions(actions, consulted_subnet=None)
-    assert len(scope.consulted_actions) == 1
-    assert scope.consulted_actions[0].is_finish
+def test_no_consulted_subnet_edge_case_yields_an_empty_scope():
+    actions = [finish_descriptor()]
+    scope = select_consulted_actions(actions, consulted_subnet=select_consulted_subnet(actions, torch.zeros(0)))
+    assert scope.consulted_subnet is None
+    assert scope.consulted_actions == [] and scope.consulted_indices == []
+    assert scope.global_candidate_action_count == 0
 
 
 # --- 7/8/9. scoped observation: filtering, global progress, no leakage -----

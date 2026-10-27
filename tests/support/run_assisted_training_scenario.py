@@ -36,8 +36,6 @@ async def run_scenario(config_path: str, scenario_path: str, num_rollouts: int, 
     adapter = NasimEmuAdapter(
         scenario=scenario_path,
         max_episode_steps=config.environment.max_episode_steps,
-        completion_reward=config.objective.completion_reward,
-        premature_finish_penalty=config.objective.premature_finish_penalty,
     )
 
     orchestrator = RLOrchestratorAgent(

@@ -21,7 +21,7 @@ from marla.learning.recurrent_policy import RecurrentPolicy, RecurrentState
 from marla.learning.rollout import EVAL_SEED_OFFSET, ConsultationResult, RolloutCollector, run_evaluation_episodes
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
-SMALL_SCENARIO = str((REPO_ROOT / "NASimEmu/scenarios/sm_entry_dmz_one_subnet.v2.yaml").resolve())
+SMALL_SCENARIO = str((REPO_ROOT / "tests/data/scenarios/sm_entry_dmz_one_target.v2.yaml").resolve())
 
 
 def make_collector(max_episode_steps=6, seed=1, stop_event=None):
@@ -29,8 +29,6 @@ def make_collector(max_episode_steps=6, seed=1, stop_event=None):
     adapter = NasimEmuAdapter(
         scenario=SMALL_SCENARIO,
         max_episode_steps=max_episode_steps,
-        completion_reward=config.objective.completion_reward,
-        premature_finish_penalty=config.objective.premature_finish_penalty,
     )
     policy = RecurrentPolicy(config.policy)
     collector = RolloutCollector(adapter, policy, run_id="test-run", base_seed=seed, stop_event=stop_event)
@@ -120,8 +118,6 @@ async def test_consultation_enabled_requires_consult_fn():
     adapter = NasimEmuAdapter(
         scenario=SMALL_SCENARIO,
         max_episode_steps=6,
-        completion_reward=config.objective.completion_reward,
-        premature_finish_penalty=config.objective.premature_finish_penalty,
     )
     policy = RecurrentPolicy(config.policy, consultation_enabled=True)
     with pytest.raises(ValueError):
@@ -171,8 +167,6 @@ async def test_collect_sets_bootstrap_value_when_stopped_mid_step_not_at_episode
     adapter = NasimEmuAdapter(
         scenario=SMALL_SCENARIO,
         max_episode_steps=50,  # long enough that this step won't be a natural episode end
-        completion_reward=config.objective.completion_reward,
-        premature_finish_penalty=config.objective.premature_finish_penalty,
     )
     # Seeded explicitly (this test previously relied on whatever torch
     # global RNG state happened to exist when it ran -- order-dependent and
@@ -226,8 +220,6 @@ def _build_assisted_collector(max_episode_steps: int, base_seed: int = 1, overri
     adapter = NasimEmuAdapter(
         scenario=SMALL_SCENARIO,
         max_episode_steps=max_episode_steps,
-        completion_reward=config.objective.completion_reward,
-        premature_finish_penalty=config.objective.premature_finish_penalty,
     )
     torch.manual_seed(0)
     policy = RecurrentPolicy(config.policy, consultation_enabled=True)
@@ -490,8 +482,6 @@ async def test_deterministic_collector_is_reproducible_across_runs():
     def make_deterministic_collector():
         adapter = NasimEmuAdapter(
             scenario=SMALL_SCENARIO, max_episode_steps=6,
-            completion_reward=config.objective.completion_reward,
-            premature_finish_penalty=config.objective.premature_finish_penalty,
         )
         return RolloutCollector(adapter, policy, run_id="test-run", base_seed=1, deterministic=True)
 
@@ -506,8 +496,6 @@ async def test_run_evaluation_episodes_tags_summaries_as_eval_and_restores_train
     config = load_config(REPO_ROOT / "examples" / "baseline.yaml")
     adapter = NasimEmuAdapter(
         scenario=SMALL_SCENARIO, max_episode_steps=6,
-        completion_reward=config.objective.completion_reward,
-        premature_finish_penalty=config.objective.premature_finish_penalty,
     )
     policy = RecurrentPolicy(config.policy)
 
@@ -531,8 +519,6 @@ async def test_run_evaluation_episodes_uses_fixed_seeds_regardless_of_training_p
     def make_adapter():
         return NasimEmuAdapter(
             scenario=SMALL_SCENARIO, max_episode_steps=6,
-            completion_reward=config.objective.completion_reward,
-            premature_finish_penalty=config.objective.premature_finish_penalty,
         )
 
     first = await run_evaluation_episodes(
@@ -559,8 +545,6 @@ def make_assisted_collector(overrides=None, max_episode_steps=50, seed=1, consul
     adapter = NasimEmuAdapter(
         scenario=SMALL_SCENARIO,
         max_episode_steps=max_episode_steps,
-        completion_reward=config.objective.completion_reward,
-        premature_finish_penalty=config.objective.premature_finish_penalty,
     )
     if policy_seed is not None:
         # Isolates a comparison to "overrides differ" alone -- without this,
@@ -721,8 +705,6 @@ def test_same_seed_produces_identical_initial_observation_across_independent_ada
     def make_adapter():
         return NasimEmuAdapter(
             scenario=SMALL_SCENARIO, max_episode_steps=10,
-            completion_reward=config.objective.completion_reward,
-            premature_finish_penalty=config.objective.premature_finish_penalty,
         )
 
     state_a = make_adapter().reset(seed=777)
@@ -747,8 +729,6 @@ async def test_nasimemu_reward_is_unaffected_by_consultation_cost():
         config = load_config(REPO_ROOT / "examples" / "assisted.yaml")
         adapter = NasimEmuAdapter(
             scenario=SMALL_SCENARIO, max_episode_steps=10,
-            completion_reward=config.objective.completion_reward,
-            premature_finish_penalty=config.objective.premature_finish_penalty,
         )
         torch.manual_seed(1234)  # identical policy weights across both runs
         policy = RecurrentPolicy(config.policy, consultation_enabled=True)
@@ -805,7 +785,11 @@ class _ScriptedAdapter:
         )
 
     def legal_actions(self, state):
-        return [self._actions[min(self._step_idx, len(self._actions) - 1)]]
+        # FINISH is always legal and last; a scripted FINISH step offers it
+        # alone (forced), any other step offers the scripted action + FINISH
+        # (the untrained stop head's greedy decision is CONTINUE).
+        scripted = self._actions[min(self._step_idx, len(self._actions) - 1)]
+        return [scripted] if scripted.is_finish else [scripted, _FINISH_ACTION]
 
     def to_pyg_data(self, state, include_subnet_scan_feature=True):
         return GraphObservation(data=self._data, node_key_to_index={"host-0-0": 0})

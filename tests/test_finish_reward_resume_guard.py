@@ -1,10 +1,8 @@
 """Checkpoint-resume guard for FINISH-reward semantics: a resume must never silently continue under a
-different reward objective; legacy checkpoints (no recorded semantics) need explicit acknowledgement;
-evaluation loads are never affected."""
+different reward objective; evaluation loads are never affected."""
 
 from __future__ import annotations
 
-import logging
 import os
 import subprocess
 import sys
@@ -16,27 +14,16 @@ import yaml
 
 from marla.config.loader import load_config
 from marla.config.models import ObjectiveConfig
-from marla.learning.checkpoint import (
-    FinishRewardMismatchError,
-    FinishRewardUnverifiedError,
-    load_checkpoint,
-    peek_checkpoint_metadata,
-    save_checkpoint,
-)
+from marla.learning.checkpoint import FinishRewardMismatchError, load_checkpoint, peek_checkpoint_metadata, save_checkpoint
 from marla.learning.lr_scheduler import build_scheduler
 from marla.learning.recurrent_policy import RecurrentPolicy
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
-SMALL_SCENARIO = str((REPO_ROOT / "NASimEmu/scenarios/sm_entry_dmz_one_subnet.v2.yaml").resolve())
+SMALL_SCENARIO = str((REPO_ROOT / "tests/data/scenarios/sm_entry_dmz_one_target.v2.yaml").resolve())
 
 DEFAULT = ObjectiveConfig(type="capture_target", description="x").effective_finish_reward()
-LEGACY = ObjectiveConfig(type="capture_target", description="x", completion_reward=1.0,
-                         premature_finish_penalty=-1.0, premature_finish_penalty_per_remaining_target=0.0
-                         ).effective_finish_reward()
-
-
-def _obj(**kw):
-    return ObjectiveConfig(type="capture_target", description="x", **kw).effective_finish_reward()
+SCALED = ObjectiveConfig(type="capture_target", description="x", successful_finish_reward_per_target=2.0,
+                         premature_finish_reward_per_remaining_target=-0.5).effective_finish_reward()
 
 
 def _save(tmp_path, semantics, name="ckpt.pt"):
@@ -57,26 +44,9 @@ def _load(path, config, **kw):
     return load_checkpoint(path, policy, optimizer, **kw)
 
 
-# --- effective semantics -----------------------------------------------------------------------------------
-
-
-def test_effective_semantics_ignore_irrelevant_differences():
-    assert _obj() == _obj(completion_reward_per_target=50.0) == DEFAULT
-    # fixed completion_reward makes the per-target value irrelevant
-    assert _obj(completion_reward=1.0, completion_reward_per_target=50.0) == _obj(completion_reward=1.0,
-                                                                                 completion_reward_per_target=7.0)
-    assert DEFAULT["successful_finish"] == {"mode": "per_target", "value": 50.0}
-    assert DEFAULT["premature_finish"] == {"fixed": 0.0, "per_remaining_target": -100.0}
-
-
-def test_effective_semantics_detect_real_differences():
-    assert _obj(completion_reward=50.0) != DEFAULT  # fixed 50 is not 50 per target
-    assert _obj(premature_finish_penalty=-1.0) != DEFAULT
-    assert _obj(premature_finish_penalty_per_remaining_target=-20.0) != DEFAULT
-    assert LEGACY != DEFAULT
-
-
-# --- load_checkpoint -----------------------------------------------------------------------------------------
+def test_semantics_distinguish_coefficients():
+    assert DEFAULT != SCALED
+    assert DEFAULT == ObjectiveConfig(type="capture_target", description="y").effective_finish_reward()
 
 
 def test_new_checkpoints_record_semantics(tmp_path):
@@ -86,43 +56,20 @@ def test_new_checkpoints_record_semantics(tmp_path):
 
 def test_resume_with_matching_semantics(tmp_path):
     path, config = _save(tmp_path, DEFAULT)
-    meta = _load(path, config, restore_rng_state=True, expected_finish_reward=_obj(completion_reward_per_target=50.0))
-    assert meta.finish_reward_semantics == DEFAULT
+    assert _load(path, config, restore_rng_state=True, expected_finish_reward=DEFAULT).finish_reward_semantics == DEFAULT
 
 
-def test_resume_with_mismatched_semantics_is_refused(tmp_path):
-    path, config = _save(tmp_path, LEGACY)
+@pytest.mark.parametrize("saved", [SCALED, None])
+def test_resume_with_different_or_missing_semantics_is_refused(tmp_path, saved):
+    path, config = _save(tmp_path, saved)
     with pytest.raises(FinishRewardMismatchError, match="different reward objective"):
         _load(path, config, restore_rng_state=True, expected_finish_reward=DEFAULT)
 
 
-def test_resume_with_explicit_override_matching_checkpoint(tmp_path):
-    path, config = _save(tmp_path, LEGACY)
-    _load(path, config, restore_rng_state=True, expected_finish_reward=LEGACY)
-
-
-def test_legacy_checkpoint_resume_requires_acknowledgement(tmp_path, caplog):
-    path, config = _save(tmp_path, None)
-    with pytest.raises(FinishRewardUnverifiedError, match="--accept-unverified-finish-reward"):
-        _load(path, config, restore_rng_state=True, expected_finish_reward=DEFAULT)
-    with caplog.at_level(logging.WARNING, logger="marla.learning.checkpoint"):
-        meta = _load(path, config, restore_rng_state=True, expected_finish_reward=DEFAULT,
-                     allow_unverified_finish_reward=True)
-    assert meta.finish_reward_semantics is None
-    assert "explicitly accepted" in caplog.text
-
-
-def test_acknowledgement_never_overrides_a_recorded_mismatch(tmp_path):
-    path, config = _save(tmp_path, LEGACY)
-    with pytest.raises(FinishRewardMismatchError):
-        _load(path, config, restore_rng_state=True, expected_finish_reward=DEFAULT, allow_unverified_finish_reward=True)
-
-
-def test_evaluation_load_of_legacy_or_mismatched_checkpoint_is_unaffected(tmp_path):
-    for semantics in (None, LEGACY):
-        path, config = _save(tmp_path, semantics, name=f"{semantics is None}.pt")
-        _load(path, config)  # plain evaluation load: no reward check
-        _load(path, config, expected_finish_reward=DEFAULT)  # not a resume -> still no check
+def test_evaluation_load_is_unaffected(tmp_path):
+    path, config = _save(tmp_path, SCALED)
+    _load(path, config)
+    _load(path, config, expected_finish_reward=DEFAULT)  # not a resume -> no check
 
 
 # --- CLI integration (real `marla run --resume` subprocesses) -------------------------------------------------
@@ -155,22 +102,11 @@ def test_cli_resume_guard_end_to_end(tmp_path):
     ckpt = next((tmp_path / "runs").rglob("checkpoint.pt"))
     assert peek_checkpoint_metadata(ckpt).finish_reward_semantics == DEFAULT
 
-    # same effective reward -> resumes
-    ok = _marla(["run", str(_write_config(tmp_path, "guard-b", 24, completion_reward_per_target=50.0)), "--resume", str(ckpt)])
+    ok = _marla(["run", str(_write_config(tmp_path, "guard-b", 24, successful_finish_reward_per_target=1.0)),
+                 "--resume", str(ckpt)])
     assert ok.returncode == 0, ok.stdout + ok.stderr
 
-    # different reward -> refused before any run directory is created
-    bad = _marla(["run", str(_write_config(tmp_path, "guard-c", 24, premature_finish_penalty=-1.0)), "--resume", str(ckpt)])
+    bad = _marla(["run", str(_write_config(tmp_path, "guard-c", 24, premature_finish_reward_per_remaining_target=-2.0)),
+                  "--resume", str(ckpt)])
     assert bad.returncode != 0 and "different reward objective" in bad.stdout + bad.stderr
     assert not any((tmp_path / "runs").rglob("guard-c"))
-
-    # legacy checkpoint (no recorded semantics) -> needs explicit acknowledgement
-    data = torch.load(ckpt, map_location="cpu", weights_only=False)
-    data.pop("finish_reward_semantics")
-    legacy = tmp_path / "legacy.pt"
-    torch.save(data, legacy)
-    refused = _marla(["run", str(_write_config(tmp_path, "guard-d", 24)), "--resume", str(legacy)])
-    assert refused.returncode != 0 and "--accept-unverified-finish-reward" in refused.stdout + refused.stderr
-    accepted = _marla(["run", str(_write_config(tmp_path, "guard-e", 24)), "--resume", str(legacy),
-                       "--accept-unverified-finish-reward"])
-    assert accepted.returncode == 0, accepted.stdout + accepted.stderr

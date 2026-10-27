@@ -44,8 +44,8 @@ DECISIONS_NULLABLE_BOOLEAN_COLUMNS: tuple[str, ...] = (
     "selected_action_known_process_match",
     "selected_action_known_os_match",
     "selected_action_known_os_mismatch",
-    # Defensive-None: MARLA always offers exactly one FINISH candidate in
-    # practice, but these are read without asserting that.
+    # Always defined for current runs (FINISH is always the last legal
+    # action, decided by the stop head); nullable for older run directories.
     "base_finish_is_argmax",
     "final_finish_is_argmax",
     "finish_selected",

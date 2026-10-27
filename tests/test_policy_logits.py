@@ -21,7 +21,7 @@ from marla.config.models import (
     RecurrentConfig,
 )
 from marla.environment.action_compatibility import compute_compatibility_matrix
-from marla.environment.actions import ActionDescriptor
+from marla.environment.actions import ActionDescriptor, finish_descriptor
 from marla.environment.graph import GraphObservation, NODE_FEATURE_DIM
 from marla.environment.visible_facts import VisibleHostFacts, compute_visible_progress
 from marla.learning.recurrent_policy import RecurrentPolicy
@@ -62,10 +62,14 @@ def _exploit_pair() -> list[ActionDescriptor]:
 
 
 def _step(policy: RecurrentPolicy, descriptors, compatibility, facts_by_target=None):
+    """Steps with ``descriptors`` as the ordinary actions; FINISH is appended last, as every legal
+    action list has it (it gets no logit -- base_logits covers ``descriptors`` exactly)."""
     graph_obs = _single_host_graph()
     rstate = policy.initial_recurrent_state()
     visible_progress = compute_visible_progress(facts_by_target or {})
-    return policy.step(graph_obs, descriptors, rstate, compatibility, visible_progress)
+    legal = [*descriptors, finish_descriptor()]
+    compatibility = torch.cat([compatibility, compute_compatibility_matrix([finish_descriptor()], facts_by_target or {})])
+    return policy.step(graph_obs, legal, rstate, compatibility, visible_progress)
 
 
 def test_formerly_aliased_actions_can_receive_different_logits_once_facts_differ():

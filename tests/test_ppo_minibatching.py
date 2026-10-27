@@ -21,7 +21,7 @@ from marla.learning.recurrent_policy import RecurrentPolicy
 from marla.learning.rollout import RolloutCollector, StepRecord
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
-SMALL_SCENARIO = str((REPO_ROOT / "NASimEmu/scenarios/sm_entry_dmz_one_subnet.v2.yaml").resolve())
+SMALL_SCENARIO = str((REPO_ROOT / "tests/data/scenarios/sm_entry_dmz_one_target.v2.yaml").resolve())
 
 
 def _fake_record(episode_id: int, step: int = 0) -> StepRecord:
@@ -34,6 +34,8 @@ def _fake_record(episode_id: int, step: int = 0) -> StepRecord:
         previous_training_reward=0.0, previous_query=False,
         base_logits=torch.zeros(1), final_logits=torch.zeros(1), selected_action_index=0,
         old_action_log_probability=0.0, old_joint_log_probability=0.0, critic_value=0.0,
+        stop_logit=0.0, old_stop_probability=0.5, stop_selected=False, old_stop_log_probability=0.0,
+        completion_probability=None,
         nasimemu_reward=0.0, consultation_cost=0.0, training_reward=0.0,
         terminated=False, truncated=False,
     )
@@ -201,8 +203,6 @@ async def _collect(config, base_seed=1):
     policy = RecurrentPolicy(config.policy)
     adapter = NasimEmuAdapter(
         scenario=SMALL_SCENARIO, max_episode_steps=config.environment.max_episode_steps,
-        completion_reward=config.objective.completion_reward,
-        premature_finish_penalty=config.objective.premature_finish_penalty,
     )
     collector = RolloutCollector(adapter, policy, run_id="t", base_seed=base_seed)
     records, _ = await collector.collect(config.policy.ppo.steps_per_env)

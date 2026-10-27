@@ -90,14 +90,12 @@ environment:
 objective:
   type: capture_target  # only supported value: all sensitive/value hosts compromised
   description: Obtain the configured target access
-  # FINISH reward (defaults shown; omit them to get the same values).
-  # Successful FINISH (every sensitive target at ROOT) = +50 * N targets;
-  # premature FINISH = -100 per sensitive target still lacking ROOT.
-  # Setting a fixed `completion_reward` instead of the per-target value
-  # restores a constant successful-FINISH reward (see docs/configuration.rst).
-  completion_reward_per_target: 50.0
-  premature_finish_penalty: 0.0
-  premature_finish_penalty_per_remaining_target: -100.0
+  # FINISH reward (defaults shown; omit them to get the same values), paid
+  # only when the policy selects FINISH. With N sensitive targets and M of
+  # them still lacking ROOT: successful FINISH (M == 0) = +1 * N, premature
+  # FINISH = -1 * M. Every other action keeps NASimEmu's own reward.
+  successful_finish_reward_per_target: 1.0
+  premature_finish_reward_per_remaining_target: -1.0
 
 policy:
   algorithm: recurrent_ppo  # only supported value
@@ -130,7 +128,8 @@ policy:
     # gate at all) for a baseline run. Kept identical to assisted.yaml for
     # a clean apples-to-apples comparison of the shared hyperparameters.
     query_entropy_coefficient: 0.01
-    action_entropy_coefficient: 0.01  # action-distribution entropy bonus weight, >= 0
+    # Entropy bonus of the hierarchical decision: H(stop) + (1 - p_stop) * H(ordinary action), >= 0
+    action_entropy_coefficient: 0.01
     max_grad_norm: 0.5                 # gradient clipping norm, > 0
     optimizer:
       type: adam  # only supported value -- not AdamW
@@ -149,6 +148,16 @@ policy:
       scheduler:
         type: linear
         end_factor: 0.0  # decays to exactly 0 by the final PPO update
+  # Hierarchical FINISH decision (defaults shown). The stop head decides
+  # FINISH vs. CONTINUE from the recurrent state and the completion
+  # predictor's probability; FINISH is not one of the ordinary actions.
+  completion_predictor:
+    enabled: true
+    loss_coefficient: 0.1           # lambda in L_PPO + lambda * BCE(completion)
+    positive_class_weight: balanced # n_neg / n_pos per minibatch, or a fixed number
+    max_positive_class_weight: 10.0 # cap for "balanced"
+  stop_head:
+    initial_stop_probability: 0.05  # p_stop at initialization (output bias)
 
 consultation:
   # disabled: no Gatekeeper, no Plan Maker may be configured below (both

@@ -22,6 +22,11 @@ AdviceTransformation = Literal["identity", "shuffled", "reversed"]
 class EvaluationOverrides:
     """One evaluation condition's deviation from MARLA_FULL's learned behavior.
 
+    Every override acts on CONTINUE decisions only: the stop head's
+    FINISH-vs-CONTINUE decision always stays the policy's own, and a FINISH
+    decision never queries or consults (see
+    ``marla.learning.rollout.RolloutCollector._decide``).
+
     ``query_mode``:
       - ``"learned"`` -- unchanged: threshold the query gate's own output at
         >= 0.5 (deterministic eval already does this with no overrides at
@@ -30,8 +35,8 @@ class EvaluationOverrides:
       - ``"never"`` -- force ``sampled_query = False``; ``consult_fn`` is
         never called. (NO_QUERY.)
       - ``"always"`` -- force ``sampled_query = True``; ``consult_fn`` is
-        always called. (ALWAYS_QUERY, and PLAN_MAKER_ONLY via
-        ``action_selection``.)
+        called on every CONTINUE decision. (ALWAYS_QUERY, and
+        PLAN_MAKER_ONLY via ``action_selection``.)
       In every case the gate's own ``query_probability`` is still computed
       and recorded, for comparison -- only the *sampling* decision is
       overridden.
@@ -47,10 +52,10 @@ class EvaluationOverrides:
 
     ``action_selection``:
       - ``"policy"`` -- unchanged: sample/argmax over ``final_logits``.
-      - ``"plan_maker_argmax"`` -- ignore the policy's distribution
-        entirely; select ``argmax`` over the (validated) Plan Maker score
+      - ``"plan_maker_argmax"`` -- ignore the policy's ordinary-action
+        distribution; select ``argmax`` over the (validated) Plan Maker score
         vector. On ``schema_rejected``, falls back to a fixed, seeded
-        uniform-random legal-action choice (``fallback_rng_seed``) --
+        uniform-random ordinary-action choice (``fallback_rng_seed``) --
         documented as exactly that, a fallback rule, never a re-use of any
         learned policy output, which would contradict "no learned RL
         action choice." (PLAN_MAKER_ONLY.)

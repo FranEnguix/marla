@@ -21,6 +21,7 @@ from marla.evaluation.sampling import (
     ACTION_STREAM,
     EVALUATION_RNG_SCHEME,
     QUERY_STREAM,
+    STOP_STREAM,
     EvaluationPolicyMode,
     EvaluationSampler,
     evaluation_stream_seed,
@@ -30,8 +31,8 @@ from marla.learning.rollout import RolloutCollector
 from tests.support import eval_trajectory as et
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
-SMALL_SCENARIO = str((REPO_ROOT / "NASimEmu/scenarios/sm_entry_dmz_one_subnet.v2.yaml").resolve())
-GOLDEN = REPO_ROOT / "tests" / "data" / "greedy_eval_golden_v0_10_1.json"
+SMALL_SCENARIO = str((REPO_ROOT / "tests/data/scenarios/sm_entry_dmz_one_target.v2.yaml").resolve())
+GOLDEN = REPO_ROOT / "tests" / "data" / "greedy_eval_golden.json"
 AGENT_SEED = 42  # experiment.seed of examples/baseline.yaml and examples/assisted.yaml
 
 
@@ -50,8 +51,9 @@ def _reference_categorical(u, probs):
 
 def test_stream_seed_derivation_is_the_documented_sha256_scheme():
     assert evaluation_stream_seed(959, 7101, "action") == _reference_seed(959, 7101, "action")
-    seeds = {evaluation_stream_seed(a, e, p) for a in (1, 2) for e in (10, 11) for p in (QUERY_STREAM, ACTION_STREAM)}
-    assert len(seeds) == 8, "agent seed, eval seed and purpose must each separate the streams"
+    purposes = (STOP_STREAM, QUERY_STREAM, ACTION_STREAM)
+    seeds = {evaluation_stream_seed(a, e, p) for a in (1, 2) for e in (10, 11) for p in purposes}
+    assert len(seeds) == 12, "agent seed, eval seed and purpose must each separate the streams"
     assert "sha256" in EVALUATION_RNG_SCHEME and "pcg64" in EVALUATION_RNG_SCHEME
 
 
@@ -65,7 +67,10 @@ def test_sampler_draws_follow_the_documented_streams_and_inverse_cdf():
     uq = np.random.default_rng(_reference_seed(7, 123, "query")).random(50)
     assert actions == [_reference_categorical(u, probs) for u in ua]
     assert queries == [bool(u < 0.4) for u in uq]
-    assert sampler.draws == {QUERY_STREAM: 50, ACTION_STREAM: 50}
+    stops = [sampler.sample_stop(torch.tensor(0.3)) for _ in range(20)]
+    us = np.random.default_rng(_reference_seed(7, 123, "stop")).random(20)
+    assert stops == [bool(u < 0.3) for u in us]
+    assert sampler.draws == {STOP_STREAM: 20, QUERY_STREAM: 50, ACTION_STREAM: 50}
 
 
 def test_query_and_action_streams_are_independent():
@@ -98,8 +103,7 @@ def test_collector_rejects_a_sampler_combined_with_greedy_selection():
     from marla.config.loader import load_config
 
     config = load_config(REPO_ROOT / "examples" / "baseline.yaml")
-    adapter = NasimEmuAdapter(scenario=SMALL_SCENARIO, max_episode_steps=5, completion_reward=1.0,
-                              premature_finish_penalty=-1.0)
+    adapter = NasimEmuAdapter(scenario=SMALL_SCENARIO, max_episode_steps=5)
     with pytest.raises(ValueError):
         RolloutCollector(adapter, RecurrentPolicy(config.policy), "x", base_seed=1, deterministic=True,
                          evaluation_sampler=EvaluationSampler(1))
@@ -110,12 +114,14 @@ def test_collector_rejects_a_sampler_combined_with_greedy_selection():
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("mode_kwargs", [{}, {"policy_mode": EvaluationPolicyMode.GREEDY}, {"policy_mode": "GREEDY"}])
-async def test_greedy_reproduces_v0_10_1_trajectories_for_every_condition(tmp_path, mode_kwargs):
-    """Golden recorded by tests/support/eval_trajectory.py under MARLA v0.10.1
-    (same code, same fixed-seed checkpoint): PPO_ONLY and MARLA_FULL under
+async def test_greedy_reproduces_recorded_trajectories_for_every_condition(tmp_path, mode_kwargs):
+    """Golden recorded by ``python -m tests.support.eval_trajectory`` for the hierarchical stop-head
+    policy (same code, same fixed-seed checkpoint): PPO_ONLY and MARLA_FULL under
     NORMAL/NO_QUERY/ALWAYS_QUERY/BETA_ZERO/BETA_ONE/PLAN_MAKER_ONLY."""
+    from marla.learning.action_encoder import POLICY_REPRESENTATION_VERSION
+
     golden = json.loads(GOLDEN.read_text())
-    assert golden["recorded_with_marla_version"] == "0.10.1"
+    assert golden["recorded_with_policy_representation_version"] == POLICY_REPRESENTATION_VERSION
     got = await et.run_greedy_conditions(tmp_path, REPO_ROOT, SMALL_SCENARIO, **mode_kwargs)
     assert set(got) == set(golden["trajectories"])
     for condition, expected in golden["trajectories"].items():
@@ -124,8 +130,11 @@ async def test_greedy_reproduces_v0_10_1_trajectories_for_every_condition(tmp_pa
         for g, e in zip(got[condition]["steps"], expected["steps"]):
             assert g[:-1] == e[:-1], (condition, g, e)
             assert g[-1] == pytest.approx(e[-1], abs=2e-3), (condition, g, e)
-    # the fixture really exercises advice: greedy NORMAL consults, BETA_ONE != BETA_ZERO
-    assert any(s[3] for s in golden["trajectories"]["MARLA_FULL/NORMAL"]["steps"])
+    # the fixture really exercises advice and stopping: greedy NORMAL consults on some (not all)
+    # decisions, BETA_ONE != BETA_ZERO, and greedy FINISHes in some episodes and times out in others
+    normal = golden["trajectories"]["MARLA_FULL/NORMAL"]
+    assert any(s[3] for s in normal["steps"]) and not all(s[3] for s in normal["steps"])
+    assert {e[1] for e in golden["trajectories"]["PPO_ONLY"]["episodes"]} == {"finish", "truncated"}
     assert golden["trajectories"]["MARLA_FULL/BETA_ONE"] != golden["trajectories"]["MARLA_FULL/BETA_ZERO"]
 
 
@@ -188,13 +197,17 @@ async def test_ppo_only_stochastic_samples_pi_from_the_action_stream_reproducibl
     assert meta["rng_scheme"] == EVALUATION_RNG_SCHEME and meta["rng_agent_seed"] == AGENT_SEED
     assert meta["evaluation_seeds"] == [et.SEED_START, et.SEED_START + 2]
     assert meta["rng_draws"][QUERY_STREAM] == 0, "PPO_ONLY must not consume the query stream"
-    assert meta["rng_draws"][ACTION_STREAM] >= len(a.records)
+    assert meta["rng_draws"][STOP_STREAM] >= len(a.records)
+    assert meta["rng_draws"][ACTION_STREAM] >= sum(not r.stop_selected for r in a.records)
     assert all(s.is_eval for s in a.summaries)
+    assert any(r.stop_selected for r in a.records) and any(not r.stop_selected for r in a.records)
 
     by_seed = {s.episode_id: s.seed for s in a.summaries}
     for episode_id, records in _episodes(a).items():
-        us = _uniforms(by_seed[episode_id], "action", len(records))
-        for u, r in zip(us, records):
+        _assert_stop_sampled(records, by_seed[episode_id])
+        continuing = [r for r in records if not r.stop_selected]
+        us = _uniforms(by_seed[episode_id], "action", len(continuing))
+        for u, r in zip(us, continuing):
             probs = torch.distributions.Categorical(probs=torch.softmax(r.base_logits, dim=-1)).probs
             assert r.selected_action_index == _reference_categorical(u, probs)
             assert torch.equal(r.final_logits, r.base_logits)
@@ -231,8 +244,16 @@ def scripted_consultant(monkeypatch):
     return consultant
 
 
+def _assert_stop_sampled(records, eval_seed):
+    """stop_t ~ Bernoulli(p_stop): one stop draw per decision, before anything else."""
+    us = _uniforms(eval_seed, "stop", len(records))
+    for u, r in zip(us, records):
+        assert r.stop_selected == (u < r.old_stop_probability)
+
+
 def _assert_final_action_sampled(records, eval_seed):
-    action_records = list(records)
+    """a_t ~ softmax(final logits): one action draw per CONTINUE decision (FINISH draws none)."""
+    action_records = [r for r in records if not r.stop_selected]
     us = _uniforms(eval_seed, "action", len(action_records))
     for u, r in zip(us, action_records):
         probs = torch.distributions.Categorical(probs=torch.softmax(r.final_logits, dim=-1)).probs
@@ -257,9 +278,14 @@ async def test_marla_full_stochastic_structural_path(tmp_path, scripted_consulta
     assert [(c["episode_id"], c["step"]) for c in kept_calls] == [(r.episode_id, r.environment_step) for r in queried]
 
     for episode_id, records in _episodes(result).items():
-        uq = _uniforms(by_seed[episode_id], "query", len(records))
-        for u, r in zip(uq, records):  # q_t ~ Bernoulli(p_t^q), one query draw per decision
+        _assert_stop_sampled(records, by_seed[episode_id])
+        continuing = [r for r in records if not r.stop_selected]
+        uq = _uniforms(by_seed[episode_id], "query", len(continuing))
+        for u, r in zip(uq, continuing):  # q_t ~ Bernoulli(p_t^q), one query draw per CONTINUE decision
             assert r.sampled_query == (u < r.old_query_probability)
+        for r in records:
+            if r.stop_selected:  # FINISH: no query decision, no consultation
+                assert not r.sampled_query and r.old_query_probability is None
         _assert_final_action_sampled(records, by_seed[episode_id])  # a_t ~ softmax(final logits)
         assert records[0].previous_query is False
         for prev, cur in zip(records, records[1:]):  # recurrent previous_query = the SAMPLED q_t
@@ -289,7 +315,7 @@ async def test_override_precedence_under_stochastic_policy(tmp_path, scripted_co
         _assert_final_action_sampled(records, {s.episode_id: s.seed for s in no_query.summaries}[e])
 
     always = await _stochastic(run_dir, overrides=ALWAYS_QUERY)
-    assert all(r.sampled_query for r in always.records)
+    assert all(r.sampled_query != r.stop_selected for r in always.records)  # every CONTINUE queries, FINISH never
     assert always.rng_draws[QUERY_STREAM] == 0, "a forced query consumes no query draw"
     for e, records in _episodes(always).items():
         _assert_final_action_sampled(records, {s.episode_id: s.seed for s in always.summaries}[e])
@@ -306,8 +332,11 @@ async def test_override_precedence_under_stochastic_policy(tmp_path, scripted_co
             _assert_final_action_sampled(records, {s.episode_id: s.seed for s in result.summaries}[e])
 
     pm_only = await _stochastic(run_dir, overrides=PLAN_MAKER_ONLY)
-    assert pm_only.rng_draws == {QUERY_STREAM: 0, ACTION_STREAM: 0}, "PLAN_MAKER_ONLY never samples the policy"
-    for r in pm_only.records:
+    assert pm_only.rng_draws[QUERY_STREAM] == pm_only.rng_draws[ACTION_STREAM] == 0, (
+        "PLAN_MAKER_ONLY never samples the policy's ordinary action or query"
+    )
+    assert pm_only.rng_draws[STOP_STREAM] > 0, "the stop decision stays the policy's own"
+    for r in [r for r in pm_only.records if not r.stop_selected]:
         assert r.sampled_query
         local = int(np.argmax(r.plan_maker_scores_in_action_order))
         assert r.selected_action_index == r.consulted_action_indices[local]

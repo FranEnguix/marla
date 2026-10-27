@@ -32,7 +32,7 @@ SCENARIO = str((REPO_ROOT / "NASimEmu/scenarios/sm_entry_user_three_subnets.v2.y
 
 
 def _make_adapter() -> NasimEmuAdapter:
-    return NasimEmuAdapter(scenario=SCENARIO, max_episode_steps=100, completion_reward=1.0, premature_finish_penalty=-1.0)
+    return NasimEmuAdapter(scenario=SCENARIO, max_episode_steps=100)
 
 
 def test_no_change_between_identical_snapshots():

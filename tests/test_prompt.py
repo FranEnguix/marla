@@ -20,7 +20,7 @@ def test_build_prompt_includes_all_sections():
     objective = AdvisoryObjective(type="capture_target", description="Get root somewhere.")
     observation = _scoped_observation(local_hosts=[{"target": "host-1-0", "access": "none"}], selected_subnet=1)
     legal_actions = [
-        AdvisoryActionDescriptor(action_id="finish", type="finish", target=None, parameters={}),
+        AdvisoryActionDescriptor(action_id="service-scan:host-1-0", type="service_scan", target="host-1-0", parameters={}),
     ]
 
     prompt = build_prompt(rules, objective, observation, legal_actions, consulted_subnet=1, global_candidate_action_count=1)
@@ -29,7 +29,7 @@ def test_build_prompt_includes_all_sections():
     assert "capture_target" in prompt
     assert "Get root somewhere." in prompt
     assert "host-1-0" in prompt
-    assert '"finish"' in prompt
+    assert '"service-scan:host-1-0"' in prompt
     assert "Return strict JSON" in prompt
     assert "CONSULTED SUBNET 1" in prompt
 
@@ -87,30 +87,26 @@ def _finish_prompt(**objective_fields):
     return build_prompt([], objective, _scoped_observation(), [], consulted_subnet=None, global_candidate_action_count=0)
 
 
-def test_prompt_states_configured_target_dependent_finish_reward():
-    """The Plan Maker is told the FINISH reward actually in force (default config)."""
+def test_prompt_never_offers_finish_and_states_configured_finish_reward():
+    """FINISH is decided by the policy's stop head before consulting; the prompt describes its
+    reward (default config) for context only and never asks for a "finish" score."""
     from marla.models.prompt import PROMPT_VERSION
 
     prompt = _finish_prompt()
-    assert "no further reward" not in prompt
-    assert "+50 per sensitive target in the network if every sensitive target already has root access" in prompt
-    assert "-100 for each sensitive target still lacking root access" in prompt
-    assert "must be chosen explicitly" in prompt
-    assert "ends the episode immediately" in prompt
-    assert "score \"finish\"\nhighest instead of suggesting further actions" in prompt
-    assert PROMPT_VERSION == "nasimemu-plan-maker-v3-finish-reward"
+    assert PROMPT_VERSION == "nasimemu-plan-maker-v4-hierarchical-stop"
+    assert "NOT one of your candidates" in prompt and "already decided to CONTINUE" in prompt
+    assert "finishing pays +1 per sensitive target in the network if every sensitive target already has root access" in prompt
+    assert "-1 for each sensitive target still lacking root access" in prompt
+    assert 'score "finish"' not in prompt and 'plus "finish"' not in prompt
 
 
-def test_prompt_reflects_explicit_reward_overrides_not_defaults():
-    legacy = _finish_prompt(completion_reward=1.0, premature_finish_penalty=-1.0,
-                            premature_finish_penalty_per_remaining_target=0.0)
-    assert "it pays +1 if every sensitive target already has root access, and otherwise -1 (" in legacy
-    assert "+50" not in legacy and "-100" not in legacy
-    custom = _finish_prompt(completion_reward_per_target=10.0, premature_finish_penalty=-5.0)
-    assert "+10 per sensitive target" in custom and "-5 plus -100 for each sensitive target" in custom
+def test_prompt_reflects_configured_coefficients():
+    custom = _finish_prompt(successful_finish_reward_per_target=10.0, premature_finish_reward_per_remaining_target=-5.0)
+    assert "finishing pays +10 per sensitive target" in custom and "otherwise -5 for each sensitive target" in custom
+    assert "+1 per" not in custom
 
 
 def test_prompt_without_reward_spec_labels_defaults_as_defaults():
     objective = AdvisoryObjective(type="capture_target", description="d")
     prompt = build_prompt([], objective, _scoped_observation(), [], consulted_subnet=None, global_candidate_action_count=0)
-    assert "With the default reward configuration it pays +50 per sensitive target" in prompt
+    assert "With the default reward configuration, finishing pays +1 per sensitive target" in prompt

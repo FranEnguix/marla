@@ -29,10 +29,8 @@ def test_query_false_implies_no_actual_consultation_fields(tmp_path):
     REPO_ROOT = Path(__file__).resolve().parent.parent
     config = load_config(REPO_ROOT / "examples" / "baseline.yaml")
     adapter = NasimEmuAdapter(
-        scenario=str((REPO_ROOT / "NASimEmu/scenarios/sm_entry_dmz_one_subnet.v2.yaml").resolve()),
+        scenario=str((REPO_ROOT / "tests/data/scenarios/sm_entry_dmz_one_target.v2.yaml").resolve()),
         max_episode_steps=6,
-        completion_reward=config.objective.completion_reward,
-        premature_finish_penalty=config.objective.premature_finish_penalty,
     )
     policy = RecurrentPolicy(config.policy)  # baseline: consultation_enabled=False
     collector = RolloutCollector(adapter, policy, run_id="t", base_seed=1)
@@ -97,10 +95,8 @@ def test_global_environment_step_monotonic_within_a_rollout(tmp_path):
     REPO_ROOT = Path(__file__).resolve().parent.parent
     config = load_config(REPO_ROOT / "examples" / "baseline.yaml")
     adapter = NasimEmuAdapter(
-        scenario=str((REPO_ROOT / "NASimEmu/scenarios/sm_entry_dmz_one_subnet.v2.yaml").resolve()),
+        scenario=str((REPO_ROOT / "tests/data/scenarios/sm_entry_dmz_one_target.v2.yaml").resolve()),
         max_episode_steps=5,
-        completion_reward=config.objective.completion_reward,
-        premature_finish_penalty=config.objective.premature_finish_penalty,
     )
     policy = RecurrentPolicy(config.policy)
     collector = RolloutCollector(adapter, policy, run_id="t", base_seed=1)

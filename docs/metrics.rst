@@ -77,7 +77,8 @@ Run directory contents
     ``native_return`` to compare against unmodified NASimEmu results,
     independently of the FINISH reward configuration.
     ``target_completion_fraction`` = ``sensitive_targets_with_root_final /
-    sensitive_targets_total`` (empty when the scenario has no targets).
+    sensitive_targets_total`` (every episode has at least one target, see
+    :doc:`configuration`'s zero-target note).
 
     **Success semantics -- three related but distinct fields, never
     conflated:**
@@ -149,9 +150,19 @@ partial observability, not necessarily about attack competence.
     (``legal_action_count``, ``selected_action_id``,
     ``selected_action_type``); policy confidence, computed once from the
     logits available at that step -- never a stored full probability
-    vector (``base_policy_entropy``, ``base_top_two_margin``,
+    vector. Probabilities, ranks and entropies are over the COMPLETE
+    hierarchical distribution (FINISH has probability ``p_stop``; an
+    ordinary action ``(1 - p_stop) * pi_action(a)``; see :doc:`architecture`),
+    ``base_`` without advice and ``final_`` as actually sampled from
+    (``base_policy_entropy``, ``base_top_two_margin`` -- over the ordinary
+    actions' logits only --
     ``selected_action_base_probability``/``selected_action_final_probability``,
-    their ranks, ``final_policy_entropy``); critic/credit assignment
+    their ranks, ``final_policy_entropy``); the stop decision and completion
+    predictor (``stop_probability``, ``stop_selected``,
+    ``completion_probability`` -- ``null`` when the predictor is disabled --
+    and ``completion_label``, the decision-time simulator truth the
+    predictor is trained against, identical to
+    ``objective_satisfied_before_action``); critic/credit assignment
     (``critic_value``, ``gae_advantage``, ``return_target``); rewards
     (``nasimemu_reward``, ``training_reward``, ``consultation_cost``);
     objective/episode state (``objective_satisfied``,
@@ -165,7 +176,7 @@ partial observability, not necessarily about attack competence.
     a direct query of the underlying simulator's current state rather than
     anything stored (``sensitive_targets_total``, ``sensitive_targets_with_root``,
     ``sensitive_targets_remaining`` -- USER access does not count as
-    "with root"; feeds ``objective.premature_finish_penalty_per_remaining_target``);
+    "with root"; feeds ``objective.premature_finish_reward_per_remaining_target``);
     action/target compatibility (see :mod:`marla.environment.action_compatibility`
     -- the same helper drives the action encoder's own input features, so
     these can never drift from what the policy actually saw):
@@ -184,7 +195,8 @@ partial observability, not necessarily about attack competence.
     quantities (``objective_satisfied_before_action``,
     ``sensitive_targets_remaining_before_action``,
     ``sensitive_targets_with_root_before_action``,
-    ``base_finish_probability``/``final_finish_probability``,
+    ``base_finish_probability``/``final_finish_probability`` -- both equal to
+    ``stop_probability``: advice never changes ``p_stop`` --
     ``base_finish_rank``/``final_finish_rank`` -- 1 = highest
     probability/logit, ties broken by legal-action order --
     ``base_finish_is_argmax``/``final_finish_is_argmax``,
@@ -196,9 +208,10 @@ partial observability, not necessarily about attack competence.
     **Subnet-scoped consultation** (``null`` whenever ``queried`` is
     false -- nothing was consulted, not a missing measurement):
     ``consultation_scope`` (the fixed literal ``"subnet_scoped"`` when
-    queried), ``consulted_subnet`` (the routed subnet, or ``null`` in the
-    documented edge case where no non-FINISH candidate existed),
-    ``global_candidate_action_count``/``consulted_candidate_action_count``
+    queried), ``consulted_subnet`` (the routed subnet; a query happens only
+    after CONTINUE, so at least one ordinary candidate exists),
+    ``global_candidate_action_count`` (ordinary candidates; FINISH is never
+    consulted)/``consulted_candidate_action_count``
     (equal only when every candidate belongs to one subnet -- see
     :doc:`architecture`'s "Subnet-scoped consultation" section),
     ``consultation_action_reduction_ratio`` (consulted/global),
@@ -381,6 +394,23 @@ partial observability, not necessarily about attack competence.
     that side of the split); a partition with zero decisions this rollout
     is ``null``, never ``0.0``.
 
+    Completion predictor and stop head at collection time, over this
+    rollout's decisions (labels: ``objective_satisfied_before_action``):
+    ``completion_probability`` (mean prediction),
+    ``completion_prediction_accuracy`` (threshold 0.5),
+    ``completion_prediction_precision``/``completion_prediction_recall``
+    (for the completed class; ``null`` when no state was predicted / was
+    actually complete), ``completion_prediction_brier`` (mean squared error
+    of the probability -- calibration), ``completion_label_positive_count``/
+    ``completion_label_negative_count`` (class imbalance), and
+    ``stop_probability``, ``stop_probability_when_complete``,
+    ``stop_probability_when_incomplete`` (mean ``p_stop`` overall and split
+    by the label; ``null`` for an empty split). A well-trained policy shows
+    ``stop_probability_when_complete`` high and ``..._when_incomplete`` low;
+    because the environment is partially observable, a completed state can
+    look identical to an incomplete one, so neither the predictor nor the
+    stop head can be expected to separate them perfectly.
+
     Subnet-exploration aggregates (all computed from the visible-only
     ``VisibleNetworkExploration`` facts described above, never true
     topology): ``mean_fraction_known_subnets_scanned``,
@@ -412,6 +442,23 @@ partial observability, not necessarily about attack competence.
     ``approximate_kl``, ``clip_fraction``, ``explained_variance``,
     ``gradient_norm``, and the actual current ``learning_rate`` (reflecting
     the configured schedule, see :doc:`configuration`).
+
+    **Hierarchical policy / completion predictor** (current parameters,
+    this minibatch): ``action_entropy`` is the hierarchical entropy
+    ``stop_entropy + (1 - p_stop) * conditional_action_entropy`` (both also
+    reported; ``query_entropy`` is continuation-weighted likewise);
+    ``stop_probability``/``stop_probability_when_complete``/
+    ``stop_probability_when_incomplete``; ``completion_prediction_loss``
+    (the auxiliary BCE before ``policy.completion_predictor.loss_coefficient``,
+    ``null`` when the predictor is disabled), ``completion_positive_class_weight``
+    (the BCE weight of completed states used for this minibatch),
+    ``completion_label_positive_count``/``completion_label_negative_count``/
+    ``completion_label_positive_fraction`` (class imbalance), and the same
+    accuracy/precision/recall/Brier/mean-probability fields as
+    ``rollouts.csv``. Until completed states appear in the collected data
+    (``completion_label_positive_count`` 0), the predictor only learns
+    "not complete"; it receives gradients from positives as soon as genuine
+    completed states are collected -- labels are never fabricated.
 
     **Route-switch diagnostics** (subnet-scoped consultation --
     PIECEWISE_EXACT_SEMIGRADIENT, see :doc:`architecture`'s "Subnet-scoped

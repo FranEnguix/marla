@@ -18,13 +18,14 @@ def fake_step_output(num_actions=3, hidden_size=32, action_hidden_size=32):
     base_probs = torch.softmax(base_logits, dim=-1)
     action_embeddings = torch.randn(num_actions, action_hidden_size)
     value = torch.randn(())
-    return PolicyStepOutput(z=z, base_logits=base_logits, base_probs=base_probs, action_embeddings=action_embeddings, value=value)
+    return PolicyStepOutput(z=z, base_logits=base_logits, base_probs=base_probs, action_embeddings=action_embeddings,
+                            value=value, stop_logit=torch.tensor(-2.0), completion_logit=torch.tensor(0.0))
 
 
 def test_compute_query_probability_is_valid_probability():
     policy = make_assisted_policy()
     step_out = fake_step_output()
-    prob = compute_query_probability(policy, step_out, num_actions=3, kappa=0.1)
+    prob = compute_query_probability(policy, step_out, kappa=0.1)
     assert prob.dim() == 0
     assert 0.0 <= prob.item() <= 1.0
 
@@ -92,20 +93,29 @@ def test_compute_final_decision_sparse_residual_leaves_unconsulted_logits_exactl
 def test_joint_log_probability_not_queried_matches_base_log_prob():
     final_logits = torch.tensor([1.0, 2.0, 0.5])
     query_probability = torch.tensor(0.3)
-    result = compute_joint_log_probability(query_probability, sampled_query=False, final_logits=final_logits, selected_action_index=1)
+    stop_logit = torch.tensor(-1.5)
+    result = compute_joint_log_probability(stop_logit, 3, stop_selected=False, final_logits=final_logits,
+                                           selected_action_index=1, query_probability=query_probability,
+                                           sampled_query=False)
 
     expected_action_log_prob = torch.log_softmax(final_logits, dim=-1)[1]
     expected_query_log_prob = torch.log(1 - query_probability)
+    expected_stop_log_prob = torch.nn.functional.logsigmoid(-stop_logit)
 
     assert torch.isclose(result.action_log_prob, expected_action_log_prob, atol=1e-5)
     assert torch.isclose(result.query_log_prob, expected_query_log_prob, atol=1e-5)
-    assert torch.isclose(result.joint_log_prob, expected_action_log_prob + expected_query_log_prob, atol=1e-5)
+    assert torch.isclose(result.stop_log_prob, expected_stop_log_prob, atol=1e-5)
+    assert torch.isclose(
+        result.joint_log_prob, expected_stop_log_prob + expected_action_log_prob + expected_query_log_prob, atol=1e-5
+    )
 
 
 def test_joint_log_probability_queried_uses_query_probability_directly():
     final_logits = torch.tensor([1.0, 2.0, 0.5])
     query_probability = torch.tensor(0.7)
-    result = compute_joint_log_probability(query_probability, sampled_query=True, final_logits=final_logits, selected_action_index=0)
+    result = compute_joint_log_probability(torch.tensor(0.0), 3, stop_selected=False, final_logits=final_logits,
+                                           selected_action_index=0, query_probability=query_probability,
+                                           sampled_query=True)
 
     expected_query_log_prob = torch.log(query_probability)
     assert torch.isclose(result.query_log_prob, expected_query_log_prob, atol=1e-5)

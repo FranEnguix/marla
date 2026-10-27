@@ -27,12 +27,10 @@ from marla.config.loader import load_config
 REPO_ROOT = Path(__file__).resolve().parent.parent
 # sm_entry_dmz_two_subnets.v2.yaml is not universally solvable (see
 # marla.scenario.solvability's analysis -- a real, separate finding this
-# purely-mechanical resume test is not about) and would now fail `marla
-# run`'s preflight check; sm_entry_dmz_one_subnet.v2.yaml has a vacuous
-# objective (0 sensitive-host probability) and is trivially solvable,
-# matching the sibling subprocess tests in test_local_runtime.py /
-# test_local_runtime_assisted.py / test_distributed.py.
-SMALL_SCENARIO = str((REPO_ROOT / "NASimEmu/scenarios/sm_entry_dmz_one_subnet.v2.yaml").resolve())
+# purely-mechanical resume test is not about) and would fail `marla run`'s
+# preflight check; the small one-target test scenario is solvable and has a
+# real (non-vacuous) objective, matching the sibling subprocess tests.
+SMALL_SCENARIO = str((REPO_ROOT / "tests/data/scenarios/sm_entry_dmz_one_target.v2.yaml").resolve())
 
 
 def _write_tiny_baseline_config(tmp_path: Path, run_id: str, total_environment_steps: int) -> Path:
@@ -142,6 +140,7 @@ def test_load_checkpoint_without_resume_fields_still_works(tmp_path):
             "policy_representation_version": POLICY_REPRESENTATION_VERSION,
             "visible_target_progress_enabled": policy.visible_target_progress_enabled,
             "visible_subnet_exploration_enabled": policy.visible_subnet_exploration_enabled,
+            "completion_predictor_enabled": policy.completion_predictor_enabled,
         },
         checkpoint_path,
     )

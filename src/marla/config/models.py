@@ -73,71 +73,35 @@ class EnvironmentConfig(MarlaBaseModel):
     max_episode_steps: int = Field(gt=0)
 
 
-# Default FINISH reward (target-dependent), see marla.environment.finish:
-#   successful FINISH: +DEFAULT_COMPLETION_REWARD_PER_TARGET * total sensitive targets
-#   premature FINISH:  DEFAULT_PREMATURE_FINISH_PENALTY
-#                      + DEFAULT_PREMATURE_FINISH_PENALTY_PER_REMAINING_TARGET * targets still lacking ROOT
-DEFAULT_COMPLETION_REWARD_PER_TARGET = 50.0
-DEFAULT_PREMATURE_FINISH_PENALTY = 0.0
-DEFAULT_PREMATURE_FINISH_PENALTY_PER_REMAINING_TARGET = -100.0
-
-
-def effective_finish_reward(
-    completion_reward: float | None,
-    completion_reward_per_target: float,
-    premature_finish_penalty: float,
-    premature_finish_penalty_per_remaining_target: float,
-) -> dict:
-    """Canonical *effective* FINISH-reward semantics (precedence applied).
-
-    A fixed ``completion_reward`` makes ``completion_reward_per_target``
-    irrelevant, so it is omitted -- two configurations compare equal exactly
-    when they pay the same FINISH rewards. Persisted in checkpoints and
-    compared on resume (see ``marla.learning.checkpoint``).
-    """
-    if completion_reward is not None:
-        successful = {"mode": "fixed", "value": float(completion_reward)}
-    else:
-        successful = {"mode": "per_target", "value": float(completion_reward_per_target)}
-    return {
-        "version": 1,
-        "successful_finish": successful,
-        "premature_finish": {"fixed": float(premature_finish_penalty),
-                             "per_remaining_target": float(premature_finish_penalty_per_remaining_target)},
-    }
+# FINISH reward (see marla.environment.finish), with N sensitive targets in the
+# scenario and M of them still lacking ROOT access when FINISH is selected:
+#   successful FINISH (M == 0): +DEFAULT_SUCCESSFUL_FINISH_REWARD_PER_TARGET * N
+#   premature FINISH  (M > 0):   DEFAULT_PREMATURE_FINISH_REWARD_PER_REMAINING_TARGET * M
+DEFAULT_SUCCESSFUL_FINISH_REWARD_PER_TARGET = 1.0
+DEFAULT_PREMATURE_FINISH_REWARD_PER_REMAINING_TARGET = -1.0
 
 
 class ObjectiveConfig(MarlaBaseModel):
     type: Literal["capture_target"]
     description: str
-    # Successful-FINISH reward (objective satisfied == NASimEmu's native goal:
-    # every sensitive/value host at ROOT, see environment/nasimemu_adapter.py).
-    # Precedence: an explicit fixed `completion_reward` (legacy configs) wins
-    # and `completion_reward_per_target` is then unused; when
-    # `completion_reward` is omitted (None), the reward is
-    # `completion_reward_per_target * total sensitive targets`. (Not an
-    # error when both are present: model_dump()/parse round-trips always
-    # write the per-target default, so precedence -- not rejection -- keeps
-    # legacy configs loadable.)
-    completion_reward: float | None = None
-    completion_reward_per_target: float = DEFAULT_COMPLETION_REWARD_PER_TARGET
-    # Effective reward for selecting FINISH before the objective is
-    # satisfied is a base term plus a per-remaining-target term:
-    #
-    #   premature_finish_penalty
-    #   + premature_finish_penalty_per_remaining_target * remaining_sensitive_targets
-    #
-    # "remaining" means a sensitive/value host not yet at ROOT access --
-    # USER access does not count (see NasimEmuAdapter.sensitive_target_status,
-    # matching NASimEmu's own all_sensitive_hosts_compromised()). The two
-    # terms simply add; the default is a pure proportional penalty
-    # (0.0 fixed, -100.0 per remaining target).
-    premature_finish_penalty: float = DEFAULT_PREMATURE_FINISH_PENALTY
-    premature_finish_penalty_per_remaining_target: float = DEFAULT_PREMATURE_FINISH_PENALTY_PER_REMAINING_TARGET
+    # The only two FINISH-reward parameters: per-target coefficients, no
+    # fixed bonus/penalty terms. "Remaining" means a sensitive target not yet
+    # at ROOT access (USER access does not count, see
+    # NasimEmuAdapter.sensitive_target_status); non-sensitive hosts never
+    # enter the calculation.
+    successful_finish_reward_per_target: float = Field(default=DEFAULT_SUCCESSFUL_FINISH_REWARD_PER_TARGET, ge=0)
+    premature_finish_reward_per_remaining_target: float = Field(
+        default=DEFAULT_PREMATURE_FINISH_REWARD_PER_REMAINING_TARGET, le=0
+    )
 
     def effective_finish_reward(self) -> dict:
-        return effective_finish_reward(self.completion_reward, self.completion_reward_per_target,
-                                       self.premature_finish_penalty, self.premature_finish_penalty_per_remaining_target)
+        """Canonical FINISH-reward semantics, persisted in checkpoints and
+        compared on resume (see ``marla.learning.checkpoint``)."""
+        return {
+            "version": 2,
+            "successful_finish_reward_per_target": float(self.successful_finish_reward_per_target),
+            "premature_finish_reward_per_remaining_target": float(self.premature_finish_reward_per_remaining_target),
+        }
 
 
 class GraphEncoderConfig(MarlaBaseModel):
@@ -285,6 +249,11 @@ class PPOConfig(MarlaBaseModel):
     gae_lambda: float = Field(ge=0, le=1)
     clip_epsilon: float = Field(gt=0)
     value_coefficient: float = Field(ge=0)
+    # Entropy bonuses. action_entropy_coefficient weights the entropy of the
+    # hierarchical stop/action decision, H(stop) + (1 - p_stop) * H(pi_action);
+    # query_entropy_coefficient weights (1 - p_stop) * H(query) -- both
+    # continuation-weighted, since the ordinary-action and query decisions
+    # are only reached on CONTINUE (see marla.learning.decision).
     query_entropy_coefficient: float = Field(ge=0)
     action_entropy_coefficient: float = Field(ge=0)
     max_grad_norm: float = Field(gt=0)
@@ -341,12 +310,52 @@ def compute_num_rollouts(ppo_config: "PPOConfig") -> int:
     return math.ceil(ppo_config.total_environment_steps / effective_batch_size(ppo_config))
 
 
+class CompletionPredictorConfig(MarlaBaseModel):
+    """Auxiliary mission-completion predictor (see
+    ``marla.learning.recurrent_policy.RecurrentPolicy``): a head on the
+    recurrent state ``z_t`` estimating P(every sensitive target has ROOT |
+    history), supervised with the simulator's decision-time
+    ``objective_satisfied()`` label during PPO updates only (never a policy
+    input). Its probability is one of the stop head's two inputs.
+
+    ``enabled=False`` keeps the stop head but feeds it a constant 0 instead of
+    the predicted probability and adds no auxiliary loss (an ablation).
+    """
+
+    enabled: bool = True
+    # lambda in L_total = L_PPO + lambda * L_completion.
+    loss_coefficient: float = Field(default=0.1, ge=0)
+    # BCE positive-class weight. "balanced" = n_negative / n_positive of the
+    # current minibatch, clamped to [1, max_positive_class_weight] (1 when the
+    # minibatch has no positive label); a number is used as a fixed weight.
+    # The weighted loss is normalized by the total sample weight, so
+    # reweighting changes the class balance, not the loss scale.
+    positive_class_weight: float | Literal["balanced"] = "balanced"
+    max_positive_class_weight: float = Field(default=10.0, ge=1)
+
+    @model_validator(mode="after")
+    def _check_fixed_weight(self) -> "CompletionPredictorConfig":
+        if not isinstance(self.positive_class_weight, str) and self.positive_class_weight <= 0:
+            raise ValueError("policy.completion_predictor.positive_class_weight must be > 0 or 'balanced'")
+        return self
+
+
+class StopHeadConfig(MarlaBaseModel):
+    """The PPO-trained FINISH/CONTINUE head. ``initial_stop_probability`` sets
+    its output bias at initialization (logit of this value), so an untrained
+    policy explores instead of stopping on half of its decisions."""
+
+    initial_stop_probability: float = Field(default=0.05, gt=0, lt=1)
+
+
 class PolicyConfig(MarlaBaseModel):
     algorithm: Literal["recurrent_ppo"] = "recurrent_ppo"
     graph_encoder: GraphEncoderConfig
     action_encoder: ActionEncoderConfig
     recurrent: RecurrentConfig
     ppo: PPOConfig
+    completion_predictor: CompletionPredictorConfig = Field(default_factory=CompletionPredictorConfig)
+    stop_head: StopHeadConfig = Field(default_factory=StopHeadConfig)
 
 
 class ConsultationConfig(MarlaBaseModel):

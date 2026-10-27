@@ -12,7 +12,7 @@ from marla.environment.nasimemu_adapter import NasimEmuAdapter
 from marla.learning.trainer import build_policy_and_optimizer, run_baseline_training, run_training_loop
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
-SMALL_SCENARIO = str((REPO_ROOT / "NASimEmu/scenarios/sm_entry_dmz_one_subnet.v2.yaml").resolve())
+SMALL_SCENARIO = str((REPO_ROOT / "tests/data/scenarios/sm_entry_dmz_one_target.v2.yaml").resolve())
 
 
 def _tiny_config():
@@ -22,6 +22,9 @@ def _tiny_config():
     data["policy"]["ppo"]["epochs"] = 1
     data["policy"]["ppo"]["minibatch_sequences"] = 2
     data["policy"]["recurrent"]["sequence_length"] = 4
+    # Short episodes so the tiny run always completes some (the untrained
+    # stop head finishes only ~5% of decisions).
+    data["environment"]["max_episode_steps"] = 5
     # examples/baseline.yaml enables periodic evaluation by default; tests
     # that want it explicitly override these two fields themselves, so the
     # shared tiny config stays eval-off regardless of that file's defaults.
@@ -68,8 +71,6 @@ async def test_earlier_rollouts_step_records_are_garbage_collected_not_retained(
     policy, optimizer = build_policy_and_optimizer(config, torch.device("cpu"))
     adapter = NasimEmuAdapter(
         scenario=SMALL_SCENARIO, max_episode_steps=config.environment.max_episode_steps,
-        completion_reward=config.objective.completion_reward,
-        premature_finish_penalty=config.objective.premature_finish_penalty,
     )
 
     captured: dict = {}
@@ -127,6 +128,10 @@ async def test_baseline_smoke_run_cpu_small_scenario():
         # which never queries the Plan Maker or populates route/margin data
         # at all -- see learning/ppo.py's ppo_update.
         "route_switch_fraction", "mean_routing_margin",
+        # Completion-class splits: None when the minibatch has no completed
+        # (or no predicted-completed) decision state.
+        "completion_prediction_precision", "completion_prediction_recall",
+        "stop_probability_when_complete", "stop_probability_when_incomplete",
     }
     for m in result.update_metrics:
         # Rollout-level aggregates that can legitimately be None/NaN in
@@ -249,8 +254,6 @@ async def test_run_training_loop_stops_early_and_flags_result_when_stop_event_is
     adapter = NasimEmuAdapter(
         scenario=SMALL_SCENARIO,
         max_episode_steps=config.environment.max_episode_steps,
-        completion_reward=config.objective.completion_reward,
-        premature_finish_penalty=config.objective.premature_finish_penalty,
     )
     stop_event = asyncio.Event()
     stop_event.set()  # already requested before the first rollout even starts
@@ -376,8 +379,6 @@ async def test_periodic_evaluation_never_shares_the_training_collectors_adapter(
     training_adapter = NasimEmuAdapter(
         scenario=SMALL_SCENARIO,
         max_episode_steps=config.environment.max_episode_steps,
-        completion_reward=config.objective.completion_reward,
-        premature_finish_penalty=config.objective.premature_finish_penalty,
     )
     policy, optimizer = build_policy_and_optimizer(config, torch.device("cpu"))
     result = await run_training_loop(

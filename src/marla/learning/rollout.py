@@ -71,7 +71,7 @@ class ConsultationResult:
 
 
 # Subnet-scoped consultation (spec sections 2-9): ``legal_actions`` here is
-# already the SCOPED subset (that subnet's actions plus FINISH), and
+# already the SCOPED subset (that subnet's ordinary actions, never FINISH), and
 # ``observation`` is already the scoped {global_progress, local_hosts} dict
 # -- both constructed by RolloutCollector._decide via
 # marla.environment.consultation_scope BEFORE this is called, so every
@@ -118,12 +118,27 @@ class StepRecord:
     previous_training_reward: float
     previous_query: bool
 
-    base_logits: torch.Tensor  # detached, (N,)
-    final_logits: torch.Tensor  # detached, (N,) -- == base_logits unless accepted advice was applied
+    # Ordinary (non-FINISH) actions only, (K,) with K = N - 1 (FINISH is the
+    # last legal action and has no logit: it is decided by the stop head).
+    base_logits: torch.Tensor  # detached, (K,)
+    final_logits: torch.Tensor  # detached, (K,) -- == base_logits unless accepted advice was applied
+    # Index into legal_action_descriptors; N - 1 (FINISH) iff stop_selected.
     selected_action_index: int
-    old_action_log_probability: float
+    # log pi_action(a_t) of the conditional ordinary-action choice; None for FINISH.
+    old_action_log_probability: float | None
+    # log-probability of the COMPLETE hierarchical decision (stop decision,
+    # query decision, ordinary action) -- the PPO ratio's denominator.
     old_joint_log_probability: float
     critic_value: float
+    # Hierarchical stop decision at collection time.
+    stop_logit: float
+    old_stop_probability: float  # sigma(stop_logit); 1.0 when FINISH was forced
+    stop_selected: bool  # True == FINISH
+    old_stop_log_probability: float  # log pi(stop decision actually taken)
+    # Collection-time completion prediction sigma(completion_logit) --
+    # diagnostic only (its supervision label is objective_satisfied_before_action
+    # below). None when the completion predictor is disabled.
+    completion_probability: float | None
 
     nasimemu_reward: float
     consultation_cost: float
@@ -150,15 +165,17 @@ class StepRecord:
     sensitive_targets_total: int | None = None
     sensitive_targets_with_root: int | None = None
     sensitive_targets_remaining: int | None = None
-    # Decision-time diagnostic truth (FINISH investigation): the objective/
+    # Decision-time truth: the objective/
     # target status that existed WHEN THE POLICY CHOSE THIS STEP'S ACTION --
     # i.e. queried from the live simulator before this step's action was
     # applied, never inferred retrospectively from the post-action
     # transition above. This answers "was FINISH already the correct
     # action at this decision?", a different question from
     # objective_satisfied/objective_became_satisfied (which describe the
-    # state AFTER this step's action). Diagnostic simulator truth only --
-    # never fed to the policy as an input; see
+    # state AFTER this step's action). objective_satisfied_before_action is
+    # also the completion predictor's supervision label (privileged
+    # training-only information): it is used only as a BCE target during PPO
+    # updates and is never fed to the policy as an input; see
     # marla.environment.action_compatibility/visible_facts for what the
     # policy is actually allowed to see.
     objective_satisfied_before_action: bool = False
@@ -513,6 +530,7 @@ class RolloutCollector:
             decision = await self._decide(legal_actions, step_out, state)
             action_index = decision["action_index"]
             selected = legal_actions[action_index]
+            assert selected.is_finish == decision["stop_selected"]
 
             transition = self._adapter.step(selected)
             consultation_cost = decision["consultation_cost"]
@@ -579,6 +597,14 @@ class RolloutCollector:
                 old_action_log_probability=decision["action_log_prob"],
                 old_joint_log_probability=decision["joint_log_prob"],
                 critic_value=float(step_out.value.detach()),
+                stop_logit=float(step_out.stop_logit.detach()),
+                old_stop_probability=decision["stop_probability"],
+                stop_selected=decision["stop_selected"],
+                old_stop_log_probability=decision["stop_log_prob"],
+                completion_probability=(
+                    float(torch.sigmoid(step_out.completion_logit.detach()))
+                    if step_out.completion_logit is not None else None
+                ),
                 nasimemu_reward=transition.nasimemu_reward,
                 consultation_cost=consultation_cost,
                 training_reward=training_reward,
@@ -703,49 +729,83 @@ class RolloutCollector:
 
         return records, summaries
 
-    async def _decide(self, legal_actions: list[ActionDescriptor], step_out, state: EnvironmentState) -> dict:
-        """Runs steps 5-7 of the core invariant: query gate, consultation, advice, selection."""
-        if not self._consultation_enabled:
-            probs = step_out.base_probs.detach()
-            distribution = torch.distributions.Categorical(probs=probs)
-            if self._deterministic:
-                sampled = probs.argmax()
-            elif self._evaluation_sampler is not None:
-                sampled = torch.tensor(
-                    self._evaluation_sampler.sample_action(distribution.probs), dtype=torch.long, device=probs.device
-                )
-            else:
-                sampled = distribution.sample()
-            action_index = int(sampled.item())
-            action_log_prob = float(distribution.log_prob(sampled))
-            return {
-                "action_index": action_index,
-                "final_logits": step_out.base_logits.detach().clone(),
-                "action_log_prob": action_log_prob,
-                "joint_log_prob": action_log_prob,
-                "consultation_cost": 0.0,
-                "sampled_query": False,
-                "query_probability": None,
-                "query_log_prob": None,
-                "consulted_subnet": None,
-                "consulted_action_indices": None,
-                "global_candidate_action_count": None,
-                "plan_maker_scores": None,
-                "plan_maker_validation_status": None,
-                "plan_maker_response_status": None,
-                "plan_maker_request_id": None,
-                "plan_maker_latency_ms": None,
-                "plan_maker_input_tokens": None,
-                "plan_maker_output_tokens": None,
-                "plan_maker_total_tokens": None,
-                "normalized_advice": None,
-                "beta": None,
-                "alpha": None,
-            }
+    def _sample_stop(self, step_out) -> tuple[bool, float]:
+        """FINISH-vs-CONTINUE, sampled before anything else (no query, no
+        consultation yet). Returns ``(stop_selected, p_stop)``; FINISH is
+        forced (``p_stop`` reported as 1.0) when no ordinary action exists."""
+        if step_out.num_ordinary_actions == 0:
+            return True, 1.0
+        stop_probability = torch.sigmoid(step_out.stop_logit.detach())
+        if self._deterministic:
+            stop = bool(stop_probability.item() >= 0.5)  # Bernoulli mode
+        elif self._evaluation_sampler is not None:
+            stop = self._evaluation_sampler.sample_stop(stop_probability)
+        else:
+            stop = bool(torch.distributions.Bernoulli(probs=stop_probability).sample().item())
+        return stop, float(stop_probability)
 
-        query_probability = compute_query_probability(
-            self._policy, step_out, len(legal_actions), self._consultation_cost
-        )
+    def _sample_ordinary_action(self, probs: torch.Tensor) -> int:
+        if self._deterministic:
+            return int(probs.argmax().item())
+        if self._evaluation_sampler is not None:
+            return self._evaluation_sampler.sample_action(probs)
+        return int(torch.distributions.Categorical(probs=probs).sample().item())
+
+    async def _decide(self, legal_actions: list[ActionDescriptor], step_out, state: EnvironmentState) -> dict:
+        """The hierarchical decision: stop head first; on CONTINUE, steps 5-7
+        of the core invariant (query gate, consultation, advice, ordinary-action
+        selection). FINISH never queries the gate or consults the Plan Maker."""
+        stop_selected, stop_probability = self._sample_stop(step_out)
+        decision: dict = {
+            "stop_selected": stop_selected,
+            "stop_probability": stop_probability,
+            "final_logits": step_out.base_logits.detach().clone(),
+            "consultation_cost": 0.0,
+            "sampled_query": False,
+            "query_probability": None,
+            "query_log_prob": None,
+            "consulted_subnet": None,
+            "consulted_action_indices": None,
+            "global_candidate_action_count": None,
+            "plan_maker_scores": None,
+            "plan_maker_validation_status": None,
+            "plan_maker_response_status": None,
+            "plan_maker_request_id": None,
+            "plan_maker_latency_ms": None,
+            "plan_maker_input_tokens": None,
+            "plan_maker_output_tokens": None,
+            "plan_maker_total_tokens": None,
+            "normalized_advice": None,
+            "beta": None,
+            "alpha": None,
+        }
+        num_ordinary = step_out.num_ordinary_actions
+
+        if stop_selected:
+            joint = compute_joint_log_probability(step_out.stop_logit.detach(), num_ordinary, stop_selected=True)
+            decision.update(
+                action_index=len(legal_actions) - 1,
+                action_log_prob=None,
+                joint_log_prob=float(joint.joint_log_prob),
+                stop_log_prob=float(joint.stop_log_prob),
+            )
+            return decision
+
+        if not self._consultation_enabled:
+            action_index = self._sample_ordinary_action(step_out.base_probs.detach())
+            joint = compute_joint_log_probability(
+                step_out.stop_logit.detach(), num_ordinary, stop_selected=False,
+                final_logits=step_out.base_logits.detach(), selected_action_index=action_index,
+            )
+            decision.update(
+                action_index=action_index,
+                action_log_prob=float(joint.action_log_prob),
+                joint_log_prob=float(joint.joint_log_prob),
+                stop_log_prob=float(joint.stop_log_prob),
+            )
+            return decision
+
+        query_probability = compute_query_probability(self._policy, step_out, self._consultation_cost)
         # query_probability is always computed and recorded (for comparison)
         # regardless of query_mode -- only which of NO_QUERY/ALWAYS_QUERY/the
         # gate's own decision actually gets *sampled* is overridden.
@@ -782,13 +842,15 @@ class RolloutCollector:
             consultation_cost = self._consultation_cost
 
             # Deterministic subnet routing (spec sections 3-7): s_t is a
-            # function of the GLOBAL base logits, never sampled/learned.
-            # Scoped BEFORE consult_fn is called, so every consult_fn
-            # implementation (real SPADE path, DirectConsultant) receives
-            # the already-scoped subset and neither can drift from this
-            # single authoritative construction.
+            # function of the ordinary-action base logits, never
+            # sampled/learned. Scoped BEFORE consult_fn is called, so every
+            # consult_fn implementation (real SPADE path, DirectConsultant)
+            # receives the already-scoped subset and neither can drift from
+            # this single authoritative construction. FINISH is never in the
+            # scope: the stop decision has already been made (CONTINUE).
             consulted_subnet = select_consulted_subnet(legal_actions, step_out.base_logits)
             scope = select_consulted_actions(legal_actions, consulted_subnet)
+            assert scope.consulted_actions, "CONTINUE implies at least one ordinary action to consult on"
             consulted_action_indices = scope.consulted_indices
             global_candidate_action_count = scope.global_candidate_action_count
             observation = build_observation_summary(state)
@@ -853,40 +915,37 @@ class RolloutCollector:
             )
 
         if self._overrides is not None and self._overrides.action_selection == "plan_maker_argmax":
-            # PLAN_MAKER_ONLY: ignore the policy's distribution entirely.
-            # Fixed, seeded fallback on schema_rejected -- a documented
-            # fallback rule, never a re-use of any learned policy output.
-            # plan_maker_confidence is now LOCAL (consulted-subset) length
-            # -- argmax over it is a LOCAL index, mapped back to the GLOBAL
-            # legal_actions position via consulted_action_indices (never a
-            # raw positional reuse across the two spaces).
+            # PLAN_MAKER_ONLY: ignore the policy's ordinary-action
+            # distribution (the stop decision above is still the policy's --
+            # the Plan Maker never scores FINISH). Fixed, seeded fallback on
+            # schema_rejected -- a documented fallback rule, never a re-use
+            # of any learned policy output. plan_maker_confidence is LOCAL
+            # (consulted-subset) length -- argmax over it is a LOCAL index,
+            # mapped back to the legal_actions position via
+            # consulted_action_indices (never a raw positional reuse across
+            # the two spaces).
             if plan_maker_confidence is not None:
                 assert consulted_action_indices is not None
                 local_argmax = int(torch.argmax(plan_maker_confidence).item())
                 action_index = consulted_action_indices[local_argmax]
             else:
                 assert self._fallback_rng is not None
-                action_index = self._fallback_rng.randrange(len(legal_actions))
+                action_index = self._fallback_rng.randrange(num_ordinary)
         else:
-            final_probs = torch.softmax(final_decision.final_logits.detach(), dim=-1)
-            if self._deterministic:
-                action_index = int(final_probs.argmax().item())
-            elif self._evaluation_sampler is not None:
-                action_dist = torch.distributions.Categorical(probs=final_probs)
-                action_index = self._evaluation_sampler.sample_action(action_dist.probs)
-            else:
-                action_dist = torch.distributions.Categorical(probs=final_probs)
-                action_index = int(action_dist.sample().item())
+            action_index = self._sample_ordinary_action(torch.softmax(final_decision.final_logits.detach(), dim=-1))
 
         joint = compute_joint_log_probability(
-            query_probability.detach(), sampled_query, final_decision.final_logits.detach(), action_index
+            step_out.stop_logit.detach(), num_ordinary, stop_selected=False,
+            final_logits=final_decision.final_logits.detach(), selected_action_index=action_index,
+            query_probability=query_probability.detach(), sampled_query=sampled_query,
         )
 
-        return {
+        decision.update({
             "action_index": action_index,
             "final_logits": final_decision.final_logits.detach().clone(),
             "action_log_prob": float(joint.action_log_prob),
             "joint_log_prob": float(joint.joint_log_prob),
+            "stop_log_prob": float(joint.stop_log_prob),
             "consultation_cost": consultation_cost,
             "sampled_query": sampled_query,
             "query_probability": float(query_probability.detach()),
@@ -907,7 +966,8 @@ class RolloutCollector:
             else None,
             "beta": float(final_decision.beta.detach()) if final_decision.beta is not None else None,
             "alpha": float(final_decision.alpha.detach()) if final_decision.alpha is not None else None,
-        }
+        })
+        return decision
 
     def _bootstrap_value(self, next_state, next_rstate) -> float:
         """V(s_{t+1}) for a rollout-cutoff or time-limit truncation boundary.

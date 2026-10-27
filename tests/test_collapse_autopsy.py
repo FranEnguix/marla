@@ -33,7 +33,7 @@ from marla.learning.rollout import RolloutCollector, StepRecord
 from marla.learning.trainer import _diff_policy_probe, run_baseline_training
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
-SMALL_SCENARIO = str((REPO_ROOT / "NASimEmu/scenarios/sm_entry_dmz_one_subnet.v2.yaml").resolve())
+SMALL_SCENARIO = str((REPO_ROOT / "tests/data/scenarios/sm_entry_dmz_one_target.v2.yaml").resolve())
 
 
 def _tiny_config(sequence_length: int = 4, total_environment_steps: int = 32):
@@ -54,8 +54,6 @@ async def _collect_real_records(config, seed: int = 0) -> list[StepRecord]:
     adapter = NasimEmuAdapter(
         scenario=SMALL_SCENARIO,
         max_episode_steps=config.environment.max_episode_steps,
-        completion_reward=config.objective.completion_reward,
-        premature_finish_penalty=config.objective.premature_finish_penalty,
     )
     collector = RolloutCollector(adapter, policy, run_id="test-run", base_seed=1)
     records, _summaries = await collector.collect(config.policy.ppo.steps_per_env)
@@ -139,6 +137,8 @@ def _finish_record(objective_satisfied_before: bool, advantage_index: int) -> St
         previous_training_reward=0.0, previous_query=False,
         base_logits=torch.zeros(1), final_logits=torch.zeros(1), selected_action_index=0,
         old_action_log_probability=0.0, old_joint_log_probability=0.0, critic_value=0.0,
+        stop_logit=0.0, old_stop_probability=0.5, stop_selected=False, old_stop_log_probability=0.0,
+        completion_probability=None,
         nasimemu_reward=0.0, consultation_cost=0.0, training_reward=0.0,
         terminated=False, truncated=False,
         selected_action_type="finish", objective_satisfied_before_action=objective_satisfied_before,

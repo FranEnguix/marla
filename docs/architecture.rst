@@ -31,8 +31,9 @@ Plan Maker (:mod:`marla.agents.plan_maker`)
     since subnet-scoped consultation (see below), that is deliberately a
     SUBSET of the current step's information, not everything the policy
     itself can see: detailed host facts and candidate actions for exactly
-    ONE subnet, plus a compact whole-network progress summary and the
-    global ``finish`` action.
+    ONE subnet and a compact whole-network progress summary. It never
+    scores ``finish``: the policy decides FINISH itself (see `Hierarchical
+    FINISH decision`_) and consults only after deciding to continue.
 
     The local per-host facts it receives (:func:`marla.environment.consultation_scope.build_scoped_observation`,
     itself built from :func:`marla.environment.observation_summary.build_observation_summary`)
@@ -56,14 +57,85 @@ NASimEmu Adapter (:mod:`marla.environment.nasimemu_adapter`)
     (:mod:`marla.environment.actions`) -- advisory correlation with the
     Plan Maker always uses these IDs, never positional/vector order.
 
+Hierarchical FINISH decision
+----------------------------
+
+FINISH is not one of the ordinary candidate actions. The recurrent policy
+(:class:`~marla.learning.recurrent_policy.RecurrentPolicy`) first decides
+FINISH vs. CONTINUE with a dedicated, PPO-trained **stop head**, and only on
+CONTINUE chooses among the ordinary NASimEmu actions::
+
+    Observation -> graph encoder + GRU -> z_t
+        z_t -> completion predictor -> p_hat_t = P(all sensitive targets ROOT | h_t)
+        [z_t, sg(p_hat_t)] -> stop head -> p_stop_t
+    FINISH   (prob. p_stop_t)      -> end episode (no query, no consultation)
+    CONTINUE (prob. 1 - p_stop_t)  -> query gate -> advice (optional)
+                                   -> ordinary-action softmax -> execute action
+
+so that, for every ordinary legal action ``a``::
+
+    pi(FINISH | h_t) = p_stop_t
+    pi(a | h_t)      = (1 - p_stop_t) * pi_action(a | h_t)
+
+``pi_action`` is a softmax over the ordinary actions only. In the former flat
+design FINISH was one more entry of a single softmax, so its probability was
+diluted by however many hosts and actions happened to be visible (about
+``1/N`` at initialization) and its logit competed with every action's; the
+stop probability now depends only on the recurrent state, never on the
+number of ordinary candidates, and the "is the mission over?" decision gets
+its own parameters and its own gradient signal.
+
+**Why a completion predictor.** The **completion predictor** is an auxiliary
+head on ``z_t`` trained with binary cross-entropy against the simulator's
+decision-time label ``objective_satisfied()`` (the state *before* the
+decision's action: rooting the last target at step ``t`` makes step
+``t+1``'s label 1, not step ``t``'s). The label is privileged training
+information -- it is used only as a supervised target inside the PPO update
+and never enters the observation, the GRU input, the action descriptors, or
+the recurrent state; at inference time the predictor works from ``z_t``
+alone. The total loss is ``L_PPO + lambda * L_completion``
+(``policy.completion_predictor``); completed states are rare early in
+training, so the BCE can up-weight positives (``balanced``: ``n_neg/n_pos``
+per minibatch, capped) while normalizing by the total weight so the
+auxiliary term keeps the scale of an ordinary mean BCE. Because MARLA's
+environment is partially observable, the predictor cannot be perfectly
+accurate: a sensitive host that has not been discovered yet is invisible,
+so "every *visible* target rooted" and "every target rooted" can differ --
+the predictor estimates the latter from what the history makes likely.
+
+**How the stop head is trained.** The stop head receives ``z_t`` and the
+completion probability through a stop-gradient: the PPO loss shapes the
+shared recurrent representation and the stop head, but never the
+completion head, whose meaning stays defined by its own supervised loss.
+The stop decision is sampled from its Bernoulli distribution during
+training (no hard-coded threshold); PPO uses one log-probability for the
+complete decision, ``log sigma(s_t)`` for FINISH and ``log sigma(-s_t) +
+[log pi^q(q_t)] + log pi_action(a_t)`` for CONTINUE, so the stop and action
+choices share one importance ratio and one advantage. The entropy bonus is
+the hierarchical entropy ``H(stop) + (1 - p_stop) * H(pi_action)`` (the
+query gate's entropy is weighted by ``1 - p_stop`` too). Deterministic
+(``GREEDY``) evaluation takes the Bernoulli mode (FINISH iff ``p_stop >=
+0.5``) and then the argmax ordinary action. With no ordinary action legal,
+FINISH is forced with log-probability 0.
+
+**Assisted mode.** The completion predictor and stop head are shared by
+baseline and assisted MARLA. A FINISH decision never runs the query gate,
+never consults the Plan Maker, and never pays a consultation cost; on
+CONTINUE, the query gate, routing, Gatekeeper round trip, trust/advice
+weighting and consultation cost work exactly as described below, and the
+advice residual reshapes only the conditional ordinary-action
+distribution -- never ``p_stop``.
+
 The consultation round trip
 -----------------------------
 
 Every environment step in the assisted variant is a *compound decision*
 (spec section 16), computed once per step:
 
-1. The recurrent policy scores every legal action (:meth:`marla.learning.recurrent_policy.RecurrentPolicy.step`)
-   and the learned **query gate** (:mod:`marla.learning.query_gate`)
+1. The recurrent policy scores every ordinary legal action
+   (:meth:`marla.learning.recurrent_policy.RecurrentPolicy.step`); its stop
+   head has already chosen CONTINUE (a FINISH decision skips steps 1-7
+   entirely). The learned **query gate** (:mod:`marla.learning.query_gate`)
    computes a probability of consulting the Plan Maker *this step*, as a
    function of the recurrent state, base-policy entropy, top-two-action
    margin, candidate-set size, and the configured consultation cost --
@@ -116,7 +188,7 @@ Every environment step in the assisted variant is a *compound decision*
    scale** (alpha). A rejected response forces beta to 0, which is
    numerically identical to ignoring the advice while still training the
    trust head on a real (if unused) alpha. The final action is sampled
-   from this adjusted distribution over the FULL GLOBAL action set --
+   from this adjusted distribution over the FULL set of ordinary actions --
    never restricted to the consulted subnet, so the policy can still
    select an action in a different subnet than the one it consulted about
    (the Plan Maker supplies local evidence, never a hard mask).
@@ -137,7 +209,7 @@ of which the RL policy's own action space is limited by. Subnet-scoped
 consultation decouples the two:
 
 - **PPO's action space stays global.** :meth:`~marla.learning.recurrent_policy.RecurrentPolicy.step`
-  still scores every currently legal action across every visible subnet,
+  still scores every currently legal ordinary action across every visible subnet,
   exactly as before -- nothing about candidate-action construction, the
   query gate, or PPO_ONLY changes (spec invariants 1, 11).
 - **Deterministic, unlearned routing.** When the query gate samples
@@ -147,8 +219,8 @@ consultation decouples the two:
   learned head, no sampling, FINISH itself can never determine the
   route).
 - **The Plan Maker sees one subnet.** :func:`~marla.environment.consultation_scope.select_consulted_actions`
-  restricts the request to that subnet's actions plus the global
-  ``finish`` action; :func:`~marla.environment.consultation_scope.build_scoped_observation`
+  restricts the request to that subnet's ordinary actions (never
+  ``finish``); :func:`~marla.environment.consultation_scope.build_scoped_observation`
   restricts the observation to a compact whole-network progress summary
   (sensitive-target/subnet-exploration counts -- never per-host detail)
   plus full per-host detail for that one subnet only. Both are built ONCE,
@@ -196,8 +268,8 @@ consultation decouples the two:
 **Trade-off**: the Plan Maker no longer compares candidate actions across
 different subnets within one request -- it is a local expert on whichever
 subnet the deterministic route selected, not a global comparator. The
-global progress summary gives it enough whole-network context to reason
-about ``finish`` sensibly without seeing every host's detail. A second,
+global progress summary gives it whole-network context without seeing
+every host's detail. A second,
 related trade-off introduced by this same design: PPO replay's likelihood
 ratio is exact only while the deterministic route stays unchanged from
 collection to replay -- see the PIECEWISE_EXACT_SEMIGRADIENT note above.

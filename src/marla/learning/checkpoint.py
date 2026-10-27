@@ -113,42 +113,18 @@ def check_training_semantics_resumable(saved_version: int | None, path: str | Pa
 
 
 class FinishRewardMismatchError(CheckpointResumeError):
-    """Raised when RESUMING training from a checkpoint whose recorded *effective* FINISH-reward
+    """Raised when RESUMING training from a checkpoint whose recorded FINISH-reward
     semantics (``ObjectiveConfig.effective_finish_reward()``) differ from the resuming config's:
     continuing would silently optimize a different reward objective. Never raised for evaluation.
     """
 
 
-class FinishRewardUnverifiedError(CheckpointResumeError):
-    """Raised when RESUMING training from a checkpoint saved before FINISH-reward semantics were
-    recorded: its reward cannot be verified (it may have used the old fixed +1/-1 defaults or
-    explicit values), so resuming requires explicit acknowledgement
-    (``allow_unverified_finish_reward=True`` / ``marla run --resume ... --accept-unverified-finish-reward``).
+def check_finish_reward_resumable(saved: dict | None, expected: dict, path: str | Path) -> None:
+    """Resume-time guard: ``saved`` is the checkpoint's recorded ``finish_reward_semantics``,
+    ``expected`` the resuming config's ``objective.effective_finish_reward()``. Shared by
+    :func:`load_checkpoint` and the CLI pre-flight. (A checkpoint without recorded semantics predates
+    the current policy architecture and is already rejected by the representation-version check.)
     """
-
-
-def check_finish_reward_resumable(
-    saved: dict | None, expected: dict, path: str | Path, allow_unverified: bool = False
-) -> None:
-    """Resume-time guard: ``saved`` is the checkpoint's recorded ``finish_reward_semantics`` (None for
-    a checkpoint saved before the field existed), ``expected`` the resuming config's
-    ``objective.effective_finish_reward()``. Compares effective semantics, so representational
-    differences that pay identical rewards (e.g. an unused per-target value under a fixed
-    ``completion_reward``) are not mismatches. Shared by :func:`load_checkpoint` and the CLI pre-flight.
-    """
-    if saved is None:
-        message = (
-            f"Checkpoint {path} records no FINISH-reward semantics (saved before they were persisted), so "
-            f"the reward it was trained under cannot be verified against the current objective {expected}. "
-            "Older MARLA versions defaulted to completion_reward=1.0, premature_finish_penalty=-1.0, "
-            "premature_finish_penalty_per_remaining_target=0.0 unless the config set other values. Set the "
-            "objective's FINISH-reward fields explicitly to the values the checkpoint was trained with, and "
-            "acknowledge with allow_unverified_finish_reward=True (CLI: --accept-unverified-finish-reward)."
-        )
-        if not allow_unverified:
-            raise FinishRewardUnverifiedError(message)
-        logger.warning("%s Proceeding because the unverified reward was explicitly accepted.", message)
-        return
     if saved != expected:
         raise FinishRewardMismatchError(
             f"Checkpoint {path} was trained with FINISH-reward semantics {saved}, but the resuming config "
@@ -215,9 +191,12 @@ class CheckpointMetadata:
     # field existed (v0.10.x and earlier). Enforced only on resume.
     training_semantics_version: int | None = None
     # Effective FINISH-reward semantics the run trained under
-    # (ObjectiveConfig.effective_finish_reward()); None for older checkpoints.
-    # Enforced only on resume (check_finish_reward_resumable).
+    # (ObjectiveConfig.effective_finish_reward()). Enforced only on resume
+    # (check_finish_reward_resumable).
     finish_reward_semantics: dict[str, Any] | None = None
+    # Architecture flag (policy.completion_predictor.enabled): whether the
+    # completion head exists and feeds the stop head. Checked on every load.
+    completion_predictor_enabled: bool | None = None
 
 
 def save_checkpoint(
@@ -272,6 +251,7 @@ def save_checkpoint(
             "learning_rate": optimizer.param_groups[0]["lr"],
             "training_semantics_version": TRAINING_SEMANTICS_VERSION,
             "finish_reward_semantics": finish_reward_semantics,
+            "completion_predictor_enabled": policy.completion_predictor_enabled,
         },
         path,
     )
@@ -300,6 +280,7 @@ def peek_checkpoint_metadata(path: str | Path) -> CheckpointMetadata:
         learning_rate=data.get("learning_rate"),
         training_semantics_version=data.get("training_semantics_version"),
         finish_reward_semantics=data.get("finish_reward_semantics"),
+        completion_predictor_enabled=data.get("completion_predictor_enabled"),
     )
 
 
@@ -310,7 +291,6 @@ def load_checkpoint(
     map_location: str | torch.device = "cpu",
     restore_rng_state: bool = False,
     expected_finish_reward: dict[str, Any] | None = None,
-    allow_unverified_finish_reward: bool = False,
 ) -> CheckpointMetadata:
     """``restore_rng_state=True`` sets torch's *global* RNG stream to the
     saved state (``torch.set_rng_state``) -- only meaningful when actually
@@ -364,6 +344,15 @@ def load_checkpoint(
             "partially loaded. Load with a policy configured for the same ablation instead."
         )
 
+    saved_completion_predictor = data.get("completion_predictor_enabled")
+    if saved_completion_predictor != policy.completion_predictor_enabled:
+        raise PolicyRepresentationMismatchError(
+            f"Checkpoint {path} was saved with completion_predictor_enabled={saved_completion_predictor!r}, but "
+            f"the policy being loaded into has completion_predictor_enabled={policy.completion_predictor_enabled!r} "
+            "(policy.completion_predictor.enabled). The completion head exists and feeds the stop head only when "
+            "enabled, so the two are not interchangeable. Load with a matching policy configuration instead."
+        )
+
     # MARLA_FULL-only (spec invariant 11/12): a PPO_ONLY policy
     # (consultation_enabled=False) never builds or uses TrustHead/advice
     # at all, so a mismatched/missing consultation_scope_version is
@@ -391,9 +380,7 @@ def load_checkpoint(
         # FINISH-reward guard (resume only): callers that resume training pass the resuming
         # config's objective.effective_finish_reward(); evaluation loads never do.
         if expected_finish_reward is not None:
-            check_finish_reward_resumable(
-                data.get("finish_reward_semantics"), expected_finish_reward, path, allow_unverified_finish_reward
-            )
+            check_finish_reward_resumable(data.get("finish_reward_semantics"), expected_finish_reward, path)
 
     scheduler_state_dict = data.get("scheduler_state_dict")
     if restore_rng_state and scheduler_state_dict is None:
@@ -433,4 +420,5 @@ def load_checkpoint(
         learning_rate=data.get("learning_rate"),
         training_semantics_version=data.get("training_semantics_version"),
         finish_reward_semantics=data.get("finish_reward_semantics"),
+        completion_predictor_enabled=data.get("completion_predictor_enabled"),
     )

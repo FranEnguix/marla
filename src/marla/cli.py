@@ -172,15 +172,6 @@ def run(
             "the checkpoint (research/aamas2027's staged-training design)."
         ),
     ),
-    accept_unverified_finish_reward: bool = typer.Option(
-        False,
-        "--accept-unverified-finish-reward",
-        help=(
-            "With --resume: allow resuming a checkpoint saved before FINISH-reward semantics were recorded. "
-            "Its reward cannot be verified, so set the config's objective FINISH-reward fields to the values "
-            "it was trained with. A checkpoint whose recorded semantics differ is always refused."
-        ),
-    ),
 ) -> None:
     """Run an experiment (baseline or assisted, local or distributed)."""
     _configure_progress_logging()
@@ -242,6 +233,16 @@ def run(
     if solvability_result.status != SolvabilityStatus.PROVEN_SOLVABLE:
         typer.secho(format_preflight_failure(solvability_result), fg=typer.colors.RED, err=True)
         raise typer.Exit(code=1)
+    target_count_range = solvability_result.sensitive_target_count_range
+    if target_count_range is not None and target_count_range[1] == 0:
+        # Structurally "solvable" but vacuous: no realization has a sensitive
+        # target, so FINISH would be rewarded/counted as success for nothing.
+        typer.secho(
+            f"Scenario {scenario_path} has no sensitive targets on any realization: the "
+            f"{config.objective.type} objective is vacuous. Use a scenario with at least one sensitive host.",
+            fg=typer.colors.RED, err=True,
+        )
+        raise typer.Exit(code=1)
     typer.secho("Scenario solvability: PASSED", fg=typer.colors.GREEN)
     # Compact only (spec section 31) -- proof a paper run used a validated
     # scenario, not a copy of the (potentially large) diagnostic result.
@@ -282,7 +283,6 @@ def run(
                 check_training_semantics_resumable(resume_metadata.training_semantics_version, resume)
                 check_finish_reward_resumable(
                     resume_metadata.finish_reward_semantics, config.objective.effective_finish_reward(), resume,
-                    allow_unverified=accept_unverified_finish_reward,
                 )
             except CheckpointResumeError as exc:
                 typer.secho(str(exc), fg=typer.colors.RED, err=True)
@@ -328,7 +328,6 @@ def run(
                 config, config_path.parent, num_rollouts=num_rollouts, debug=debug,
                 resume_from=resume, run_dir=run_dir,
                 embedded_xmpp_server=config.execution.embedded_xmpp_server,
-                accept_unverified_finish_reward=accept_unverified_finish_reward,
             )
         except LocalRunError as exc:
             finalize_run_directory(

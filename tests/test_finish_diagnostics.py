@@ -63,8 +63,6 @@ async def test_objective_satisfied_before_action_reflects_state_at_decision_time
     adapter = NasimEmuAdapter(
         scenario=str(diagnostic_scenario_path("micro_c_mixed_os_discrimination.v2.yaml")),
         max_episode_steps=20,
-        completion_reward=config.objective.completion_reward,
-        premature_finish_penalty=config.objective.premature_finish_penalty,
     )
     collector = RolloutCollector(adapter, policy, run_id="finish-diag-test", base_seed=4)
     records, _summaries = await collector.collect(30)
@@ -98,8 +96,6 @@ async def test_objective_satisfied_before_action_is_true_exactly_one_step_after_
     adapter = NasimEmuAdapter(
         scenario=str(diagnostic_scenario_path("micro_a_direct_root.v2.yaml")),
         max_episode_steps=20,
-        completion_reward=config.objective.completion_reward,
-        premature_finish_penalty=config.objective.premature_finish_penalty,
     )
     collector = RolloutCollector(adapter, policy, run_id="finish-diag-test-2", base_seed=1)
     records, _summaries = await collector.collect(400)
@@ -118,7 +114,11 @@ async def test_objective_satisfied_before_action_is_true_exactly_one_step_after_
 # --- FINISH field correctness (unit-level) ----------------------------------
 
 
-def _record_with_actions(descriptors, base_logits, final_logits, selected_index):
+def _record_with_actions(descriptors, base_logits, final_logits, selected_index, stop_probability=0.1):
+    """``base_logits``/``final_logits`` cover the ordinary actions (every descriptor but the last,
+    FINISH); FINISH's probability is ``stop_probability``."""
+    stop_logit = math.log(stop_probability / (1 - stop_probability))
+    stop_selected = selected_index == len(descriptors) - 1
     return StepRecord(
         run_id="r", episode_id=1, environment_step=0, observation_id="o",
         graph_data=None, node_key_to_index={}, legal_action_descriptors=descriptors,
@@ -130,6 +130,8 @@ def _record_with_actions(descriptors, base_logits, final_logits, selected_index)
         final_logits=torch.tensor(final_logits, dtype=torch.float32),
         selected_action_index=selected_index,
         old_action_log_probability=0.0, old_joint_log_probability=0.0, critic_value=0.0,
+        stop_logit=stop_logit, old_stop_probability=stop_probability, stop_selected=stop_selected,
+        old_stop_log_probability=0.0, completion_probability=None,
         nasimemu_reward=0.0, consultation_cost=0.0, training_reward=0.0,
         terminated=False, truncated=False,
         selected_action_type=descriptors[selected_index].action_type,
@@ -147,34 +149,34 @@ def _mixed_actions():
 
 def test_exactly_one_finish_candidate_is_always_found_and_fields_are_well_formed():
     descriptors = _mixed_actions()
-    record = _record_with_actions(descriptors, [1.0, 2.0, 3.0], [1.0, 2.0, 3.0], selected_index=2)
+    record = _record_with_actions(descriptors, [1.0, 2.0], [1.0, 2.0], selected_index=2, stop_probability=0.9)
     [row] = build_decision_rows([record], advantages=[0.0], returns=[0.0])
 
-    assert row["base_finish_probability"] is not None
+    assert row["base_finish_probability"] == pytest.approx(0.9) == row["stop_probability"]
     assert 0.0 <= row["base_finish_probability"] <= 1.0
     assert 0.0 <= row["final_finish_probability"] <= 1.0
     assert row["base_finish_rank"] >= 1
     assert row["final_finish_rank"] >= 1
-    assert row["base_finish_is_argmax"] is True  # logit 3.0 is the max
+    assert row["base_finish_is_argmax"] is True  # p_stop 0.9 dominates
     assert row["final_finish_is_argmax"] is True
     assert row["finish_selected"] is True
 
 
 def test_finish_not_selected_and_not_argmax():
     descriptors = _mixed_actions()
-    record = _record_with_actions(descriptors, [5.0, 2.0, 0.1], [5.0, 2.0, 0.1], selected_index=0)
+    record = _record_with_actions(descriptors, [5.0, 2.0], [5.0, 2.0], selected_index=0, stop_probability=0.01)
     [row] = build_decision_rows([record], advantages=[0.0], returns=[0.0])
 
     assert row["base_finish_is_argmax"] is False
     assert row["final_finish_is_argmax"] is False
     assert row["finish_selected"] is False
-    assert row["base_finish_rank"] == 3  # lowest of the three logits
+    assert row["base_finish_rank"] == 3  # 0.01 < 0.99 * softmax([5, 2]) for both ordinary actions
 
 
 def test_finish_rank_matches_documented_convention_one_is_highest():
     descriptors = _mixed_actions()
-    # FINISH has the highest logit -> rank 1.
-    record = _record_with_actions(descriptors, [0.0, 1.0, 9.0], [0.0, 1.0, 9.0], selected_index=2)
+    # FINISH has the highest probability -> rank 1.
+    record = _record_with_actions(descriptors, [0.0, 1.0], [0.0, 1.0], selected_index=2, stop_probability=0.9)
     [row] = build_decision_rows([record], advantages=[0.0], returns=[0.0])
     assert row["base_finish_rank"] == 1
     assert row["final_finish_rank"] == 1
@@ -185,8 +187,8 @@ def test_ppo_only_base_equals_final_finish_fields():
     base_logits -- so every base_finish_* must equal its final_finish_*
     counterpart exactly."""
     descriptors = _mixed_actions()
-    logits = [0.3, -1.2, 2.1]
-    record = _record_with_actions(descriptors, logits, logits, selected_index=2)
+    logits = [0.3, -1.2]
+    record = _record_with_actions(descriptors, logits, logits, selected_index=2, stop_probability=0.4)
     [row] = build_decision_rows([record], advantages=[0.0], returns=[0.0])
 
     assert row["base_finish_probability"] == pytest.approx(row["final_finish_probability"])
@@ -196,10 +198,11 @@ def test_ppo_only_base_equals_final_finish_fields():
 
 def test_finish_probability_sums_correctly_and_is_never_nan():
     descriptors = _mixed_actions()
-    record = _record_with_actions(descriptors, [10.0, 10.0, 10.0], [10.0, 10.0, 10.0], selected_index=0)
+    record = _record_with_actions(descriptors, [10.0, 10.0], [10.0, 10.0], selected_index=0, stop_probability=1 / 3)
     [row] = build_decision_rows([record], advantages=[0.0], returns=[0.0])
     assert not math.isnan(row["base_finish_probability"])
     assert row["base_finish_probability"] == pytest.approx(1.0 / 3.0)
+    assert row["selected_action_base_probability"] == pytest.approx(1.0 / 3.0)  # (1 - 1/3) * 1/2
 
 
 # --- Conditional rollout aggregates -----------------------------------------
@@ -234,7 +237,7 @@ def _finish_decision_row(
 
 def _fake_step_records(n: int) -> list[StepRecord]:
     descriptors = _mixed_actions()
-    return [_record_with_actions(descriptors, [1.0, 1.0, 1.0], [1.0, 1.0, 1.0], selected_index=0) for _ in range(n)]
+    return [_record_with_actions(descriptors, [1.0, 1.0], [1.0, 1.0], selected_index=0) for _ in range(n)]
 
 
 def test_rollout_finish_aggregates_use_decision_time_objective_split_with_correct_denominators():

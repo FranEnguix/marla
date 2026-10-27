@@ -1,5 +1,22 @@
-"""Ties the graph encoder, action encoder, GRU, base scorer, and critic
-together into a single live rollout-collection step.
+"""Ties the graph encoder, action encoder, GRU, base scorer, critic,
+completion predictor, and stop head together into a single live
+rollout-collection step.
+
+Hierarchical action distribution (FINISH is NOT an ordinary candidate)::
+
+    p_hat_t   = sigmoid(f_completion(z_t))              auxiliary, supervised
+    p_stop_t  = sigmoid(f_stop([z_t, sg(p_hat_t)]))     PPO-trained
+    pi(FINISH | h_t) = p_stop_t
+    pi(a | h_t)      = (1 - p_stop_t) * pi_action(a | h_t)    a ordinary
+
+``pi_action`` is a softmax over the ordinary (non-FINISH) legal actions
+only, so FINISH's probability does not depend on how many ordinary
+candidates exist. ``sg`` is stop-gradient: PPO's stop-head gradient reaches
+the shared recurrent representation ``z_t`` directly but never the
+completion head, whose only training signal is its own BCE loss -- policy
+gradients cannot trade calibration for return. The simulator's completion
+label is a training target only; it never enters ``x_t``, the action
+descriptors, or the recurrent state.
 
 This module handles exactly one environment instance at a time (MARLA does
 not vectorize environments -- see spec section 25 non-goals), so all
@@ -10,6 +27,7 @@ Milestone 4's ``learning/ppo.py``.
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 
 import torch
@@ -17,7 +35,7 @@ from torch import Tensor, nn
 from torch_geometric.utils import softmax as scatter_softmax
 
 from marla.config.models import PolicyConfig
-from marla.environment.actions import ActionDescriptor
+from marla.environment.actions import ActionDescriptor, count_ordinary_actions
 from marla.environment.graph import NODE_FEATURE_DIM, GraphObservation
 from marla.environment.visible_facts import visible_progress_dim
 from marla.learning.action_encoder import ActionEncoder
@@ -51,10 +69,20 @@ class RecurrentState:
 @dataclass
 class PolicyStepOutput:
     z: Tensor  # (hidden_size,) -- becomes the next state's z
-    base_logits: Tensor  # (N,)
-    base_probs: Tensor  # (N,), sums to 1 over legal actions
-    action_embeddings: Tensor  # (N, action_hidden_size)
+    # Ordinary (non-FINISH) actions only: index i is legal_actions[i] (FINISH
+    # is always last, see marla.environment.actions.count_ordinary_actions).
+    base_logits: Tensor  # (K,), K = N - 1
+    base_probs: Tensor  # (K,), conditional pi_action; sums to 1 when K > 0
+    action_embeddings: Tensor  # (N, action_hidden_size) -- FINISH's row included
     value: Tensor  # scalar tensor
+    stop_logit: Tensor  # scalar tensor, logit of p_stop
+    # Scalar tensor, logit of the completion prediction; None when the
+    # completion predictor is disabled.
+    completion_logit: Tensor | None
+
+    @property
+    def num_ordinary_actions(self) -> int:
+        return int(self.base_logits.shape[0])
 
 
 class RecurrentPolicy(nn.Module):
@@ -105,6 +133,22 @@ class RecurrentPolicy(nn.Module):
         )
         self.critic = Critic(rc_cfg.hidden_size)
 
+        # Completion predictor + stop head (shared by baseline and assisted).
+        # Training-time settings (loss coefficient, class weighting) are kept
+        # here so PPO can read them without extra plumbing.
+        self.completion_predictor_config = policy_config.completion_predictor
+        self.completion_predictor_enabled = policy_config.completion_predictor.enabled
+        hidden = rc_cfg.hidden_size
+        if self.completion_predictor_enabled:
+            self.completion_head = nn.Sequential(nn.Linear(hidden, hidden), nn.ReLU(), nn.Linear(hidden, 1))
+        self.stop_head = nn.Sequential(nn.Linear(hidden + 1, hidden), nn.ReLU(), nn.Linear(hidden, 1))
+        # Start with a low stop probability so early episodes explore instead
+        # of ending at once (p_stop = 0.5 everywhere would make the expected
+        # episode length ~2 decisions); PPO moves it from there.
+        initial = policy_config.stop_head.initial_stop_probability
+        with torch.no_grad():
+            self.stop_head[-1].bias.fill_(math.log(initial / (1.0 - initial)))
+
         # Assisted-variant-only heads (spec section 11): baseline and
         # assisted otherwise share every parameter above unchanged, so the
         # additional parameter count is exactly these three modules.
@@ -152,8 +196,7 @@ class RecurrentPolicy(nn.Module):
         -- likewise computed once by the caller and passed in explicitly,
         never recomputed here, for the same replay-consistency reason.
         """
-        if not legal_actions:
-            raise ValueError("legal_actions must include at least FINISH")
+        num_ordinary = count_ordinary_actions(legal_actions)
 
         device = self.device
         data = graph_observation.data.to(device)
@@ -178,10 +221,16 @@ class RecurrentPolicy(nn.Module):
             recurrent_state.z.unsqueeze(0).to(device),
         ).squeeze(0)
 
-        action_to_sample = torch.zeros(len(legal_actions), dtype=torch.long, device=device)
-        base_logits = self.base_scorer(z.unsqueeze(0), action_embeddings, action_to_sample)
-        base_probs = scatter_softmax(base_logits, action_to_sample)
+        ordinary_embeddings = action_embeddings[:num_ordinary]
+        if num_ordinary > 0:
+            action_to_sample = torch.zeros(num_ordinary, dtype=torch.long, device=device)
+            base_logits = self.base_scorer(z.unsqueeze(0), ordinary_embeddings, action_to_sample)
+            base_probs = scatter_softmax(base_logits, action_to_sample)
+        else:
+            base_logits = z.new_zeros(0)
+            base_probs = z.new_zeros(0)
         value = self.critic(z.unsqueeze(0)).squeeze(0)
+        completion_logit, stop_logit = self.stop_logits(z)
 
         return PolicyStepOutput(
             z=z,
@@ -189,7 +238,25 @@ class RecurrentPolicy(nn.Module):
             base_probs=base_probs,
             action_embeddings=action_embeddings,
             value=value,
+            stop_logit=stop_logit,
+            completion_logit=completion_logit,
         )
+
+    def stop_logits(self, z: Tensor) -> tuple[Tensor | None, Tensor]:
+        """``(completion_logit, stop_logit)`` for one recurrent state ``z``.
+
+        The stop head sees ``z`` and the completion probability through a
+        stop-gradient (see the module docstring); with the predictor disabled
+        it sees a constant 0 in that slot.
+        """
+        if self.completion_predictor_enabled:
+            completion_logit = self.completion_head(z).squeeze(-1)
+            completion_feature = torch.sigmoid(completion_logit).detach().unsqueeze(-1)
+        else:
+            completion_logit = None
+            completion_feature = z.new_zeros(1)
+        stop_logit = self.stop_head(torch.cat([z, completion_feature], dim=-1)).squeeze(-1)
+        return completion_logit, stop_logit
 
     def apply_advice(
         self, z: Tensor, base_logits: Tensor, confidence_local: Tensor, consulted_indices: Tensor

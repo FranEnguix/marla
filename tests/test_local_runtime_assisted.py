@@ -13,7 +13,7 @@ import pytest
 import yaml
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
-SMALL_SCENARIO = str((REPO_ROOT / "NASimEmu/scenarios/sm_entry_dmz_one_subnet.v2.yaml").resolve())
+SMALL_SCENARIO = str((REPO_ROOT / "tests/data/scenarios/sm_entry_dmz_one_target.v2.yaml").resolve())
 # MARLA-owned, pre-validated SOLVABLE multi-subnet scenario (4 subnets: DMZ
 # entry + user/service/db) -- NASimEmu/scenarios/sm_entry_dmz_two_subnets.v2.yaml
 # fails MARLA's own scenario-solvability check (a Windows host reachable
@@ -22,15 +22,17 @@ SMALL_SCENARIO = str((REPO_ROOT / "NASimEmu/scenarios/sm_entry_dmz_one_subnet.v2
 MULTI_SUBNET_SCENARIO = "marla://sm_entry_user_three_subnets.solvable.v2.yaml"
 
 
-def _write_tiny_assisted_config(tmp_path: Path, run_id: str, output_directory: Path | None = None) -> Path:
+def _write_tiny_assisted_config(
+    tmp_path: Path, run_id: str, output_directory: Path | None = None, total_steps: int = 8
+) -> Path:
     data = yaml.safe_load((REPO_ROOT / "examples" / "assisted.yaml").read_text())
     data["experiment"]["run_id"] = run_id
     if output_directory is not None:
         data["metrics"]["output_directory"] = str(output_directory)
     data["environment"]["scenario"] = SMALL_SCENARIO
     data["environment"]["max_episode_steps"] = 5
-    data["policy"]["ppo"]["total_environment_steps"] = 8
-    data["policy"]["ppo"]["steps_per_env"] = 8
+    data["policy"]["ppo"]["total_environment_steps"] = total_steps
+    data["policy"]["ppo"]["steps_per_env"] = total_steps
     data["policy"]["ppo"]["epochs"] = 1
     data["policy"]["ppo"]["minibatch_sequences"] = 2
     data["policy"]["recurrent"]["sequence_length"] = 4
@@ -106,7 +108,9 @@ def test_marla_run_assisted_local_produces_consistent_sent_handled_message_telem
 
     run_id = "cli-assisted-telemetry-1"
     output_directory = tmp_path / "runs"
-    config_path = _write_tiny_assisted_config(tmp_path, run_id=run_id, output_directory=output_directory)
+    # 16 steps: the untrained gate queries ~40% of CONTINUE decisions, so the
+    # advisory chain below is exercised reliably.
+    config_path = _write_tiny_assisted_config(tmp_path, run_id=run_id, output_directory=output_directory, total_steps=16)
     env = {
         **os.environ,
         "MARLA_RL_ORCHESTRATOR_PASSWORD": "orchestrator-pass",
@@ -214,7 +218,9 @@ def test_marla_run_assisted_multi_subnet_uses_real_subnet_scoped_consultation(tm
 
     run_id = "cli-assisted-subnet-scope-1"
     output_directory = tmp_path / "runs"
-    config_path = _write_tiny_assisted_config(tmp_path, run_id=run_id, output_directory=output_directory)
+    # 16 steps: the untrained gate queries ~40% of CONTINUE decisions, so the
+    # advisory chain below is exercised reliably.
+    config_path = _write_tiny_assisted_config(tmp_path, run_id=run_id, output_directory=output_directory, total_steps=16)
     data = yaml.safe_load(config_path.read_text())
     data["environment"]["scenario"] = MULTI_SUBNET_SCENARIO
     data["environment"]["max_episode_steps"] = 10

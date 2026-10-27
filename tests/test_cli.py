@@ -279,9 +279,10 @@ def _write_real_run(tmp_path):
     data["policy"]["ppo"]["epochs"] = 1
     data["policy"]["ppo"]["minibatch_sequences"] = 2
     data["policy"]["recurrent"]["sequence_length"] = 4
+    data["environment"]["max_episode_steps"] = 5  # so the tiny run completes episodes
     data["device"] = "cpu"
     config = parse_config(data)
-    scenario = str((REPO_ROOT / "NASimEmu/scenarios/sm_entry_dmz_one_subnet.v2.yaml").resolve())
+    scenario = str((REPO_ROOT / "tests/data/scenarios/sm_entry_dmz_one_target.v2.yaml").resolve())
 
     result = asyncio.run(run_baseline_training(config, scenario, num_rollouts=2, seed=1))
     run_dir = tmp_path / "run"

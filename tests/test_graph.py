@@ -7,13 +7,13 @@ from marla.environment.graph import NODE_FEATURE_DIM, build_graph_observation
 from marla.environment.nasimemu_adapter import NasimEmuAdapter
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
-SMALL_SCENARIO = str((REPO_ROOT / "NASimEmu/scenarios/sm_entry_dmz_one_subnet.v2.yaml").resolve())
+SMALL_SCENARIO = str((REPO_ROOT / "tests/data/scenarios/sm_entry_dmz_one_target.v2.yaml").resolve())
 
 
 @pytest.fixture
 def small_adapter():
     return NasimEmuAdapter(
-        scenario=SMALL_SCENARIO, max_episode_steps=20, completion_reward=1.0, premature_finish_penalty=-1.0
+        scenario=SMALL_SCENARIO, max_episode_steps=20
     )
 
 

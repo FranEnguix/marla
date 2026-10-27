@@ -26,7 +26,7 @@ from marla.learning.rollout import RolloutCollector, env_base_seed, env_episode_
 from marla.learning.trainer import compute_gae_per_stream, run_baseline_training
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
-SMALL_SCENARIO = str((REPO_ROOT / "NASimEmu/scenarios/sm_entry_dmz_one_subnet.v2.yaml").resolve())
+SMALL_SCENARIO = str((REPO_ROOT / "tests/data/scenarios/sm_entry_dmz_one_target.v2.yaml").resolve())
 
 
 def _tiny_config(num_envs: int = 1, total_environment_steps: int | None = None):
@@ -121,9 +121,6 @@ async def _collect_multi_env_records(num_envs: int, steps_per_env: int, seed: in
     for i in range(num_envs):
         adapter = NasimEmuAdapter(
             scenario=SMALL_SCENARIO, max_episode_steps=config.environment.max_episode_steps,
-            completion_reward=config.objective.completion_reward,
-            premature_finish_penalty=config.objective.premature_finish_penalty,
-            premature_finish_penalty_per_remaining_target=config.objective.premature_finish_penalty_per_remaining_target,
         )
         collectors.append(RolloutCollector(
             adapter, policy, run_id="test", base_seed=env_base_seed(seed, i),

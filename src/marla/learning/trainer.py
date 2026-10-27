@@ -448,10 +448,8 @@ async def run_training_loop(
         NasimEmuAdapter(
             scenario=adapters[0].scenario,
             max_episode_steps=adapters[0].max_episode_steps,
-            completion_reward=adapters[0].completion_reward,
-            premature_finish_penalty=adapters[0].premature_finish_penalty,
-            premature_finish_penalty_per_remaining_target=adapters[0].premature_finish_penalty_per_remaining_target,
-            completion_reward_per_target=adapters[0].completion_reward_per_target,
+            successful_finish_reward_per_target=adapters[0].successful_finish_reward_per_target,
+            premature_finish_reward_per_remaining_target=adapters[0].premature_finish_reward_per_remaining_target,
         )
         if eval_episodes > 0
         else None
@@ -898,10 +896,8 @@ async def run_baseline_training(
         NasimEmuAdapter(
             scenario=scenario_path,
             max_episode_steps=config.environment.max_episode_steps,
-            completion_reward=config.objective.completion_reward,
-            premature_finish_penalty=config.objective.premature_finish_penalty,
-            premature_finish_penalty_per_remaining_target=config.objective.premature_finish_penalty_per_remaining_target,
-            completion_reward_per_target=config.objective.completion_reward_per_target,
+            successful_finish_reward_per_target=config.objective.successful_finish_reward_per_target,
+            premature_finish_reward_per_remaining_target=config.objective.premature_finish_reward_per_remaining_target,
         )
         for _ in range(config.policy.ppo.num_envs)
     ]

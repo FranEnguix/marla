@@ -81,8 +81,6 @@ def _adapter(filename: str) -> NasimEmuAdapter:
     return NasimEmuAdapter(
         scenario=str(diagnostic_scenario_path(filename)),
         max_episode_steps=20,
-        completion_reward=1.0,
-        premature_finish_penalty=0.0,
     )
 
 

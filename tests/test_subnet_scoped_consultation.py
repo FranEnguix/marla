@@ -79,7 +79,8 @@ def _step_output(num_actions: int, hidden_size: int, action_hidden_size: int = 1
     base_probs = torch.softmax(base_logits, dim=-1)
     action_embeddings = torch.randn(num_actions, action_hidden_size)
     value = torch.randn(())
-    return PolicyStepOutput(z=z, base_logits=base_logits, base_probs=base_probs, action_embeddings=action_embeddings, value=value)
+    return PolicyStepOutput(z=z, base_logits=base_logits, base_probs=base_probs, action_embeddings=action_embeddings,
+                            value=value, stop_logit=torch.tensor(-3.0), completion_logit=torch.tensor(0.0))
 
 
 # --- 17. single-subnet equivalence ------------------------------------------
@@ -94,13 +95,13 @@ def test_single_subnet_equivalence_matches_the_dense_computation_exactly():
     torch.manual_seed(0)
     policy = make_assisted_policy()
     actions = _actions(subnet=1, count=3) + [finish_descriptor()]
-    step_out = _step_output(num_actions=4, hidden_size=_recurrent_hidden_size(policy))
-    confidence = torch.tensor([0.9, 0.2, 0.6, 0.5])
+    step_out = _step_output(num_actions=3, hidden_size=_recurrent_hidden_size(policy))  # ordinary actions only
+    confidence = torch.tensor([0.9, 0.2, 0.6])
 
     consulted_subnet = select_consulted_subnet(actions, step_out.base_logits)
     assert consulted_subnet == 1
     scope = select_consulted_actions(actions, consulted_subnet)
-    assert len(scope.consulted_indices) == 4  # every action consulted -- single-subnet case
+    assert len(scope.consulted_indices) == 3  # every ordinary action consulted -- single-subnet case
     consulted_indices = torch.tensor(scope.consulted_indices, dtype=torch.long)
 
     decision = compute_final_decision(policy, step_out, True, confidence, consulted_indices)
@@ -124,8 +125,8 @@ def test_single_subnet_equivalence_matches_the_dense_computation_exactly():
 
 
 def test_invariance_to_unrelated_actions_in_other_subnets():
-    """Case A: 5 subnet-1 actions + FINISH. Case B: same 6, PLUS 500 actions
-    from other subnets. The consulted subset (the same 6) must produce an
+    """Case A: 5 subnet-1 actions + FINISH. Case B: the same 5, PLUS 500 actions
+    from other subnets, + FINISH. The consulted subset (the same 5) must produce an
     IDENTICAL sparse residual/beta/alpha in both cases, and every one of
     the 500 unrelated actions must have final_logit == base_logit exactly
     (spec section 18 -- one of the central scalability/correctness
@@ -133,11 +134,11 @@ def test_invariance_to_unrelated_actions_in_other_subnets():
     torch.manual_seed(0)
     policy = make_assisted_policy()
 
-    shared_actions = _actions(subnet=1, count=5) + [finish_descriptor()]
+    shared_actions = _actions(subnet=1, count=5)
     unrelated_actions = _actions(subnet=2, count=500, start_host=100)
 
-    actions_a = shared_actions
-    actions_b = shared_actions + unrelated_actions
+    actions_a = shared_actions + [finish_descriptor()]
+    actions_b = shared_actions + unrelated_actions + [finish_descriptor()]
 
     hidden_size, action_hidden_size = _recurrent_hidden_size(policy), 16
     torch.manual_seed(1)
@@ -147,23 +148,25 @@ def test_invariance_to_unrelated_actions_in_other_subnets():
     # invariance here means "the CONSULTED subset's local math is unaffected
     # by unrelated actions existing", not "routing itself ignores every
     # other action's logit" (routing IS a global argmax by design).
-    base_logits_shared = torch.randn(6) + 100.0
+    base_logits_shared = torch.randn(5) + 100.0
     base_logits_unrelated = torch.randn(500)
     base_logits_a = base_logits_shared
     base_logits_b = torch.cat([base_logits_shared, base_logits_unrelated])
-    embeddings_shared = torch.randn(6, action_hidden_size)
+    embeddings_shared = torch.randn(6, action_hidden_size)  # incl. FINISH's row
     embeddings_unrelated = torch.randn(500, action_hidden_size)
 
     step_out_a = PolicyStepOutput(
         z=z, base_logits=base_logits_a, base_probs=torch.softmax(base_logits_a, dim=-1),
         action_embeddings=embeddings_shared, value=torch.zeros(()),
+        stop_logit=torch.tensor(-3.0), completion_logit=torch.tensor(0.0),
     )
     step_out_b = PolicyStepOutput(
         z=z, base_logits=base_logits_b, base_probs=torch.softmax(base_logits_b, dim=-1),
-        action_embeddings=torch.cat([embeddings_shared, embeddings_unrelated]), value=torch.zeros(()),
+        action_embeddings=torch.cat([embeddings_shared[:5], embeddings_unrelated, embeddings_shared[5:]]),
+        value=torch.zeros(()), stop_logit=torch.tensor(-3.0), completion_logit=torch.tensor(0.0),
     )
 
-    confidence = torch.tensor([0.9, 0.1, 0.5, 0.7, 0.3, 0.4])  # scores for the 6 shared/consulted actions
+    confidence = torch.tensor([0.9, 0.1, 0.5, 0.7, 0.3])  # scores for the 5 shared/consulted actions
 
     consulted_subnet_a = select_consulted_subnet(actions_a, step_out_a.base_logits)
     scope_a = select_consulted_actions(actions_a, consulted_subnet_a)
@@ -171,10 +174,10 @@ def test_invariance_to_unrelated_actions_in_other_subnets():
     scope_b = select_consulted_actions(actions_b, consulted_subnet_b)
 
     # Both cases must route to the same subnet, and consult exactly the
-    # same 6 actions at the same (leading) global positions.
+    # same 5 actions at the same (leading) global positions.
     assert consulted_subnet_a == consulted_subnet_b
-    assert scope_a.consulted_indices == [0, 1, 2, 3, 4, 5]
-    assert scope_b.consulted_indices == [0, 1, 2, 3, 4, 5]
+    assert scope_a.consulted_indices == [0, 1, 2, 3, 4]
+    assert scope_b.consulted_indices == [0, 1, 2, 3, 4]
 
     indices_a = torch.tensor(scope_a.consulted_indices, dtype=torch.long)
     indices_b = torch.tensor(scope_b.consulted_indices, dtype=torch.long)
@@ -187,11 +190,11 @@ def test_invariance_to_unrelated_actions_in_other_subnets():
     # TrustHead's local summary/agreement, or the resulting residual.
     assert torch.equal(decision_a.beta, decision_b.beta)
     assert torch.equal(decision_a.alpha, decision_b.alpha)
-    assert torch.equal(decision_a.normalized_advice, decision_b.normalized_advice[:6])
-    assert torch.equal(decision_a.final_logits, decision_b.final_logits[:6])
+    assert torch.equal(decision_a.normalized_advice, decision_b.normalized_advice[:5])
+    assert torch.equal(decision_a.final_logits, decision_b.final_logits[:5])
 
     # Every one of the 500 unrelated actions must be untouched EXACTLY.
-    for i in range(6, 506):
+    for i in range(5, 505):
         assert decision_b.final_logits[i].item() == step_out_b.base_logits[i].item()
         assert decision_b.normalized_advice[i].item() == 0.0
 
@@ -204,7 +207,7 @@ def test_gatekeeper_validation_accepts_exact_scoped_coverage_and_rejects_deviati
     by this feature -- see agents/gatekeeper.py's own docstring on why it
     needs no code changes) applied against a SCOPED expected-ID set: this
     is what actually enforces spec section 20's Gatekeeper requirements."""
-    scoped_ids = {"service-scan:host-1-0", "service-scan:host-1-1", "finish"}
+    scoped_ids = {"service-scan:host-1-0", "service-scan:host-1-1", "service-scan:host-1-2"}
 
     exact_body = {
         "schema_version": "1.1", "run_id": "r", "request_id": "req-1",
@@ -215,7 +218,7 @@ def test_gatekeeper_validation_accepts_exact_scoped_coverage_and_rejects_deviati
     validated = validate_advisory_response_body(exact_body, "r", "req-1", scoped_ids)
     assert set(validated.scores.keys()) == scoped_ids
 
-    missing_body = dict(exact_body, scores={"service-scan:host-1-0": 0.5, "finish": 0.5})
+    missing_body = dict(exact_body, scores={"service-scan:host-1-0": 0.5, "service-scan:host-1-2": 0.5})
     with pytest.raises(AdvisoryValidationError):
         validate_advisory_response_body(missing_body, "r", "req-1", scoped_ids)
 
@@ -304,13 +307,13 @@ async def test_direct_consultant_builds_the_identical_prompt_build_prompt_would(
             }
         ],
     }
-    legal_actions = [
+    legal_actions = [  # consulted (ordinary) actions only -- FINISH is never consulted
         ActionDescriptor(action_id="service-scan:host-3-0", action_type="service_scan", target_key="host-3-0"),
-        finish_descriptor(),
+        ActionDescriptor(action_id="os-scan:host-3-0", action_type="os_scan", target_key="host-3-0"),
     ]
     objective = AdvisoryObjective(type="capture_target", description="test objective")
 
-    backend = _CapturingBackend('{"service-scan:host-3-0": 0.7, "finish": 0.1}')
+    backend = _CapturingBackend('{"service-scan:host-3-0": 0.7, "os-scan:host-3-0": 0.1}')
     consultant = DirectConsultant(
         backend=backend, knowledge_base=KnowledgeBase(version="v1", rules=()), model_version="m",
         objective=objective, run_id="r", max_schema_revisions=0,
@@ -365,8 +368,6 @@ async def test_ppo_replay_reuses_the_stored_consulted_indices_and_scores_verbati
     adapter = NasimEmuAdapter(
         scenario=TWO_SUBNET_SCENARIO,
         max_episode_steps=config.environment.max_episode_steps,
-        completion_reward=config.objective.completion_reward,
-        premature_finish_penalty=config.objective.premature_finish_penalty,
     )
 
     call_count = 0

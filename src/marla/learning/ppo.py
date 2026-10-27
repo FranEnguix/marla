@@ -27,12 +27,19 @@ import random
 from dataclasses import dataclass
 
 import torch
+import torch.nn.functional as F
 from torch import Tensor
 
-from marla.config.models import PPOConfig
+from marla.config.models import CompletionPredictorConfig, PPOConfig
 from marla.environment.consultation_scope import compute_routing_margin, select_consulted_subnet
 from marla.environment.graph import GraphObservation
-from marla.learning.decision import compute_final_decision, compute_joint_log_probability, compute_query_probability
+from marla.learning.decision import (
+    compute_final_decision,
+    compute_hierarchical_entropy,
+    compute_joint_log_probability,
+    compute_query_probability,
+    hierarchical_action_probabilities,
+)
 from marla.learning.recurrent_policy import RecurrentPolicy, RecurrentState
 from marla.learning.rollout import StepRecord
 
@@ -152,17 +159,21 @@ def partition_minibatches(
     return [g for g in groups if g]
 
 
-def _bernoulli_entropy(probability: Tensor) -> Tensor:
-    p = probability.clamp(1e-6, 1 - 1e-6)
-    return -(p * torch.log(p) + (1 - p) * torch.log(1 - p))
-
-
 @dataclass
 class ReplayOutputs:
     new_joint_log_probs: Tensor
     new_values: Tensor
+    # Hierarchical entropy terms (decision.compute_hierarchical_entropy), one
+    # per record: action_entropies = H_stop + (1 - p_stop) * H(pi_action).
     action_entropies: Tensor
-    query_entropies: Tensor | None  # None for a policy built with consultation_enabled=False
+    stop_entropies: Tensor
+    conditional_action_entropies: Tensor
+    query_entropies: Tensor | None  # (1 - p_stop) * H(q); None for consultation_enabled=False
+    stop_probabilities: Tensor  # detached, current parameters
+    # Raw completion logits WITH gradient (for the auxiliary loss); None when
+    # the completion predictor is disabled. Labels are the records' stored
+    # objective_satisfied_before_action.
+    completion_logits: Tensor | None
     # Route-switch diagnostics (subnet-scoped consultation, spec sections
     # 4-5 of the routing-semantics audit) -- DIAGNOSTIC ONLY, never used to
     # alter training. One entry per QUERIED record in this chunk (accepted
@@ -181,7 +192,14 @@ class ReplayOutputs:
 def _replay_chunk(
     policy: RecurrentPolicy, chunk: SequenceChunk, device: torch.device, consultation_cost: float
 ) -> ReplayOutputs:
-    """Re-encodes a chunk under current parameters; gradients flow through it."""
+    """Re-encodes a chunk under current parameters; gradients flow through it.
+
+    Each record's complete hierarchical decision is re-scored exactly as at
+    collection (``decision.compute_joint_log_probability``): the stored stop
+    decision, then -- for CONTINUE only -- the stored query decision, the
+    stored consultation context, and the stored ordinary action. A FINISH
+    record involves no query gate or advice term in its log-probability.
+    """
     first = chunk.records[0]
     z = first.initial_gru_hidden_state.to(device)
     previous_action_embedding = first.previous_action_embedding.to(device)
@@ -191,7 +209,11 @@ def _replay_chunk(
     new_joint_log_probs: list[Tensor] = []
     new_values: list[Tensor] = []
     action_entropies: list[Tensor] = []
+    stop_entropies: list[Tensor] = []
+    conditional_entropies: list[Tensor] = []
     query_entropies: list[Tensor] | None = [] if policy.consultation_enabled else None
+    stop_probabilities: list[Tensor] = []
+    completion_logits: list[Tensor] | None = [] if policy.completion_predictor_enabled else None
     route_switches: list[bool] = []
     routing_margins: list[float] = []
 
@@ -211,14 +233,20 @@ def _replay_chunk(
             graph_obs, record.legal_action_descriptors, rstate, record.compatibility_features.to(device),
             record.visible_progress.to(device),
         )
+        num_ordinary = out.num_ordinary_actions
         new_values.append(out.value)
+        if completion_logits is not None:
+            completion_logits.append(out.completion_logit)
+        stop_probabilities.append(
+            torch.sigmoid(out.stop_logit.detach()) if num_ordinary > 0 else out.stop_logit.new_ones(())
+        )
 
-        if policy.consultation_enabled:
-            query_probability = compute_query_probability(
-                policy, out, len(record.legal_action_descriptors), consultation_cost
-            )
-            query_entropies.append(_bernoulli_entropy(query_probability))
+        query_probability = None
+        final_logits = out.base_logits
+        if policy.consultation_enabled and num_ordinary > 0:
+            query_probability = compute_query_probability(policy, out, consultation_cost)
 
+        if policy.consultation_enabled and not record.stop_selected:
             # Subnet-scoped consultation replay (spec section 13/14): the
             # consultation ACTUALLY EXPERIENCED at collection time --
             # consulted_subnet, consulted_action_indices, and the Plan
@@ -251,8 +279,8 @@ def _replay_chunk(
                     "stored consulted_action_indices and plan_maker_scores_in_action_order must be the same length"
                 )
                 assert all(
-                    0 <= i < len(record.legal_action_descriptors) for i in record.consulted_action_indices
-                ), "every consulted index must be valid for the replayed global candidate set"
+                    0 <= i < num_ordinary for i in record.consulted_action_indices
+                ), "every consulted index must be a valid ordinary action of the replayed candidate set"
                 plan_maker_confidence = torch.tensor(
                     record.plan_maker_scores_in_action_order, dtype=torch.float32, device=device
                 )
@@ -260,21 +288,28 @@ def _replay_chunk(
                     record.consulted_action_indices, dtype=torch.long, device=device
                 )
 
-            final_decision = compute_final_decision(
+            final_logits = compute_final_decision(
                 policy, out, record.sampled_query, plan_maker_confidence, consulted_indices_tensor
-            )
-            joint = compute_joint_log_probability(
-                query_probability, record.sampled_query, final_decision.final_logits, record.selected_action_index
-            )
-            new_joint_log_probs.append(joint.joint_log_prob)
+            ).final_logits
 
-            final_probs = torch.softmax(final_decision.final_logits, dim=-1)
-            final_log_probs = torch.log(final_probs.clamp_min(1e-12))
-            action_entropies.append(-(final_probs * final_log_probs).sum())
+        if record.stop_selected:
+            joint = compute_joint_log_probability(out.stop_logit, num_ordinary, stop_selected=True)
         else:
-            log_probs_all = torch.log(out.base_probs.clamp_min(1e-12))
-            new_joint_log_probs.append(log_probs_all[record.selected_action_index])
-            action_entropies.append(-(out.base_probs * log_probs_all).sum())
+            joint = compute_joint_log_probability(
+                out.stop_logit, num_ordinary, stop_selected=False, final_logits=final_logits,
+                selected_action_index=record.selected_action_index,
+                query_probability=query_probability, sampled_query=record.sampled_query,
+            )
+        new_joint_log_probs.append(joint.joint_log_prob)
+
+        entropy = compute_hierarchical_entropy(out.stop_logit, final_logits, query_probability)
+        action_entropies.append(entropy.action_entropy)
+        stop_entropies.append(entropy.stop_entropy)
+        conditional_entropies.append(entropy.conditional_action_entropy)
+        if query_entropies is not None:
+            query_entropies.append(
+                entropy.query_entropy if entropy.query_entropy is not None else out.stop_logit.new_zeros(())
+            )
 
         z = out.z
         previous_action_embedding = out.action_embeddings[record.selected_action_index]
@@ -285,10 +320,81 @@ def _replay_chunk(
         new_joint_log_probs=torch.stack(new_joint_log_probs),
         new_values=torch.stack(new_values),
         action_entropies=torch.stack(action_entropies),
+        stop_entropies=torch.stack(stop_entropies),
+        conditional_action_entropies=torch.stack(conditional_entropies),
         query_entropies=torch.stack(query_entropies) if query_entropies else None,
+        stop_probabilities=torch.stack(stop_probabilities),
+        completion_logits=torch.stack(completion_logits) if completion_logits else None,
         route_switches=route_switches,
         routing_margins=routing_margins,
     )
+
+
+def completion_positive_class_weight(labels: Tensor, mask: Tensor, config: CompletionPredictorConfig) -> float:
+    """The BCE positive-class weight for one minibatch (see
+    ``CompletionPredictorConfig.positive_class_weight``)."""
+    if not isinstance(config.positive_class_weight, str):
+        return float(config.positive_class_weight)
+    valid = mask.bool()
+    positives = float(labels[valid].sum())
+    negatives = float(valid.sum()) - positives
+    if positives == 0:
+        return 1.0
+    return min(max(negatives / positives, 1.0), config.max_positive_class_weight)
+
+
+def completion_prediction_loss(logits: Tensor, labels: Tensor, mask: Tensor, positive_class_weight: float) -> Tensor:
+    """Weighted-mean BCE-with-logits over VALID decision states only.
+
+    ``mask`` (``True`` = real decision, ``False`` = padding) zeroes padded
+    entries' weight entirely. Normalizing by the total sample weight (not the
+    sample count) keeps the loss on the scale of an ordinary mean BCE however
+    strongly positives are up-weighted, so class reweighting shifts the
+    balance between classes without inflating the auxiliary term against PPO.
+    """
+    labels = labels.to(logits.dtype)
+    weights = mask.to(logits.dtype) * torch.where(labels > 0.5, positive_class_weight, 1.0)
+    per_sample = F.binary_cross_entropy_with_logits(logits, labels, reduction="none")
+    return (weights * per_sample).sum() / weights.sum().clamp_min(1e-8)
+
+
+def completion_prediction_metrics(probabilities: Tensor, labels: Tensor) -> dict[str, float | int | None]:
+    """Classification (threshold 0.5) and calibration (Brier) diagnostics of
+    completion predictions against decision-time labels. Precision/recall are
+    for the completed class; None when undefined (no predicted / no actual
+    positives)."""
+    if probabilities.numel() == 0:
+        return {
+            "completion_prediction_accuracy": None, "completion_prediction_precision": None,
+            "completion_prediction_recall": None, "completion_prediction_brier": None,
+            "completion_probability": None,
+        }
+    predicted = probabilities >= 0.5
+    actual = labels > 0.5
+    true_positives = int((predicted & actual).sum())
+    predicted_positives = int(predicted.sum())
+    actual_positives = int(actual.sum())
+    return {
+        "completion_prediction_accuracy": float((predicted == actual).float().mean()),
+        "completion_prediction_precision": true_positives / predicted_positives if predicted_positives else None,
+        "completion_prediction_recall": true_positives / actual_positives if actual_positives else None,
+        "completion_prediction_brier": float((probabilities - actual.float()).pow(2).mean()),
+        "completion_probability": float(probabilities.mean()),
+    }
+
+
+def stop_probability_metrics(stop_probabilities: Tensor, labels: Tensor) -> dict[str, float | None]:
+    """Mean stop probability overall and split by the decision-time completion label."""
+    actual = labels > 0.5
+
+    def _masked_mean(mask: Tensor) -> float | None:
+        return float(stop_probabilities[mask].mean()) if bool(mask.any()) else None
+
+    return {
+        "stop_probability": float(stop_probabilities.mean()) if stop_probabilities.numel() else None,
+        "stop_probability_when_complete": _masked_mean(actual),
+        "stop_probability_when_incomplete": _masked_mean(~actual),
+    }
 
 
 def _replay_chunk_z_only(policy: RecurrentPolicy, chunk: SequenceChunk, device: torch.device) -> Tensor:
@@ -585,7 +691,9 @@ def ppo_update(
     """
     old_log_probs_parts, advantages_parts, returns_parts, old_values_parts = [], [], [], []
     new_log_probs_parts, new_values_parts, action_entropy_parts = [], [], []
+    stop_entropy_parts, conditional_entropy_parts, stop_probability_parts = [], [], []
     query_entropy_parts: list[Tensor] = []
+    completion_logit_parts: list[Tensor] = []
     all_records: list[StepRecord] = []
     all_route_switches: list[bool] = []
     all_routing_margins: list[float] = []
@@ -603,8 +711,13 @@ def ppo_update(
         new_log_probs_parts.append(replay.new_joint_log_probs)
         new_values_parts.append(replay.new_values)
         action_entropy_parts.append(replay.action_entropies)
+        stop_entropy_parts.append(replay.stop_entropies)
+        conditional_entropy_parts.append(replay.conditional_action_entropies)
+        stop_probability_parts.append(replay.stop_probabilities)
         if replay.query_entropies is not None:
             query_entropy_parts.append(replay.query_entropies)
+        if replay.completion_logits is not None:
+            completion_logit_parts.append(replay.completion_logits)
         all_records.extend(chunk.records)
         all_route_switches.extend(replay.route_switches)
         all_routing_margins.extend(replay.routing_margins)
@@ -660,11 +773,32 @@ def ppo_update(
     action_entropy = action_entropies.mean()
     query_entropy = torch.cat(query_entropy_parts).mean() if query_entropy_parts else torch.zeros((), device=device)
 
+    # Auxiliary completion supervision: decision-time simulator labels (the
+    # state BEFORE each record's action), used only as a BCE target here.
+    # Every replayed record is a real decision (chunks are ragged lists,
+    # never padded), so the validity mask is all-true; it is still passed
+    # explicitly so the loss is defined on valid decisions only.
+    completion_labels = torch.tensor(
+        [float(r.objective_satisfied_before_action) for r in all_records], dtype=torch.float32, device=device
+    )
+    completion_mask = torch.ones_like(completion_labels, dtype=torch.bool)
+    completion_config = policy.completion_predictor_config
+    completion_loss = torch.zeros((), device=device)
+    positive_class_weight = None
+    if completion_logit_parts:
+        completion_logits = torch.cat(completion_logit_parts)
+        _assert_finite("completion_logits", completion_logits)
+        positive_class_weight = completion_positive_class_weight(completion_labels, completion_mask, completion_config)
+        completion_loss = completion_prediction_loss(
+            completion_logits, completion_labels, completion_mask, positive_class_weight
+        )
+
     loss = (
         actor_loss
         + ppo_config.value_coefficient * value_loss
         - ppo_config.action_entropy_coefficient * action_entropy
         - ppo_config.query_entropy_coefficient * query_entropy
+        + completion_config.loss_coefficient * completion_loss
     )
     _assert_finite("loss", loss)
 
@@ -716,6 +850,22 @@ def ppo_update(
         "fraction_ratio_below_clip": fraction_ratio_below_clip,
         "fraction_ratio_above_clip": fraction_ratio_above_clip,
     }
+    stop_probabilities = torch.cat(stop_probability_parts)
+    metrics["stop_entropy"] = torch.cat(stop_entropy_parts).mean().item()
+    metrics["conditional_action_entropy"] = torch.cat(conditional_entropy_parts).mean().item()
+    metrics.update(stop_probability_metrics(stop_probabilities, completion_labels))
+    positives = int(completion_labels.sum().item())
+    metrics["completion_label_positive_count"] = positives
+    metrics["completion_label_negative_count"] = int(completion_labels.numel()) - positives
+    metrics["completion_label_positive_fraction"] = positives / completion_labels.numel()
+    if completion_logit_parts:
+        metrics["completion_prediction_loss"] = completion_loss.item()
+        metrics["completion_positive_class_weight"] = positive_class_weight
+        metrics.update(completion_prediction_metrics(torch.sigmoid(completion_logits.detach()), completion_labels))
+    else:
+        metrics["completion_prediction_loss"] = None
+        metrics["completion_positive_class_weight"] = None
+        metrics.update(completion_prediction_metrics(completion_labels.new_zeros(0), completion_labels.new_zeros(0)))
     metrics.update(_tensor_stats("ratio", ratio.detach()))
     metrics.update(_tensor_stats("advantage", raw_advantages, suffix="_raw"))
     metrics.update(_tensor_stats("advantage", normalized_advantages, suffix="_normalized"))
@@ -886,22 +1036,20 @@ def compute_policy_probe(
                     record.compatibility_features.to(device), record.visible_progress.to(device),
                 )
 
-                finish_index = next(
-                    (i for i, d in enumerate(record.legal_action_descriptors) if d.is_finish), None
-                )
-                if finish_index is not None:
-                    finish_p = out.base_probs[finish_index].item()
-                    finish_probs.append(finish_p)
-                    if record.objective_satisfied_before_action:
-                        finish_probs_reached.append(finish_p)
-                    else:
-                        finish_probs_not_reached.append(finish_p)
+                # Complete hierarchical (base, unadvised) distribution over
+                # legal_actions: FINISH's probability is p_stop.
+                probs = hierarchical_action_probabilities(out.stop_logit, out.base_logits)
+                finish_p = probs[-1].item()
+                finish_probs.append(finish_p)
+                if record.objective_satisfied_before_action:
+                    finish_probs_reached.append(finish_p)
+                else:
+                    finish_probs_not_reached.append(finish_p)
 
-                max_prob = out.base_probs.max().item()
-                abs_logit = out.base_logits.abs().max().item()
+                max_prob = probs.max().item()
+                abs_logit = out.base_logits.abs().max().item() if out.num_ordinary_actions else 0.0
                 value = out.value.item()
-                log_probs = torch.log(out.base_probs.clamp_min(1e-12))
-                entropy = -(out.base_probs * log_probs).sum().item()
+                entropy = compute_hierarchical_entropy(out.stop_logit, out.base_logits).action_entropy.item()
 
                 max_probs.append(max_prob)
                 max_abs_logits.append(abs_logit)
@@ -914,8 +1062,7 @@ def compute_policy_probe(
                 bucket["entropy"].append(entropy)
                 bucket["value"].append(value)
                 bucket["abs_logit"].append(abs_logit)
-                if finish_index is not None:
-                    bucket["finish_prob"].append(out.base_probs[finish_index].item())
+                bucket["finish_prob"].append(finish_p)
 
                 z = out.z
                 previous_action_embedding = out.action_embeddings[record.selected_action_index]

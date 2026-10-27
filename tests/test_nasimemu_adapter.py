@@ -5,17 +5,15 @@ from nasimemu.nasim.envs.utils import AccessLevel
 from marla.environment.nasimemu_adapter import NasimEmuAdapter
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
-SMALL_SCENARIO = str((REPO_ROOT / "NASimEmu/scenarios/sm_entry_dmz_one_subnet.v2.yaml").resolve())
+SMALL_SCENARIO = str((REPO_ROOT / "tests/data/scenarios/sm_entry_dmz_one_target.v2.yaml").resolve())
 UNI_SCENARIO = str((REPO_ROOT / "NASimEmu/scenarios/uni.v2.yaml").resolve())
 
 
-def make_adapter(scenario=SMALL_SCENARIO, max_episode_steps=20, premature_finish_penalty_per_remaining_target=0.0):
+def make_adapter(scenario=SMALL_SCENARIO, max_episode_steps=20, premature_finish_reward_per_remaining_target=-1.0):
     return NasimEmuAdapter(
         scenario=scenario,
         max_episode_steps=max_episode_steps,
-        completion_reward=1.0,
-        premature_finish_penalty=-1.0,
-        premature_finish_penalty_per_remaining_target=premature_finish_penalty_per_remaining_target,
+        premature_finish_reward_per_remaining_target=premature_finish_reward_per_remaining_target,
     )
 
 
@@ -102,7 +100,7 @@ def test_finish_reward_matches_objective_satisfaction():
     result = adapter.step(finish)
 
     assert result.info["objective_satisfied"] is False
-    assert result.nasimemu_reward == -1.0  # premature_finish_penalty
+    assert result.nasimemu_reward == -2.0  # -1 per remaining target, both of uni.v2 seed 7's targets remain
 
 
 def test_objective_satisfied_is_boolean():
@@ -220,9 +218,8 @@ def test_sensitive_target_status_user_access_still_counts_as_remaining():
 
 def test_finish_reward_pure_per_remaining_target_penalty_one_remaining():
     adapter = make_adapter(
-        scenario=UNI_SCENARIO, premature_finish_penalty_per_remaining_target=-20.0
+        scenario=UNI_SCENARIO, premature_finish_reward_per_remaining_target=-20.0
     )
-    adapter._premature_finish_penalty = 0.0  # AAMAS-style: no fixed component
     state = adapter.reset(seed=7)
     addresses = adapter._env.env.network.sensitive_addresses
     adapter._env.env.current_state.get_host(addresses[0]).access = AccessLevel.ROOT  # 1 of 2 done
@@ -238,9 +235,8 @@ def test_finish_reward_pure_per_remaining_target_penalty_one_remaining():
 
 def test_finish_reward_pure_per_remaining_target_penalty_two_remaining():
     adapter = make_adapter(
-        scenario=UNI_SCENARIO, premature_finish_penalty_per_remaining_target=-20.0
+        scenario=UNI_SCENARIO, premature_finish_reward_per_remaining_target=-20.0
     )
-    adapter._premature_finish_penalty = 0.0
     state = adapter.reset(seed=7)  # both sensitive targets still remaining
 
     finish = next(a for a in adapter.legal_actions(state) if a.is_finish)
@@ -250,25 +246,11 @@ def test_finish_reward_pure_per_remaining_target_penalty_two_remaining():
     assert result.nasimemu_reward == -40.0
 
 
-def test_finish_reward_default_per_target_coefficient_matches_pre_existing_behavior():
-    """Without opting in, an ordinary premature FINISH is unaffected by how
-    many sensitive targets remain -- exactly the pre-existing fixed-penalty
-    behavior (regression guard for the new feature's backward compatibility).
-    """
-    adapter = make_adapter(scenario=UNI_SCENARIO)  # per-target coefficient defaults to 0.0
-    state = adapter.reset(seed=7)
-
-    finish = next(a for a in adapter.legal_actions(state) if a.is_finish)
-    result = adapter.step(finish)
-
-    assert result.nasimemu_reward == -1.0  # premature_finish_penalty alone
-
-
 def test_ordinary_non_finish_action_reward_unaffected_by_per_target_coefficient():
     """The per-target coefficient must only ever apply on a premature
     FINISH -- never as a per-step tax on ordinary actions."""
     adapter_plain = make_adapter(scenario=UNI_SCENARIO)
-    adapter_penalized = make_adapter(scenario=UNI_SCENARIO, premature_finish_penalty_per_remaining_target=-20.0)
+    adapter_penalized = make_adapter(scenario=UNI_SCENARIO, premature_finish_reward_per_remaining_target=-20.0)
 
     state_plain = adapter_plain.reset(seed=7)
     state_penalized = adapter_penalized.reset(seed=7)

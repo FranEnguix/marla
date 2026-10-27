@@ -1,11 +1,10 @@
 """Greedy-evaluation trajectory fixture shared by
-``tests/test_evaluation_policy_mode.py`` and the one-off recording of
-``tests/data/greedy_eval_golden_v0_10_1.json`` under MARLA v0.10.1.
+``tests/test_evaluation_policy_mode.py`` and the recording of
+``tests/data/greedy_eval_golden.json`` (``python -m tests.support.eval_trajectory``).
 
-Uses ONLY APIs that already existed in v0.10.1 (``evaluate_checkpoint``
-without ``policy_mode``, ``save_checkpoint``, ``load_config``, ...), so the
-exact same code produced the golden file on v0.10.1 and re-runs it on the
-current version. A fixed-seed (untrained) policy is saved as a real
+The golden was re-recorded for the hierarchical stop-head policy
+(``policy_representation_version`` 5); the flat-softmax v0.10.1 golden no
+longer applies to this architecture. A fixed-seed (untrained) policy is saved as a real
 ``checkpoint.pt`` in a real run directory; MARLA_FULL uses a deterministic
 scripted consultant (no model, no network).
 """
@@ -26,13 +25,19 @@ from marla.learning.recurrent_policy import RecurrentPolicy
 from marla.learning.rollout import ConsultationResult
 
 INIT_SEED = 20251001
-# MARLA_FULL fixture only: an untrained query gate outputs p ~= 0.45 at every
-# decision, so greedy evaluation would never consult. Widening its output
+# MARLA_FULL fixture only: an untrained query gate outputs p ~= 0.55 at every
+# decision, so greedy evaluation would consult always. Widening its output
 # layer and re-centring the bias makes greedy consult on a few decisions
-# with a >= 0.2-logit margin from the 0.5 threshold, so advice, BETA_ZERO and
+# (every greedy decision >= 0.01 logits from its 0.5 threshold, far above
+# float noise), so advice, BETA_ZERO and
 # BETA_ONE actually change the recorded trajectories.
 GATE_WEIGHT_SCALE = 100.0
-GATE_BIAS = 8.3
+GATE_BIAS = -21.0
+# Likewise for the stop head (both variants): its untrained output is
+# p_stop ~= 0.05 everywhere, so greedy evaluation would never FINISH; this
+# makes greedy FINISH (prematurely) in some episodes and time out in others.
+STOP_WEIGHT_SCALE = 100.0
+STOP_BIAS = -4.0
 MAX_EPISODE_STEPS = 30
 SEED_START = 801
 NUM_EPISODES = 2
@@ -78,6 +83,9 @@ def make_run_dir(root: Path, repo_root: Path, scenario: str, consultation: bool)
         update={"scenario": scenario, "max_episode_steps": MAX_EPISODE_STEPS})})
     torch.manual_seed(INIT_SEED)
     policy = RecurrentPolicy(config.policy, consultation_enabled=consultation)
+    with torch.no_grad():
+        policy.stop_head[-1].weight.mul_(STOP_WEIGHT_SCALE)
+        policy.stop_head[-1].bias.fill_(STOP_BIAS)
     if consultation:
         with torch.no_grad():
             policy.query_gate.mlp[2].weight.mul_(GATE_WEIGHT_SCALE)
@@ -97,8 +105,8 @@ def trajectory(result) -> dict:
         steps.append([
             r.episode_id, r.environment_step, r.legal_action_descriptors[r.selected_action_index].action_id,
             bool(r.sampled_query), r.consulted_subnet, round(float(r.nasimemu_reward), 6), bool(r.terminated),
-            bool(r.truncated), bool(r.objective_satisfied_before_action),
-            round(float(r.final_logits[r.selected_action_index]), 3),
+            bool(r.truncated), bool(r.objective_satisfied_before_action), bool(r.stop_selected),
+            round(float(r.old_joint_log_probability), 3),
         ])
     episodes = [[s.seed, s.finish_reason, bool(s.objective_reached), bool(s.successful_finish), s.environment_steps,
                  round(float(s.nasimemu_return), 6)] for s in result.summaries]
@@ -126,3 +134,25 @@ async def run_greedy_conditions(root: Path, repo_root: Path, scenario: str, **ev
     finally:
         checkpoint_eval._build_consult_fn = original
     return out
+
+
+if __name__ == "__main__":
+    import asyncio
+    import json
+    import sys
+    import tempfile
+
+    from marla.learning.action_encoder import POLICY_REPRESENTATION_VERSION
+
+    repo_root = Path(__file__).resolve().parents[2]
+    scenario = "tests/data/scenarios/sm_entry_dmz_one_target.v2.yaml"
+    with tempfile.TemporaryDirectory() as tmp:
+        trajectories = asyncio.run(run_greedy_conditions(Path(tmp), repo_root, str((repo_root / scenario).resolve())))
+    golden = {
+        "recorded_with_policy_representation_version": POLICY_REPRESENTATION_VERSION,
+        "scenario": scenario, "init_seed": INIT_SEED, "seed_start": SEED_START, "num_episodes": NUM_EPISODES,
+        "max_episode_steps": MAX_EPISODE_STEPS, "trajectories": trajectories,
+    }
+    out = repo_root / "tests" / "data" / "greedy_eval_golden.json"
+    out.write_text(json.dumps(golden, indent=1) + "\n", encoding="utf-8")
+    sys.stdout.write(f"wrote {out}\n")

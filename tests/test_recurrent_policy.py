@@ -28,8 +28,6 @@ def baseline_policy_and_adapter():
     adapter = NasimEmuAdapter(
         scenario=scenario,
         max_episode_steps=config.environment.max_episode_steps,
-        completion_reward=config.objective.completion_reward,
-        premature_finish_penalty=config.objective.premature_finish_penalty,
     )
     policy = RecurrentPolicy(config.policy)
     return policy, adapter
@@ -76,9 +74,10 @@ def test_step_output_shapes_and_probability_normalization(baseline_policy_and_ad
         out = policy.step(graph_obs, legal, rstate, _compatibility(adapter, state, legal), _progress(state))
 
         n = len(legal)
-        assert out.base_logits.shape == (n,)
-        assert out.base_probs.shape == (n,)
+        assert out.base_logits.shape == (n - 1,)  # ordinary actions only; FINISH is the stop head's
+        assert out.base_probs.shape == (n - 1,)
         assert out.action_embeddings.shape[0] == n
+        assert out.stop_logit.dim() == 0 and out.completion_logit.dim() == 0
         assert torch.isfinite(out.base_logits).all()
         assert torch.allclose(out.base_probs.sum(), torch.tensor(1.0), atol=1e-5)
         assert out.value.dim() == 0

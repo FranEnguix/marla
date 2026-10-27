@@ -13,23 +13,28 @@ consumers automatically stay in lockstep with no duplicated routing logic.
 
 Design (spec sections 2-7):
 
-    A_t            = global candidate-action set (unchanged, every visible
-                      host x scenario action list, plus FINISH)
-    s_t            = subnet(argmax_i base_logit_i, i != FINISH)  -- DETERMINISTIC,
+    A_t            = ordinary candidate-action set (every visible host x
+                      scenario action list; FINISH excluded)
+    s_t            = subnet(argmax_i base_logit_i, i in A_t)  -- DETERMINISTIC,
                       no learned subnet-selection head, no sampling.
-    A_t^PM         = {a in A_t : subnet(a) == s_t} U {FINISH}
+    A_t^PM         = {a in A_t : subnet(a) == s_t}
+
+Consultation happens only after the hierarchical policy's stop head chose
+CONTINUE (see marla.learning.recurrent_policy), so FINISH is never part of a
+consultation: advice can only reshape the conditional ordinary-action
+distribution, never the stop probability.
 
 The Plan Maker never selects s_t and is never shown it as something to
 choose -- it is purely a local action expert inside the already-selected
 subnet. PPO retains base logits (and therefore the ability to act) over
-the FULL global A_t regardless of what was consulted (spec section 16:
-sampling still happens over the whole global vector after advice is
-scattered back in -- see marla.learning.advice/recurrent_policy.apply_advice).
+every ordinary action regardless of what was consulted (spec section 16:
+sampling still happens over the whole ordinary-action vector after advice
+is scattered back in -- see marla.learning.advice/recurrent_policy.apply_advice).
 
-Edge case: if no non-FINISH candidate exists (e.g. an episode's very last
-step, or a degenerate legal-action set), there is no action to route by,
-so ``consulted_subnet=None`` and the consulted set collapses to
-``[FINISH]`` alone -- never a crash, never an invented subnet.
+Edge case: with no ordinary candidate, FINISH is forced and no consultation
+can happen; ``select_consulted_subnet`` then returns ``None`` and
+``select_consulted_actions`` an empty scope -- never a crash, never an
+invented subnet.
 """
 
 from __future__ import annotations
@@ -54,8 +59,9 @@ from marla.environment.actions import ActionDescriptor, parse_host_target_key
 # (deterministic single-subnet routing, sparse local advice residual). A
 # checkpoint saved before this field existed (None) predates subnet-scoped
 # consultation entirely (the old dense/global design) and is never
-# compatible with it.
-CONSULTATION_SCOPE_VERSION = 1
+# compatible with it. 2 = FINISH removed from the consulted set (hierarchical
+# stop head; consultation only after CONTINUE).
+CONSULTATION_SCOPE_VERSION = 2
 
 
 def extract_action_subnet(action: ActionDescriptor) -> int | None:
@@ -88,6 +94,9 @@ def select_consulted_subnet(legal_actions: list[ActionDescriptor], base_logits: 
 
     Returns ``None`` when no non-FINISH candidate exists at all -- the one
     documented edge case (spec section 3), not an error.
+
+    ``base_logits`` is indexed by ``legal_actions`` position, so the policy's
+    ordinary-action logits (``(K,)``, FINISH last and absent) work directly.
     """
     non_finish_indices = [i for i, a in enumerate(legal_actions) if not a.is_finish]
     if not non_finish_indices:
@@ -146,23 +155,21 @@ class ConsultationScope:
 
 
 def select_consulted_actions(legal_actions: list[ActionDescriptor], consulted_subnet: int | None) -> ConsultationScope:
-    """Every global action whose subnet matches ``consulted_subnet``, plus FINISH exactly once.
+    """Every ordinary action whose subnet matches ``consulted_subnet`` (never FINISH).
 
-    When ``consulted_subnet`` is ``None`` (the no-non-FINISH-candidate edge
-    case), only FINISH matches -- the documented ``consulted_subnet=None,
-    consulted set=[FINISH]`` fallback, never an empty set (FINISH is
-    always present in ``legal_actions`` by construction) and never every
-    action leaking through untargeted.
+    When ``consulted_subnet`` is ``None`` (no ordinary candidate exists), the
+    scope is empty -- FINISH is then forced, so no consultation happens.
+    ``global_candidate_action_count`` is the number of ordinary candidates.
     """
     indices = [
         i for i, a in enumerate(legal_actions)
-        if a.is_finish or extract_action_subnet(a) == consulted_subnet
+        if not a.is_finish and consulted_subnet is not None and extract_action_subnet(a) == consulted_subnet
     ]
     return ConsultationScope(
         consulted_subnet=consulted_subnet,
         consulted_indices=indices,
         consulted_actions=[legal_actions[i] for i in indices],
-        global_candidate_action_count=len(legal_actions),
+        global_candidate_action_count=sum(1 for a in legal_actions if not a.is_finish),
     )
 
 
@@ -182,9 +189,8 @@ def build_scoped_observation(observation: dict[str, Any], consulted_subnet: int 
       fields.
 
     When ``consulted_subnet`` is ``None``, ``local_hosts`` is empty (there
-    is nothing to reason about locally -- the consulted action set is
-    FINISH alone) rather than falling back to showing every host, which
-    would silently defeat the whole scoping guarantee.
+    is nothing to reason about locally) rather than falling back to showing
+    every host, which would silently defeat the whole scoping guarantee.
     """
     sensitive_total = observation["sensitive_hosts_total"]
     sensitive_with_root = observation["sensitive_hosts_with_root_access"]
