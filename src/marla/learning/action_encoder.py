@@ -77,6 +77,11 @@ PARAMETER_FEATURE_DIM = 2  # [has_service_or_process_param, has_os_param]
 #     auxiliary completion predictor (see marla.learning.recurrent_policy).
 #     Whether the completion head exists is recorded and checked separately
 #     (CheckpointMetadata.completion_predictor_enabled).
+#     The optional evidence/history scorer context (policy.action_evidence/
+#     action_history) is likewise an ablation flag pair recorded and checked
+#     separately (CheckpointMetadata.action_evidence_enabled/
+#     action_history_enabled) rather than a version bump: with both disabled
+#     the policy is exactly the v5 architecture.
 POLICY_REPRESENTATION_VERSION = 5
 
 

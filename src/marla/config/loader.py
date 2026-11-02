@@ -139,9 +139,16 @@ def config_hash(config: Config) -> str:
     otherwise-identical embedded-server run: transport ownership is part of
     a run's provenance (wall-clock, failure behavior) even though it does
     not change decision or learning semantics.
+
+    ``policy.action_evidence``/``policy.action_history`` are likewise
+    dropped while disabled (their default), so configs written before these
+    blocks existed keep their hash.
     """
     dumped = config.model_dump(mode="json")
     if dumped["execution"].get("embedded_xmpp_server") is True:
         del dumped["execution"]["embedded_xmpp_server"]
+    for block in ("action_evidence", "action_history"):
+        if dumped["policy"].get(block) == {"enabled": False}:
+            del dumped["policy"][block]
     canonical = json.dumps(dumped, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()

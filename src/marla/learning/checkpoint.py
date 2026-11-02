@@ -197,6 +197,12 @@ class CheckpointMetadata:
     # Architecture flag (policy.completion_predictor.enabled): whether the
     # completion head exists and feeds the stop head. Checked on every load.
     completion_predictor_enabled: bool | None = None
+    # Architecture flags (policy.action_evidence/action_history.enabled):
+    # whether the scorer has the evidence/history context input. Checked on
+    # every load; a checkpoint saved before they existed has neither input
+    # and is treated as both disabled.
+    action_evidence_enabled: bool | None = None
+    action_history_enabled: bool | None = None
 
 
 def save_checkpoint(
@@ -252,6 +258,8 @@ def save_checkpoint(
             "training_semantics_version": TRAINING_SEMANTICS_VERSION,
             "finish_reward_semantics": finish_reward_semantics,
             "completion_predictor_enabled": policy.completion_predictor_enabled,
+            "action_evidence_enabled": policy.action_evidence_enabled,
+            "action_history_enabled": policy.action_history_enabled,
         },
         path,
     )
@@ -281,6 +289,8 @@ def peek_checkpoint_metadata(path: str | Path) -> CheckpointMetadata:
         training_semantics_version=data.get("training_semantics_version"),
         finish_reward_semantics=data.get("finish_reward_semantics"),
         completion_predictor_enabled=data.get("completion_predictor_enabled"),
+        action_evidence_enabled=data.get("action_evidence_enabled"),
+        action_history_enabled=data.get("action_history_enabled"),
     )
 
 
@@ -353,6 +363,18 @@ def load_checkpoint(
             "enabled, so the two are not interchangeable. Load with a matching policy configuration instead."
         )
 
+    saved_evidence = bool(data.get("action_evidence_enabled", False))
+    saved_history = bool(data.get("action_history_enabled", False))
+    if saved_evidence != policy.action_evidence_enabled or saved_history != policy.action_history_enabled:
+        raise PolicyRepresentationMismatchError(
+            f"Checkpoint {path} was saved with action_evidence_enabled={saved_evidence!r}, "
+            f"action_history_enabled={saved_history!r} (a checkpoint saved before these flags existed has "
+            f"neither), but the policy being loaded into has action_evidence_enabled="
+            f"{policy.action_evidence_enabled!r}, action_history_enabled={policy.action_history_enabled!r} "
+            "(policy.action_evidence/action_history.enabled). They change the ordinary-action scorer's input "
+            "width, so the two are not weight-compatible. Load with a matching policy configuration instead."
+        )
+
     # MARLA_FULL-only (spec invariant 11/12): a PPO_ONLY policy
     # (consultation_enabled=False) never builds or uses TrustHead/advice
     # at all, so a mismatched/missing consultation_scope_version is
@@ -421,4 +443,6 @@ def load_checkpoint(
         training_semantics_version=data.get("training_semantics_version"),
         finish_reward_semantics=data.get("finish_reward_semantics"),
         completion_predictor_enabled=data.get("completion_predictor_enabled"),
+        action_evidence_enabled=saved_evidence,
+        action_history_enabled=saved_history,
     )

@@ -348,6 +348,28 @@ class StopHeadConfig(MarlaBaseModel):
     initial_stop_probability: float = Field(default=0.05, gt=0, lt=1)
 
 
+class ActionEvidenceConfig(MarlaBaseModel):
+    """Evidence-aware ordinary-action scoring (see
+    ``marla.environment.action_context``): per-action features relating a
+    candidate's prerequisites to what has been observed about its target
+    (information available, required fact not found by a completed scan,
+    confirmed/unknown prerequisite fractions, scan information value), fed
+    to the ordinary-action scorer only -- never to the GRU, critic,
+    completion predictor or stop head."""
+
+    enabled: bool = False
+
+
+class ActionHistoryConfig(MarlaBaseModel):
+    """Episode-local host-action outcome memory (see
+    ``marla.environment.action_context``): per (host, action) attempt counts,
+    observable outcome and failure category of the latest attempt, recency,
+    and whether the target changed since. Fed to the ordinary-action scorer
+    only; no mask, retry limit or penalty is applied."""
+
+    enabled: bool = False
+
+
 class PolicyConfig(MarlaBaseModel):
     algorithm: Literal["recurrent_ppo"] = "recurrent_ppo"
     graph_encoder: GraphEncoderConfig
@@ -356,6 +378,10 @@ class PolicyConfig(MarlaBaseModel):
     ppo: PPOConfig
     completion_predictor: CompletionPredictorConfig = Field(default_factory=CompletionPredictorConfig)
     stop_head: StopHeadConfig = Field(default_factory=StopHeadConfig)
+    # Disabled (the default) leaves the policy exactly the pre-existing
+    # hierarchical architecture; config_hash omits a disabled block.
+    action_evidence: ActionEvidenceConfig = Field(default_factory=ActionEvidenceConfig)
+    action_history: ActionHistoryConfig = Field(default_factory=ActionHistoryConfig)
 
 
 class ConsultationConfig(MarlaBaseModel):

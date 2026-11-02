@@ -22,6 +22,12 @@ import torch
 from torch_geometric.data import Data
 
 from marla.environment.action_compatibility import compute_compatibility_matrix
+from marla.environment.action_context import (
+    EpisodeActionMemory,
+    ObservedActionOutcome,
+    SelectedActionContext,
+    observed_action_outcome,
+)
 from marla.environment.actions import ActionDescriptor
 from marla.environment.consultation_scope import (
     build_scoped_observation,
@@ -216,6 +222,19 @@ class StepRecord:
     # stays globally unique across streams without this field's help).
     env_index: int | None = None
 
+    # Evidence/history action context (marla.environment.action_context),
+    # computed from the pre-action state for EVERY run -- the policy only
+    # receives the blocks its configuration enables (select_action_context),
+    # but decisions.csv metrics use both. (N, EVIDENCE_FEATURE_DIM) /
+    # (N, HISTORY_FEATURE_DIM), legal_action_descriptors order; same
+    # training-buffer-only/replay-reuse contract as compatibility_features.
+    evidence_features: torch.Tensor | None = None
+    history_features: torch.Tensor | None = None
+    # Metric-only summaries: the selected action's pre-action evidence/history
+    # and its observable outcome (None for FINISH, which runs no action).
+    selected_action_context: SelectedActionContext | None = None
+    observed_outcome: ObservedActionOutcome | None = None
+
     # Assisted-variant fields; left at defaults in the baseline.
     sampled_query: bool = False
     old_query_probability: float | None = None
@@ -409,6 +428,8 @@ class RolloutCollector:
         self._evaluation_sampler = evaluation_sampler
 
         self._episode_id = episode_id_offset
+        # Episode-local evidence/host-action memory of this one stream.
+        self._action_memory = EpisodeActionMemory()
         self._state: EnvironmentState | None = None
         self._rstate: RecurrentState | None = None
         self._episode_seed = 0
@@ -441,6 +462,7 @@ class RolloutCollector:
         self._seed_counter += 1
         self._state = self._adapter.reset(seed=seed)
         self._rstate = self._policy.initial_recurrent_state()
+        self._action_memory.reset()
         self._episode_id += 1
         self._episode_seed = seed
         if self._evaluation_sampler is not None:
@@ -525,7 +547,14 @@ class RolloutCollector:
             known_exploration_frontier_remaining_before_action = exploration.known_exploration_frontier_remaining
             all_visible_sensitive_targets_rooted_before_action = all_visible_sensitive_targets_rooted(facts_by_target)
             has_visible_sensitive_target_before_action = any(f.is_sensitive_target for f in facts_by_target.values())
-            step_out = self._policy.step(graph_obs, legal_actions, rstate, compatibility_matrix, visible_progress)
+            # Evidence/history context from the same pre-action state and the
+            # episode's past outcomes only; stored verbatim on the record.
+            evidence_matrix = self._action_memory.evidence_matrix(legal_actions, facts_by_target, state)
+            history_matrix = self._action_memory.history_matrix(legal_actions, facts_by_target, self._episode_steps)
+            step_out = self._policy.step(
+                graph_obs, legal_actions, rstate, compatibility_matrix, visible_progress,
+                action_context=self._policy.select_action_context(evidence_matrix, history_matrix),
+            )
 
             decision = await self._decide(legal_actions, step_out, state)
             action_index = decision["action_index"]
@@ -547,6 +576,15 @@ class RolloutCollector:
             objective_became_satisfied = objective_satisfied_now and not self._objective_satisfied_so_far
             sensitive_targets_total, sensitive_targets_remaining = self._adapter.sensitive_target_status()
             state_delta = compute_state_delta(state, transition.state)
+
+            selected_action_context = self._action_memory.selected_action_context(
+                selected, facts_by_target, evidence_matrix[action_index]
+            )
+            observed_outcome = None
+            if transition.state is not None:
+                facts_after = extract_visible_host_facts(transition.state)
+                observed_outcome = observed_action_outcome(state, transition, facts_by_target, facts_after)
+                self._action_memory.record(selected, self._episode_steps, facts_after, observed_outcome)
 
             # A stop request arriving during this step's (possibly slow,
             # blocking) consultation makes this record the last one of the
@@ -584,6 +622,10 @@ class RolloutCollector:
                 observation_id=f"observation-{self._episode_id}-{self._episode_steps}",
                 compatibility_features=compatibility_matrix,
                 visible_progress=visible_progress,
+                evidence_features=evidence_matrix,
+                history_features=history_matrix,
+                selected_action_context=selected_action_context,
+                observed_outcome=observed_outcome,
                 graph_data=graph_obs.data,
                 node_key_to_index=graph_obs.node_key_to_index,
                 legal_action_descriptors=legal_actions,
@@ -976,7 +1018,10 @@ class RolloutCollector:
         live continuation would install for t+1 (built by the caller from
         the actual ``sampled_query`` at t, not reconstructed here with a
         different assumption) -- there is no separate boundary recurrent-
-        state path, by construction.
+        state path, by construction. Called before this step's
+        ``_episode_steps`` increment, so t+1's step index is
+        ``_episode_steps + 1``; the action memory already holds step t's
+        outcome.
         """
         assert next_state is not None
         assert next_rstate is not None
@@ -991,8 +1036,15 @@ class RolloutCollector:
             next_facts, next_exploration,
             self._policy.visible_target_progress_enabled, self._policy.visible_subnet_exploration_enabled,
         )
+        next_action_context = self._policy.select_action_context(
+            self._action_memory.evidence_matrix(next_legal, next_facts, next_state),
+            self._action_memory.history_matrix(next_legal, next_facts, self._episode_steps + 1),
+        )
         with torch.no_grad():
-            probe = self._policy.step(next_graph_obs, next_legal, next_rstate, next_compatibility, next_visible_progress)
+            probe = self._policy.step(
+                next_graph_obs, next_legal, next_rstate, next_compatibility, next_visible_progress,
+                action_context=next_action_context,
+            )
         return float(probe.value)
 
 

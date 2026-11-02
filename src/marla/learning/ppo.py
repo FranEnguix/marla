@@ -189,6 +189,14 @@ class ReplayOutputs:
     routing_margins: list[float]
 
 
+def stored_action_context(policy: RecurrentPolicy, record: StepRecord, device: torch.device) -> Tensor | None:
+    """The scorer's evidence/history context for a stored transition: the
+    record's collection-time matrices, never recomputed (the episode memory
+    and simulator state they came from are gone by replay time)."""
+    context = policy.select_action_context(record.evidence_features, record.history_features)
+    return context.to(device) if context is not None else None
+
+
 def _replay_chunk(
     policy: RecurrentPolicy, chunk: SequenceChunk, device: torch.device, consultation_cost: float
 ) -> ReplayOutputs:
@@ -231,7 +239,7 @@ def _replay_chunk(
         # environment again (forbidden during PPO epochs).
         out = policy.step(
             graph_obs, record.legal_action_descriptors, rstate, record.compatibility_features.to(device),
-            record.visible_progress.to(device),
+            record.visible_progress.to(device), action_context=stored_action_context(policy, record, device),
         )
         num_ordinary = out.num_ordinary_actions
         new_values.append(out.value)
@@ -1034,6 +1042,7 @@ def compute_policy_probe(
                 out = policy.step(
                     graph_obs, record.legal_action_descriptors, rstate,
                     record.compatibility_features.to(device), record.visible_progress.to(device),
+                    action_context=stored_action_context(policy, record, device),
                 )
 
                 # Complete hierarchical (base, unadvised) distribution over

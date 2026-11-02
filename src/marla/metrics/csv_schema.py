@@ -59,6 +59,17 @@ DECISIONS_NULLABLE_BOOLEAN_COLUMNS: tuple[str, ...] = (
     # own docstring for why "no visible target" must never collapse into
     # True *or* False.
     "all_visible_sensitive_targets_rooted_before_action",
+    # Evidence/history/outcome of the selected action: None for FINISH (no
+    # target, no action run), for a non-scan's scan_information_available,
+    # for a never-attempted action's target_changed_since_last_attempt, and
+    # for failed_on_other_host on anything but exploit/privesc.
+    "selected_action_service_information_available",
+    "selected_action_scan_information_available",
+    "selected_action_target_changed_since_last_attempt",
+    "selected_action_unproductive_repeat",
+    "selected_action_failed_on_other_host",
+    "selected_action_succeeded",
+    "selected_action_productive",
 )
 
 # Structurally always populated (never None) -- plain pandas "bool" is
@@ -95,6 +106,9 @@ DECISIONS_NULLABLE_INTEGER_COLUMNS: tuple[str, ...] = (
     "plan_maker_input_tokens",
     "plan_maker_output_tokens",
     "plan_maker_total_tokens",
+    # None for FINISH.
+    "selected_action_prior_attempts",
+    "selected_action_prior_unproductive_attempts",
 )
 
 # Nullable floats -- ordinary "float64" already represents these
@@ -118,6 +132,9 @@ DECISIONS_NULLABLE_STRING_COLUMNS: tuple[str, ...] = (
     "request_id",
     "response_status",
     "plan_maker_top_action_id",
+    "selected_action_evidence_status",
+    "selected_action_required_service_status",
+    "selected_action_failure_category",
 )
 
 

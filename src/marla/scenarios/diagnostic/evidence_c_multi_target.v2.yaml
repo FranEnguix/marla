@@ -1,0 +1,88 @@
+# MARLA diagnostic scenario (evidence-aware action selection, Scenario C):
+# several sensitive targets under partial observability.
+#
+# Two DMZ hosts reachable from the internet, each sensitive with probability
+# 0.5, and two internal hosts, both sensitive, that only a SubnetScan from a
+# compromised DMZ host reveals -- so 2-4 targets per episode, and a host's
+# sensitivity is only observed once it has been exploited. Hosts draw their
+# OS and services independently (as in evidence_b_pivot_one_target.v2.yaml),
+# and e_drupal succeeds only with probability 0.8, so a failed attempt
+# against a host that does run Drupal is a legitimate reason to retry. Every
+# realization is rootable; nothing requires a scan before an exploit.
+# This is special scenario format, that leaves some variables to chance. Not compatible with the original nasim generator/loader.
+
+subnets: [2, 2] # DMZ: 2 hosts, internal: 2 hosts
+address_space_bounds: (5, 10)
+topology: [[ 1, 1, 0],
+           [ 1, 1, 1],
+           [ 0, 1, 1]]
+subnet_labels:
+  1: DMZ
+  2: internal
+sensitive_hosts:
+  1: 0.5
+  2: 1.0
+os:
+  - linux
+  - windows
+services:
+  - 21_linux_proftpd
+  - 80_linux_drupal
+  - 80_linux_phpwiki
+  - 9200_windows_elasticsearch
+  - 80_windows_wp_ninja
+  - 3306_any_mysql
+sensitive_services:
+  - 3306_any_mysql
+processes:
+  - ~
+exploits:
+  e_proftpd:
+    service: 21_linux_proftpd
+    os: linux
+    prob: 1.0
+    cost: 1
+    access: user
+  e_drupal:
+    service: 80_linux_drupal
+    os: linux
+    prob: 0.8
+    cost: 1
+    access: user
+  e_phpwiki:
+    service: 80_linux_phpwiki
+    os: linux
+    prob: 1.0
+    cost: 1
+    access: user
+  e_elasticsearch:
+    service: 9200_windows_elasticsearch
+    os: windows
+    prob: 1.0
+    cost: 1
+    access: root
+  e_wp_ninja:
+    service: 80_windows_wp_ninja
+    os: windows
+    prob: 1.0
+    cost: 1
+    access: user
+privilege_escalation:
+  pe_kernel:
+    process: ~
+    os: linux
+    prob: 1.0
+    cost: 1
+    access: root
+  pe_windows:
+    process: ~
+    os: windows
+    prob: 1.0
+    cost: 1
+    access: root
+service_scan_cost: 1
+os_scan_cost: 1
+subnet_scan_cost: 1
+process_scan_cost: 1
+host_configurations: _random
+firewall: _subnets

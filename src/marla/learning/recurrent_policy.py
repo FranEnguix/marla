@@ -18,6 +18,14 @@ gradients cannot trade calibration for return. The simulator's completion
 label is a training target only; it never enters ``x_t``, the action
 descriptors, or the recurrent state.
 
+Optional evidence/history action context (``policy.action_evidence``,
+``policy.action_history``; :mod:`marla.environment.action_context`) enters
+``pi_action`` only, through the scorer's ``W_x`` term:
+``l_t(a) = f(z_t, e(a), e(h), c_t(h, a), m_t(h, a))``. It never reaches
+``z_t`` (the GRU still receives the unchanged embedding of the previous
+action), the critic, the completion head or the stop head, so ``p_stop`` and
+the factorization above are unchanged.
+
 This module handles exactly one environment instance at a time (MARLA does
 not vectorize environments -- see spec section 25 non-goals), so all
 "batch" dimensions here are size 1. Fixed-size, padded multi-sequence
@@ -35,6 +43,7 @@ from torch import Tensor, nn
 from torch_geometric.utils import softmax as scatter_softmax
 
 from marla.config.models import PolicyConfig
+from marla.environment.action_context import EVIDENCE_FEATURE_DIM, HISTORY_FEATURE_DIM
 from marla.environment.actions import ActionDescriptor, count_ordinary_actions
 from marla.environment.graph import NODE_FEATURE_DIM, GraphObservation
 from marla.environment.visible_facts import visible_progress_dim
@@ -111,6 +120,13 @@ class RecurrentPolicy(nn.Module):
         # without duplicating this decision anywhere else.
         self.visible_target_progress_enabled = rc_cfg.visible_target_progress
         self.visible_subnet_exploration_enabled = rc_cfg.visible_subnet_exploration
+        # Ordinary-action context ablation (A: neither, B: evidence, C:
+        # history, D: both) -- see select_action_context.
+        self.action_evidence_enabled = policy_config.action_evidence.enabled
+        self.action_history_enabled = policy_config.action_history.enabled
+        self.action_context_dim = (EVIDENCE_FEATURE_DIM if self.action_evidence_enabled else 0) + (
+            HISTORY_FEATURE_DIM if self.action_history_enabled else 0
+        )
 
         self.graph_encoder = GraphEncoder(node_feature_dim, ge_cfg.hidden_size, ge_cfg.layers)
         self.action_encoder = ActionEncoder(
@@ -130,6 +146,7 @@ class RecurrentPolicy(nn.Module):
             recurrent_hidden_size=rc_cfg.hidden_size,
             action_hidden_size=ae_cfg.hidden_size,
             scorer_hidden_size=rc_cfg.hidden_size,
+            action_context_size=self.action_context_dim,
         )
         self.critic = Critic(rc_cfg.hidden_size)
 
@@ -174,6 +191,26 @@ class RecurrentPolicy(nn.Module):
         ).squeeze(0)
         return RecurrentState(z=z, previous_action_embedding=previous_action_embedding)
 
+    def select_action_context(self, evidence: Tensor | None, history: Tensor | None) -> Tensor | None:
+        """The scorer's per-action context for this policy's ablation: the
+        enabled blocks of the stored evidence/history matrices, concatenated
+        (evidence first), or ``None`` when neither is enabled. Used by
+        rollout collection and PPO replay alike, so both feed the scorer the
+        identical tensor for a stored transition."""
+        parts = []
+        for enabled, block, name in (
+            (self.action_evidence_enabled, evidence, "evidence"),
+            (self.action_history_enabled, history, "history"),
+        ):
+            if not enabled:
+                continue
+            if block is None:
+                raise ValueError(f"policy.action_{name} is enabled but no {name} features were provided")
+            parts.append(block)
+        if not parts:
+            return None
+        return torch.cat(parts, dim=-1)
+
     def step(
         self,
         graph_observation: GraphObservation,
@@ -181,6 +218,7 @@ class RecurrentPolicy(nn.Module):
         recurrent_state: RecurrentState,
         compatibility_matrix: Tensor,
         visible_progress: Tensor,
+        action_context: Tensor | None = None,
     ) -> PolicyStepOutput:
         """``compatibility_matrix``: ``(len(legal_actions), COMPATIBILITY_FEATURE_DIM)``,
         the fixed-width action/target compatibility features (spec section
@@ -195,8 +233,17 @@ class RecurrentPolicy(nn.Module):
         :func:`marla.environment.visible_facts.compute_visible_progress`)
         -- likewise computed once by the caller and passed in explicitly,
         never recomputed here, for the same replay-consistency reason.
+
+        ``action_context``: ``(len(legal_actions), action_context_dim)`` from
+        :meth:`select_action_context`; required iff ``action_context_dim > 0``.
+        Only its ordinary-action rows are used, and only by the scorer.
         """
         num_ordinary = count_ordinary_actions(legal_actions)
+        if (action_context is None) != (self.action_context_dim == 0):
+            raise ValueError(
+                f"this policy expects {'no ' if self.action_context_dim == 0 else ''}action context "
+                f"(action_context_dim={self.action_context_dim})"
+            )
 
         device = self.device
         data = graph_observation.data.to(device)
@@ -224,7 +271,8 @@ class RecurrentPolicy(nn.Module):
         ordinary_embeddings = action_embeddings[:num_ordinary]
         if num_ordinary > 0:
             action_to_sample = torch.zeros(num_ordinary, dtype=torch.long, device=device)
-            base_logits = self.base_scorer(z.unsqueeze(0), ordinary_embeddings, action_to_sample)
+            ordinary_context = action_context[:num_ordinary].to(device) if action_context is not None else None
+            base_logits = self.base_scorer(z.unsqueeze(0), ordinary_embeddings, action_to_sample, ordinary_context)
             base_probs = scatter_softmax(base_logits, action_to_sample)
         else:
             base_logits = z.new_zeros(0)

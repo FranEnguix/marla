@@ -169,6 +169,25 @@ _DECISIONS_FIELDS = [
     # can tell "nothing visible yet" apart from "everything visible is
     # rooted" without guessing from a bare boolean.
     "has_visible_sensitive_target_before_action", "all_visible_sensitive_targets_rooted_before_action",
+    # Evidence and host-action history of the selected action, decision-time
+    # and observation-derived (marla.environment.action_context) -- recorded
+    # for every run whether or not the policy receives these features. None
+    # where undefined: FINISH (no target, no action run), a non-scan's
+    # scan_information_available, an action without a service requirement's
+    # required_service_status, never-attempted actions' since-last-attempt
+    # fields, and failed_on_other_host for anything but exploit/privesc.
+    # evidence_status/required_service_status: confirmed | unknown |
+    # contradicted (observed absent or different) | not_applicable.
+    "selected_action_evidence_status", "selected_action_required_service_status",
+    "selected_action_service_information_available", "selected_action_scan_information_available",
+    "selected_action_prior_attempts", "selected_action_prior_unproductive_attempts",
+    "selected_action_target_changed_since_last_attempt", "selected_action_unproductive_repeat",
+    "selected_action_failed_on_other_host",
+    # Observable outcome of the selected action: the auxiliary observation
+    # row's success flag, whether the visible observation changed, and the
+    # failure category (none | connection_error | permission_error |
+    # stochastic | unspecified).
+    "selected_action_succeeded", "selected_action_productive", "selected_action_failure_category",
 ]
 
 _PROBE_DIAGNOSTIC_FIELDS = [
@@ -287,6 +306,23 @@ _ROLLOUTS_FIELDS = [
     # see research/diagnostics/ppo_learnability for where this is computed.
     "mean_finish_probability_visible_complete_frontier_remaining",
     "mean_finish_probability_visible_complete_no_frontier",
+    # Reconnaissance and evidence-based exploitation aggregates of the
+    # selected_action_* evidence/history/outcome columns above. Denominators:
+    # *_scan_rate / exploit_rate / unproductive_repeat_rate -- every decision;
+    # useful/redundant_scan_rate -- scans (productive = the scan changed the
+    # visible observation); reconnaissance_before_exploit_rate and the three
+    # exploit_with_*_service_rate -- exploits with a service requirement
+    # (reconnaissance = the target's services were already revealed);
+    # exploit_success_rate -- exploits; host_specific_exploit_accuracy --
+    # exploits whose target's services were revealed (share whose required
+    # service was confirmed present); different_host_retry_rate --
+    # exploit/privesc decisions (share whose same-named action had failed
+    # without effect on another host this episode). Null when a denominator
+    # is zero.
+    "service_scan_rate", "scan_rate", "exploit_rate", "useful_scan_rate", "redundant_scan_rate",
+    "reconnaissance_before_exploit_rate", "exploit_with_confirmed_service_rate",
+    "exploit_with_unknown_service_rate", "exploit_with_contradicted_service_rate", "exploit_success_rate",
+    "host_specific_exploit_accuracy", "unproductive_repeat_rate", "different_host_retry_rate",
     # Rollout-level pre/post-PPO-update policy probe (spec sections 11-14
     # of the seq32-vs-64 collapse investigation, extended with State N/I/C
     # conditioning per sections 9/23 of the no-visible-target-FINISH
@@ -635,6 +671,75 @@ def _decision_row(record: StepRecord, advantage: float, return_target: float) ->
         "known_exploration_frontier_remaining_before_action": record.known_exploration_frontier_remaining_before_action,
         "has_visible_sensitive_target_before_action": record.has_visible_sensitive_target_before_action,
         "all_visible_sensitive_targets_rooted_before_action": record.all_visible_sensitive_targets_rooted_before_action,
+        **_action_context_fields(record),
+    }
+
+
+def _action_context_fields(record: StepRecord) -> dict[str, Any]:
+    """decisions.csv evidence/history/outcome columns (see _DECISIONS_FIELDS)."""
+    context = record.selected_action_context
+    outcome = record.observed_outcome
+    targeted = context is not None and context.service_information_available is not None
+    return {
+        "selected_action_evidence_status": context.evidence_status if context is not None else None,
+        "selected_action_required_service_status": context.required_service_status if context is not None else None,
+        "selected_action_service_information_available": (
+            context.service_information_available if context is not None else None
+        ),
+        "selected_action_scan_information_available": (
+            context.scan_information_available if context is not None else None
+        ),
+        "selected_action_prior_attempts": context.prior_attempts if targeted else None,
+        "selected_action_prior_unproductive_attempts": context.prior_unproductive_attempts if targeted else None,
+        "selected_action_target_changed_since_last_attempt": (
+            context.target_changed_since_last_attempt if context is not None else None
+        ),
+        "selected_action_unproductive_repeat": context.unproductive_repeat if targeted else None,
+        "selected_action_failed_on_other_host": context.failed_on_other_host if context is not None else None,
+        "selected_action_succeeded": outcome.succeeded if outcome is not None else None,
+        "selected_action_productive": outcome.productive if outcome is not None else None,
+        "selected_action_failure_category": outcome.failure_category.value if outcome is not None else None,
+    }
+
+
+def reconnaissance_aggregates(decision_rows: list[dict[str, Any]]) -> dict[str, float | None]:
+    """The rollouts.csv reconnaissance/evidence rates (see _ROLLOUTS_FIELDS
+    for each denominator) over a list of decisions.csv rows -- also used by
+    offline evaluation analysis, so training and evaluation share one
+    definition. Missing columns count as "not this kind of decision"."""
+
+    def _rate(rows: list[dict[str, Any]], predicate) -> float | None:
+        return sum(1 for row in rows if predicate(row)) / len(rows) if rows else None
+
+    scans = [r for r in decision_rows if str(r.get("selected_action_type") or "").endswith("_scan")]
+    exploits = [r for r in decision_rows if r.get("selected_action_type") == "exploit"]
+    service_exploits = [r for r in exploits if r.get("selected_action_required_service_status") is not None]
+    informed_exploits = [r for r in service_exploits if r.get("selected_action_service_information_available")]
+    named = [r for r in decision_rows if r.get("selected_action_type") in ("exploit", "privilege_escalation")]
+    return {
+        "service_scan_rate": _rate(decision_rows, lambda r: r.get("selected_action_type") == "service_scan"),
+        "scan_rate": _rate(decision_rows, lambda r: str(r.get("selected_action_type") or "").endswith("_scan")),
+        "exploit_rate": _rate(decision_rows, lambda r: r.get("selected_action_type") == "exploit"),
+        "useful_scan_rate": _rate(scans, lambda r: r.get("selected_action_productive") is True),
+        "redundant_scan_rate": _rate(scans, lambda r: r.get("selected_action_productive") is False),
+        "reconnaissance_before_exploit_rate": _rate(
+            service_exploits, lambda r: bool(r.get("selected_action_service_information_available"))
+        ),
+        "exploit_with_confirmed_service_rate": _rate(
+            service_exploits, lambda r: r.get("selected_action_required_service_status") == "confirmed"
+        ),
+        "exploit_with_unknown_service_rate": _rate(
+            service_exploits, lambda r: r.get("selected_action_required_service_status") == "unknown"
+        ),
+        "exploit_with_contradicted_service_rate": _rate(
+            service_exploits, lambda r: r.get("selected_action_required_service_status") == "contradicted"
+        ),
+        "exploit_success_rate": _rate(exploits, lambda r: r.get("selected_action_succeeded") is True),
+        "host_specific_exploit_accuracy": _rate(
+            informed_exploits, lambda r: r.get("selected_action_required_service_status") == "confirmed"
+        ),
+        "unproductive_repeat_rate": _rate(decision_rows, lambda r: r.get("selected_action_unproductive_repeat") is True),
+        "different_host_retry_rate": _rate(named, lambda r: r.get("selected_action_failed_on_other_host") is True),
     }
 
 
@@ -915,6 +1020,11 @@ def build_rollout_row(
             mean_finish_probability_visible_complete_frontier_remaining
         ),
         "mean_finish_probability_visible_complete_no_frontier": mean_finish_probability_visible_complete_no_frontier,
+        **(
+            reconnaissance_aggregates(decision_rows)
+            if decision_rows
+            else dict.fromkeys(reconnaissance_aggregates([]), None)
+        ),
         **_completion_and_stop_aggregates(records),
     }
 

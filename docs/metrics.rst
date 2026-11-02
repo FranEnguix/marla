@@ -190,7 +190,23 @@ partial observability, not necessarily about attack competence.
     (``base_compatible_action_probability_mass``/
     ``final_compatible_action_probability_mass`` -- identical to each
     other for the baseline variant, since no advice ever perturbs the
-    logits there); FINISH diagnostics -- see the labeled note below for
+    logits there); evidence and host-action history of the selected action
+    (:mod:`marla.environment.action_context`, decision-time,
+    observation-derived): ``selected_action_evidence_status`` and
+    ``selected_action_required_service_status`` (``confirmed``/``unknown``/
+    ``contradicted`` -- observed absent after a completed scan, or a
+    different OS -- /``not_applicable``),
+    ``selected_action_service_information_available``,
+    ``selected_action_scan_information_available`` (scans: their information
+    was already available), ``selected_action_prior_attempts``/
+    ``selected_action_prior_unproductive_attempts`` (this action on this
+    host, this episode), ``selected_action_target_changed_since_last_attempt``,
+    ``selected_action_unproductive_repeat``,
+    ``selected_action_failed_on_other_host``, and its observable outcome
+    ``selected_action_succeeded``/``selected_action_productive``/
+    ``selected_action_failure_category`` (``none``/``connection_error``/
+    ``permission_error``/``stochastic``/``unspecified``) -- all ``null`` for
+    FINISH; FINISH diagnostics -- see the labeled note below for
     which of these are diagnostic simulator truth vs. agent-visible
     quantities (``objective_satisfied_before_action``,
     ``sensitive_targets_remaining_before_action``,
@@ -381,6 +397,24 @@ partial observability, not necessarily about attack competence.
     entirely rather than folding them in -- these three sum to 1.0 over
     *applicable* decisions only. Both denominators are kept; neither
     silently replaces the other.
+
+    Reconnaissance and evidence-based exploitation, aggregated from the
+    ``selected_action_*`` evidence/history/outcome columns of
+    ``decisions.csv`` (all observation-derived, recorded whether or not the
+    policy receives ``policy.action_evidence``/``action_history``):
+    ``service_scan_rate``/``scan_rate``/``exploit_rate`` (per decision);
+    ``useful_scan_rate``/``redundant_scan_rate`` (scans that did / did not
+    change the visible observation); ``reconnaissance_before_exploit_rate``
+    (exploits whose target's services were already revealed);
+    ``exploit_with_confirmed_service_rate``/``_unknown_``/``_contradicted_``
+    (the required service's status when the exploit was chosen);
+    ``exploit_success_rate``; ``host_specific_exploit_accuracy`` (of the
+    exploits chosen with the target's services revealed, the share whose
+    required service was confirmed present); ``unproductive_repeat_rate``
+    (decisions repeating an attempt that changed nothing, on a target that
+    has not changed since); ``different_host_retry_rate`` (exploit/privesc
+    decisions whose same-named action had failed without effect on another
+    host this episode). ``null`` when the denominator is empty.
 
     FINISH diagnostics, partitioned by ``objective_satisfied_before_action``
     (the decision-time truth, not the post-action field --
@@ -722,6 +756,13 @@ Is the RL policy learning?
     NASimEmu discovers more hosts within an episode, so the normalized
     version is what's actually comparable across different points in an
     episode or across episodes.
+
+``reconnaissance_and_exploitation.png``
+    The ``rollouts.csv`` reconnaissance aggregates above over training
+    steps: service-scan rate with the useful/redundant split of scans
+    (left), and exploit success, required-service confirmed/unknown shares
+    and unproductive repeats (right). A policy is not better merely because
+    it scans more; read these together with the outcome plots.
 
 ``compatible_action_probability.png``
     :math:`P(\text{action compatible with observed facts})` -- the mean

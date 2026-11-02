@@ -112,12 +112,16 @@ def test_multi_env_validation_unchanged():
 
 def _v0_10_0_config_hash(config) -> str:
     """config_hash exactly as released in v0.10.0 (whose model had no
-    embedded_xmpp_server field): the full model dump, hashed as-is."""
+    embedded_xmpp_server field): the full model dump, hashed as-is. The
+    later policy.action_evidence/action_history blocks are likewise left out
+    of the hash while disabled, so they are dropped here too."""
     import hashlib
     import json
 
     dumped = config.model_dump(mode="json")
     dumped["execution"].pop("embedded_xmpp_server")  # the only field v0.10.0 didn't have
+    for block in ("action_evidence", "action_history"):
+        assert dumped["policy"].pop(block) == {"enabled": False}
     return hashlib.sha256(json.dumps(dumped, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest()
 
 

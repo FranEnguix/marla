@@ -423,6 +423,32 @@ policy
     head's output bias at initialization is ``logit(initial_stop_probability)``,
     so an untrained policy explores instead of stopping on half of its
     decisions. PPO trains the stop probability from there.
+- ``action_evidence`` / ``action_history`` (each ``enabled``, bool, default
+  ``false``): optional per-action context for the ordinary-action scorer,
+  :math:`b_{t,i} = w^\top \tanh(W_z z_t + W_e e_{t,i} + W_x x_{t,i})`
+  (:mod:`marla.environment.action_context`). ``action_evidence`` adds
+  features relating each exploit/privesc's prerequisites to what has been
+  observed about its target -- whether the target's services/OS/processes
+  have been revealed, whether a required service/process was *not found by
+  a completed scan* (never inferred from the absence of a scan), and the
+  confirmed/unknown/contradicted prerequisite shares -- plus, for scans,
+  whether their information is already available and how many of the
+  target's prerequisites they would still resolve. ``action_history`` adds
+  an episode-local record of each (host, action) pair: attempt counts,
+  attempts that changed nothing visible, the latest attempt's observable
+  result and failure category (the observation's auxiliary
+  success/connection/permission/undefined-error row), recency, and whether
+  the target's visible facts changed since. Neither feature masks,
+  penalizes or forbids any action, and both reach only the conditional
+  ordinary-action distribution after CONTINUE: the GRU, critic, completion
+  predictor and stop head are unchanged. ``W_x`` is zero-initialized
+  without drawing from the RNG, so all four combinations start from the
+  same weights and the same initial policy. With both disabled the policy
+  is exactly the hierarchical architecture without them (and a disabled
+  block is omitted from ``config_hash``). Both flags are recorded in
+  checkpoints; a mismatch is rejected on load (a checkpoint saved before
+  they existed loads as both disabled). The evidence/history metrics in
+  ``decisions.csv``/``rollouts.csv`` are recorded whichever is enabled.
 
 consultation
 ~~~~~~~~~~~~

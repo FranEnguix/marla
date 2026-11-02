@@ -155,6 +155,7 @@ def generate_plots(run_dir: Path, plots_dir: Path) -> list[Path]:
             written += _plot_finish_probability_by_objective_state(rollouts, plots_dir)
             written += _plot_finish_probability_by_visible_completion_and_frontier(rollouts, plots_dir)
             written += _plot_known_subnet_exploration_progress(rollouts, plots_dir)
+            written += _plot_reconnaissance_and_exploitation(rollouts, plots_dir)
 
     decisions_path = run_dir / "decisions.csv"
     if decisions_path.exists() and decisions_path.stat().st_size > 0:
@@ -1246,6 +1247,40 @@ def _plot_known_subnet_exploration_progress(rollouts: pd.DataFrame, plots_dir: P
     ax.legend(fontsize="small")
     ax.grid(alpha=0.3)
     return [_save(fig, plots_dir / "known_subnet_exploration_progress.png")]
+
+
+def _plot_reconnaissance_and_exploitation(rollouts: pd.DataFrame, plots_dir: Path) -> list[Path]:
+    """Reconnaissance and evidence-based exploitation over training: how
+    often the policy scans and whether those scans revealed anything (left),
+    and whether its exploits are backed by observed evidence, succeed, or
+    repeat an attempt that changed nothing (right). Observation-derived
+    rollouts.csv aggregates (see writer._ROLLOUTS_FIELDS); absent for a run
+    written before those columns existed.
+    """
+    if "exploit_success_rate" not in rollouts.columns or rollouts["exploit_success_rate"].isna().all():
+        return []
+    x = rollouts["environment_steps_total"]
+    fig, (left, right) = plt.subplots(1, 2, figsize=(12, 4.5))
+    for ax, series in (
+        (left, (("service_scan_rate", "service scans / decisions", "tab:blue", "-"),
+                ("useful_scan_rate", "scans that revealed something / scans", "tab:green", "--"),
+                ("redundant_scan_rate", "scans that revealed nothing / scans", "tab:red", ":"))),
+        (right, (("exploit_success_rate", "successful exploits / exploits", "tab:green", "-"),
+                 ("exploit_with_confirmed_service_rate", "exploits with required service confirmed", "tab:blue", "--"),
+                 ("exploit_with_unknown_service_rate", "exploits with required service unknown", "tab:orange", "--"),
+                 ("unproductive_repeat_rate", "unproductive repeats / decisions", "tab:red", ":"))),
+    ):
+        for column, label, color, style in series:
+            if column in rollouts.columns and not rollouts[column].isna().all():
+                ax.plot(x, rollouts[column], label=label, color=color, linestyle=style, marker=".")
+        ax.set_xlabel("Environment steps")
+        ax.set_ylabel("Rate")
+        ax.set_ylim(*_RATE_YLIM)
+        ax.legend(fontsize="small")
+        ax.grid(alpha=0.3)
+    left.set_title("Reconnaissance")
+    right.set_title("Evidence-based exploitation")
+    return [_save(fig, plots_dir / "reconnaissance_and_exploitation.png")]
 
 
 def _critic_quality_r_squared(r: pd.Series, v: pd.Series) -> float | None:

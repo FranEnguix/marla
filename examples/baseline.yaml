@@ -158,6 +158,15 @@ policy:
     max_positive_class_weight: 10.0 # cap for "balanced"
   stop_head:
     initial_stop_probability: 0.05  # p_stop at initialization (output bias)
+  # Optional per-action context for the ordinary-action scorer (defaults
+  # shown): evidence relating each exploit/privesc's prerequisites to what
+  # has been observed about its target, and an episode-local history of
+  # each (host, action) pair's observable outcomes. Scorer-only: no mask,
+  # no penalty, FINISH/stop head unchanged. See docs/configuration.rst.
+  action_evidence:
+    enabled: false
+  action_history:
+    enabled: false
 
 consultation:
   # disabled: no Gatekeeper, no Plan Maker may be configured below (both

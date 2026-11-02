@@ -1,0 +1,94 @@
+# MARLA diagnostic scenario (evidence-aware action selection, Scenario B):
+# multiple hosts with different, randomized vulnerabilities and one
+# sensitive target behind them.
+#
+# Two non-sensitive DMZ hosts are reachable from the internet; the single
+# sensitive host sits in an internal subnet that only a SubnetScan from a
+# compromised DMZ host reveals. Every host independently draws its OS
+# (linux/windows) and services, so the exploit that works differs from host
+# to host and from episode to episode: a failed e_drupal on one DMZ host says
+# nothing about the other host or the target. With five exploits for two OS
+# families, scanning before exploiting can pay off (unlike the three-exploit,
+# Linux-only sm_entry_dmz_one_target.v2.yaml, where blind attempts are
+# cheaper on average). Exploit/privesc set as in
+# solvable/sm_entry_user_three_subnets.solvable.v2.yaml (every realization
+# is rootable: Linux USER exploit + pe_kernel, Windows e_elasticsearch or
+# e_wp_ninja + the Windows privesc). Nothing requires a scan before an
+# exploit.
+# This is special scenario format, that leaves some variables to chance. Not compatible with the original nasim generator/loader.
+
+subnets: [2, 1] # DMZ: 2 hosts, internal: 1 host
+address_space_bounds: (5, 10)
+topology: [[ 1, 1, 0],
+           [ 1, 1, 1],
+           [ 0, 1, 1]]
+subnet_labels:
+  1: DMZ
+  2: internal
+sensitive_hosts:
+  1: 0.
+  2: 1.0
+os:
+  - linux
+  - windows
+services:
+  - 21_linux_proftpd
+  - 80_linux_drupal
+  - 80_linux_phpwiki
+  - 9200_windows_elasticsearch
+  - 80_windows_wp_ninja
+  - 3306_any_mysql
+sensitive_services:
+  - 3306_any_mysql
+processes:
+  - ~
+exploits:
+  e_proftpd:
+    service: 21_linux_proftpd
+    os: linux
+    prob: 1.0
+    cost: 1
+    access: user
+  e_drupal:
+    service: 80_linux_drupal
+    os: linux
+    prob: 1.0
+    cost: 1
+    access: user
+  e_phpwiki:
+    service: 80_linux_phpwiki
+    os: linux
+    prob: 1.0
+    cost: 1
+    access: user
+  e_elasticsearch:
+    service: 9200_windows_elasticsearch
+    os: windows
+    prob: 1.0
+    cost: 1
+    access: root
+  e_wp_ninja:
+    service: 80_windows_wp_ninja
+    os: windows
+    prob: 1.0
+    cost: 1
+    access: user
+privilege_escalation:
+  pe_kernel:
+    process: ~
+    os: linux
+    prob: 1.0
+    cost: 1
+    access: root
+  pe_windows:
+    process: ~
+    os: windows
+    prob: 1.0
+    cost: 1
+    access: root
+service_scan_cost: 1
+os_scan_cost: 1
+subnet_scan_cost: 1
+process_scan_cost: 1
+host_configurations: _random
+firewall: _subnets
