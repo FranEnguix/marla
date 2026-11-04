@@ -254,17 +254,14 @@ def repair(
         raise typer.Exit(code=1)
 
 
-def _parse_view(view: str | None, verbose: bool, default: str) -> tuple[str, ...]:
+def _parse_mode(mode: str) -> tuple[str, ...]:
     from marla.visualization.scenario_layout import VIEWS
 
-    chosen = view or ("verbose" if verbose else default)
-    if chosen == "both":
+    if mode == "both":
         return VIEWS
-    if chosen not in VIEWS:
-        raise ValueError(f"--view must be default, verbose or both, not {chosen!r}")
-    if view is not None and verbose and chosen == "default":
-        raise ValueError("--verbose conflicts with --view default")
-    return (chosen,)
+    if mode not in VIEWS:
+        raise ValueError(f"--mode must be both, simplified or verbose, not {mode!r}")
+    return (mode,)
 
 
 def _run_scenario(run_dir: Path) -> Path:
@@ -277,10 +274,10 @@ def _run_scenario(run_dir: Path) -> Path:
     return Path(scenario)
 
 
-def _report_batch(result, output_dir: Path) -> None:
+def _report_batch(result, output_dir: Path, what: str = "realization") -> None:
     color = typer.colors.GREEN if not result.unreconstructed else typer.colors.YELLOW
     typer.secho(
-        f"Rendered {len(result.rendered)} realization(s) into {output_dir}/"
+        f"Rendered {len(result.rendered)} {what}(s) into {output_dir}/"
         + (f"; {len(result.skipped_existing)} already present (skipped)" if result.skipped_existing else "")
         + (f"; {result.aliases} seed(s) generate an already-listed identical network (recorded, not re-rendered)"
            if result.aliases else ""),
@@ -299,7 +296,8 @@ def _report_batch(result, output_dir: Path) -> None:
             typer.secho(f"    {u['scenario']} seed {u['requested_seed']}: {u['reason']}", fg=typer.colors.RED, err=True)
 
 
-_FORMAT_HELP = "Comma-separated output formats (pdf, svg, png)."
+_FORMAT_HELP = "Output formats: all (pdf, svg, png), or a comma-separated subset."
+_MODE_HELP = "both (default), simplified or verbose."
 _SIZE_HELP = ("Figure width: natural (fonts at their nominal print size), single (3.33 in column), "
               "double (7.0 in text width) or a width in inches; content is scaled down, never up.")
 
@@ -309,51 +307,58 @@ def plot(
     scenario: str = typer.Argument(
         None, help="Scenario YAML path or marla://<name> reference (default: the scenario of --run-dir)."
     ),
-    seed: list[int] = typer.Option(None, "--seed", help="Scenario seed to reconstruct (repeatable)."),
+    seed: list[int] = typer.Option(None, "--seed", help="Draw the network generated for this seed (repeatable). "
+                                   "Without any seed, the scenario definition is drawn."),
     seeds: str = typer.Option(None, "--seeds", help="Comma-separated seeds and inclusive ranges, e.g. 11,12,20-29."),
-    verbose: bool = typer.Option(False, "--verbose", "-v", help="Add each host's sampled attributes (simulator ground truth)."),
-    view: str = typer.Option(None, "--view", help="default, verbose or both (overrides --verbose)."),
+    mode: str = typer.Option("both", "--mode", help=_MODE_HELP),
     run_dir: Path = typer.Option(None, "--run-dir", help="A `marla run` directory: its scenario is plotted and the "
                                  "default output is <run-dir>/plots/scenarios/."),
     output_dir: Path = typer.Option(None, "--output-dir", "-o", help="Output directory (default: plots/scenarios/)."),
-    formats: str = typer.Option("pdf,svg,png", "--format", help=_FORMAT_HELP),
+    formats: str = typer.Option("all", "--format", help=_FORMAT_HELP),
     dpi: int = typer.Option(300, "--dpi", help="PNG resolution."),
     size: str = typer.Option("natural", "--size", help=_SIZE_HELP),
     caption: bool = typer.Option(False, "--caption/--no-caption", help="Print scenario, seed and counts under the figure."),
     overwrite: bool = typer.Option(False, "--overwrite", help="Replace figure files that already exist."),
 ) -> None:
-    """Draw the network NASimEmu generates for SCENARIO at the given seed(s).
+    """Draw SCENARIO as simplified and verbose figures.
 
-    The realization is rebuilt with the real scenario generator (including
-    MARLA's zero-target regeneration), so the figure shows the exact network
-    an episode with that seed plays on. Default view: topology only; --verbose
-    adds every host's sampled OS, services, processes and target status.
+    Without a seed: the scenario definition, read from the YAML without
+    generating any network -- topology and host-count/target ranges, plus
+    (verbose) every generation probability. Files: <scenario>[_verbose].<fmt>.
+
+    With --seed: the exact network NASimEmu generates for that seed (rebuilt
+    with the real generator, including MARLA's zero-target regeneration) --
+    its hosts and targets, plus (verbose) every host's sampled attributes.
+    Files: <scenario>_seed_<seed>[_verbose].<fmt>.
     """
     from marla.environment.scenario_realization import ScenarioRealizationError, ScenarioRealizer, validate_scenario_seed
+    from marla.scenario.definition import ScenarioDefinitionError
     from marla.visualization.scenario_figures import (
-        ScenarioFigureError, ScenarioRequest, parse_formats, parse_seed_list, plot_requests,
+        ScenarioFigureError, ScenarioRequest, parse_formats, parse_seed_list, plot_definitions, plot_requests,
     )
 
     try:
-        views = _parse_view(view, verbose, "default")
+        views = _parse_mode(mode)
         fmt = parse_formats(formats)
         if scenario is None and run_dir is None:
             raise ValueError("give a SCENARIO or --run-dir")
         path = _resolve_cli_scenario_argument(scenario) if scenario is not None else _run_scenario(run_dir)
         requested = [validate_scenario_seed(s) for s in (seed or [])] + (parse_seed_list(seeds) if seeds else [])
-        if not requested:
-            raise ValueError("give at least one --seed or --seeds")
-        realizer = ScenarioRealizer(path)
-        request = ScenarioRequest(realizer.path)
-        for s in requested:
-            request.record(s).sources.add("cli")
         out = output_dir or ((run_dir / "plots" / "scenarios") if run_dir is not None else Path("plots") / "scenarios")
-        result = plot_requests({realizer.sha256: request}, out, views=views, formats=fmt, dpi=dpi, size=size,
-                               caption=caption, deduplicate=False, overwrite=overwrite)
-    except (ScenarioFigureError, ScenarioRealizationError, ValueError, FileNotFoundError) as exc:
+        if requested:
+            realizer = ScenarioRealizer(path)
+            request = ScenarioRequest(realizer.path)
+            for s in requested:
+                request.record(s).sources.add("cli")
+            result = plot_requests({realizer.sha256: request}, out, views=views, formats=fmt, dpi=dpi, size=size,
+                                   caption=caption, deduplicate=False, overwrite=overwrite)
+        else:
+            result = plot_definitions([path], out, views=views, formats=fmt, dpi=dpi, size=size, caption=caption,
+                                      overwrite=overwrite)
+    except (ScenarioFigureError, ScenarioRealizationError, ScenarioDefinitionError, ValueError, FileNotFoundError) as exc:
         typer.secho(str(exc), fg=typer.colors.RED, err=True)
         raise typer.Exit(code=1) from exc
-    _report_batch(result, out)
+    _report_batch(result, out, "realization" if requested else "scenario definition")
     if result.unreconstructed:
         raise typer.Exit(code=1)
 
@@ -371,9 +376,9 @@ def plot_batch(
     seeds: str = typer.Option(None, "--seeds", help="Additional seeds/ranges for SCENARIO, e.g. 3000000000-3000000199."),
     split: str = typer.Option(None, "--split", help="Only census/episode rows of this split (e.g. test)."),
     eval_only: bool = typer.Option(False, "--eval-only", help="Only episodes flagged is_eval."),
-    view: str = typer.Option("both", "--view", help="default, verbose or both."),
+    mode: str = typer.Option("both", "--mode", help=_MODE_HELP),
     output_dir: Path = typer.Option(Path("plots") / "scenarios", "--output-dir", "-o", help="Output directory."),
-    formats: str = typer.Option("pdf,svg,png", "--format", help=_FORMAT_HELP),
+    formats: str = typer.Option("all", "--format", help=_FORMAT_HELP),
     dpi: int = typer.Option(300, "--dpi", help="PNG resolution."),
     size: str = typer.Option("natural", "--size", help=_SIZE_HELP),
     caption: bool = typer.Option(False, "--caption/--no-caption", help="Print scenario, seed and counts under each figure."),
@@ -398,7 +403,7 @@ def plot_batch(
     )
 
     try:
-        views = _parse_view(view, False, "both")
+        views = _parse_mode(mode)
         fmt = parse_formats(formats)
         if not (from_census or from_episodes or seeds):
             raise ValueError("give at least one of --from-census, --from-episodes, --seeds")

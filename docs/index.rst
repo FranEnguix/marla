@@ -32,8 +32,8 @@ Where to start
 - Wondering what ``marla summarize`` plots mean? See :doc:`metrics`.
 - Wondering why ``marla run`` refused to start, or what
   ``marla scenario check``/``repair`` do? See :doc:`scenario_solvability`.
-- Need a figure of the exact network a seed generates? See
-  :doc:`scenario_visualization`.
+- Need a figure of a scenario's definition, or of the exact network a seed
+  generates? See :doc:`scenario_visualization`.
 - Want energy/CO2eq tracking or a hyperparameter study? See
   :doc:`configuration`'s ``carbon`` section and :doc:`cli`'s ``marla
   optimize``/``marla study`` commands.

@@ -1,7 +1,7 @@
 marla.visualization
 ===================
 
-Publication figures of seeded scenario realizations -- see
+Publication figures of scenario definitions and seeded realizations -- see
 :doc:`../scenario_visualization` for usage; this page is the generated API
 reference.
 

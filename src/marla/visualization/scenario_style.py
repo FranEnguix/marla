@@ -93,6 +93,9 @@ class ScenarioFigureStyle:
     legend_entry_gap: float = 0.18
     legend_glyph_w: float = 0.24
     legend_min_w: float = 2.6
+    table_col_gap: float = 0.10
+    table_gap: float = 0.14
+    table_max_w: float = 7.0  # tables sit side by side up to this width
 
 
 class TextMeasurer:

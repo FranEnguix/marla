@@ -1,10 +1,21 @@
-"""Seeded scenario figures on disk: naming, batches, verification, manifest.
+"""Scenario figures on disk: naming, batches, verification, manifest.
+
+Two kinds of figure, each in a simplified and a verbose version:
+
+* a scenario **definition**, read from the YAML without generating any
+  network (:mod:`marla.scenario.definition`): host-count and target ranges,
+  and in the verbose version every generation probability;
+* a seeded **realization**, the exact network NASimEmu generates for a seed
+  (:mod:`marla.environment.scenario_realization`): its hosts, and in the
+  verbose version their sampled attributes.
 
 All figures of one output directory (by default ``plots/scenarios/``) live
 directly in that directory -- no per-scenario or per-seed subdirectories:
 
-    <scenario>_seed_<effective seed>.{pdf,svg,png}          topology only
-    <scenario>_seed_<effective seed>_verbose.{pdf,svg,png}  with host details
+    <scenario>.{pdf,svg,png}                                definition, simplified
+    <scenario>_verbose.{pdf,svg,png}                        definition, verbose
+    <scenario>_seed_<effective seed>.{pdf,svg,png}          realization, simplified
+    <scenario>_seed_<effective seed>_verbose.{pdf,svg,png}  realization, verbose
     manifest.json
 
 ``<scenario>`` is the scenario file name without ``.yaml``/``.v2``
@@ -14,13 +25,13 @@ sha256>`` appended. ``<effective seed>`` is the seed that actually generated
 the network -- the requested seed, or its deterministic zero-target
 replacement (see :class:`~marla.environment.nasimemu_adapter.NasimEmuAdapter`).
 
-``manifest.json`` traces every figure back to its exact realization:
-scenario path and content hash, every requested seed that generates it (with
-its effective seed and regeneration attempt), counts, files, layout checks,
-how the realization was verified against recorded experiment data, and
-which figure is the scenario's ``paper_representative`` (see
-:func:`select_representatives`). It is merged, never truncated, when more
-figures are added to the same directory.
+``manifest.json`` traces every figure back to its source: scenario path and
+content hash, the figure kind and views, counts, files and layout checks;
+for realizations also every requested seed that generates it (with its
+effective seed and regeneration attempt), how it was verified against
+recorded experiment data, and which realization is the scenario's
+``paper_representative`` (see :func:`select_representatives`). It is merged,
+never truncated, when more figures are added to the same directory.
 """
 
 from __future__ import annotations
@@ -44,12 +55,13 @@ from marla.environment.scenario_realization import (
     scenario_display_name,
     validate_scenario_seed,
 )
+from marla.scenario.definition import ScenarioDefinition, load_scenario_definition
 from marla.visualization.scenario_layout import VIEWS, View, check_layout, edge_crossings
 from marla.visualization.scenario_plot import DEFAULT_DPI, FORMATS, build_figure, export_figure, resolve_width
 from marla.visualization.scenario_style import ScenarioFigureStyle
 
 MANIFEST_NAME = "manifest.json"
-MANIFEST_SCHEMA = "marla.scenario_figures/1"
+MANIFEST_SCHEMA = "marla.scenario_figures/2"
 
 SEED_SEMANTICS = {
     "requested_seed": "the scenario seed an episode was started with (NasimEmuAdapter.reset(seed=...)); for MARLA "
@@ -70,12 +82,20 @@ REPRESENTATIVE_CRITERION = (
     "realizations, never on any policy's outcome."
 )
 
-VIEW_DESCRIPTIONS = {
-    "default": "<scenario>_seed_<seed>.<format>: subnets, subnet links, firewall marks, hosts and which hosts are "
-               "sensitive targets; no host attributes.",
-    "verbose": "<scenario>_seed_<seed>_verbose.<format>: the same topology plus every host's sampled OS, services, "
-               "processes, value, the exploits/privilege escalations whose host-side preconditions hold, and the "
-               "subnet firewall rules.",
+FIGURE_TYPES = {
+    "definition": {
+        "simplified": "<scenario>.<format>: the scenario YAML (no network generated): subnets, subnet links, firewall "
+                      "marks, and each subnet's host-count and sensitive-target ranges.",
+        "verbose": "<scenario>_verbose.<format>: the same plus the generation probabilities (host counts, targets, "
+                   "OS, services and processes given the OS, sensitive services), the actions and the firewall rules.",
+    },
+    "realization": {
+        "simplified": "<scenario>_seed_<seed>.<format>: the network generated for that seed: subnets, subnet links, "
+                      "firewall marks, hosts and which hosts are sensitive targets; no host attributes.",
+        "verbose": "<scenario>_seed_<seed>_verbose.<format>: the same plus every host's sampled OS, services, "
+                   "processes, value, the exploits/privilege escalations whose host-side preconditions hold, and the "
+                   "subnet firewall rules.",
+    },
 }
 
 MANIFEST_GROUND_TRUTH_NOTE = (
@@ -93,11 +113,13 @@ def sanitize_name(name: str) -> str:
     return cleaned or "scenario"
 
 
-def figure_stem(file_name: str, effective_seed: int, view: View) -> str:
-    return f"{file_name}_seed_{effective_seed}" + ("_verbose" if view == "verbose" else "")
+def figure_stem(file_name: str, effective_seed: int | None, view: View) -> str:
+    """``None`` for a scenario definition (no ``_seed_``)."""
+    stem = file_name if effective_seed is None else f"{file_name}_seed_{effective_seed}"
+    return stem + ("_verbose" if view == "verbose" else "")
 
 
-def figure_files(file_name: str, effective_seed: int, views: Iterable[View], formats: Iterable[str]) -> dict[str, dict[str, str]]:
+def figure_files(file_name: str, effective_seed: int | None, views: Iterable[View], formats: Iterable[str]) -> dict[str, dict[str, str]]:
     return {view: {fmt: f"{figure_stem(file_name, effective_seed, view)}.{fmt}" for fmt in formats} for view in views}
 
 
@@ -123,6 +145,9 @@ def parse_seed_list(text: str) -> list[int]:
 
 
 def parse_formats(text: str) -> tuple[str, ...]:
+    """``"all"`` or a comma-separated subset of :data:`FORMATS`."""
+    if text.strip().lower() == "all":
+        return FORMATS
     formats = tuple(dict.fromkeys(f.strip().lower().lstrip(".") for f in text.split(",") if f.strip()))
     unknown = [f for f in formats if f not in FORMATS]
     if not formats or unknown:
@@ -329,15 +354,7 @@ def render_job(job: RenderJob) -> dict:
         rendered = build_figure(realization, view, size=job.size, caption=_caption(realization) if job.caption else (),
                                 style=style)
         stem = out / figure_stem(job.file_name, job.effective_seed, view)
-        written = export_figure(rendered, stem, job.formats, job.dpi)
-        views[view] = {
-            "files": {p.suffix[1:]: p.name for p in written},
-            "size_in": [round(rendered.width_in, 3), round(rendered.height_in, 3)],
-            "scale": round(rendered.scale, 4),
-            "min_font_pt": round(rendered.layout.min_font_pt * rendered.scale, 2),
-            "layout_issues": check_layout(rendered.layout),
-            "edge_crossings": edge_crossings(rendered.layout),
-        }
+        views[view] = _view_record(rendered, export_figure(rendered, stem, job.formats, job.dpi))
         rendered.figure.clear()
     return {"job": job, "views": views}
 
@@ -345,10 +362,23 @@ def render_job(job: RenderJob) -> dict:
 # -------------------------------------------------------------------- manifest
 
 
+def _migrate_v1(manifest: dict) -> dict:
+    """Schema 1 held only realizations, with the simplified view named "default"."""
+    for entry in manifest["figures"].values():
+        entry.setdefault("kind", "realization")
+        if "default" in entry.get("views", {}):
+            entry["views"] = {"simplified": entry["views"]["default"], **{
+                k: v for k, v in entry["views"].items() if k != "default"}}
+    manifest["schema"] = MANIFEST_SCHEMA
+    return manifest
+
+
 def load_manifest(output_dir: Path) -> dict:
     path = output_dir / MANIFEST_NAME
     if path.is_file():
         manifest = json.loads(path.read_text(encoding="utf-8"))
+        if manifest.get("schema") == "marla.scenario_figures/1":
+            manifest = _migrate_v1(manifest)
         if manifest.get("schema") != MANIFEST_SCHEMA:
             raise ScenarioFigureError(f"{path} is not a MARLA scenario-figure manifest (schema {manifest.get('schema')!r})")
         return manifest
@@ -368,6 +398,8 @@ def select_representatives(manifest: dict) -> dict:
     :data:`REPRESENTATIVE_CRITERION`) and returns the selection summary."""
     by_scenario: dict[str, list[dict]] = defaultdict(list)
     for entry in manifest["figures"].values():
+        if entry.get("kind") != "realization":
+            continue
         entry["paper_representative"] = False
         by_scenario[entry["scenario"]].append(entry)
     selected = {}
@@ -400,7 +432,7 @@ def write_manifest(output_dir: Path, manifest: dict) -> Path:
             "MARLA scenario figures: every figure in this directory is one seeded NASimEmu scenario realization, "
             "reconstructed with the real scenario generator (marla.environment.scenario_realization)."
         ),
-        "views": VIEW_DESCRIPTIONS,
+        "figure_types": FIGURE_TYPES,
         "seed_semantics": SEED_SEMANTICS,
         "ground_truth_note": MANIFEST_GROUND_TRUTH_NOTE,
         "generator": {
@@ -433,14 +465,111 @@ class BatchResult:
     layout_issue_figures: list[str] = field(default_factory=list)
 
 
-def _file_name_for(manifest: dict, realizer: ScenarioRealizer) -> str:
-    base = sanitize_name(realizer.name)
-    for name, info in manifest["scenarios"].items():
-        if info["sha256"] == realizer.sha256:
-            return name
+def _file_name_for(manifest: dict, sha256: str, name: str) -> str:
+    base = sanitize_name(name)
+    for known, info in manifest["scenarios"].items():
+        if info["sha256"] == sha256:
+            return known
     if base in manifest["scenarios"]:
-        return f"{base}_{realizer.sha256[:8]}"
+        return f"{base}_{sha256[:8]}"
     return base
+
+
+def _register_scenario(manifest: dict, file_name: str, name: str, sha256: str, fmt: str, path: str) -> None:
+    info = manifest["scenarios"].setdefault(file_name, {
+        "scenario_name": name, "sha256": sha256, "format": fmt, "source_paths": [],
+    })
+    info["source_paths"] = sorted(set(info["source_paths"]) | {path})
+
+
+def _refuse_overwrite(paths: list[Path]) -> None:
+    if paths:
+        shown = "\n  ".join(str(p) for p in paths[:10]) + ("\n  ..." if len(paths) > 10 else "")
+        raise ScenarioFigureError(
+            f"{len(paths)} figure file(s) already exist:\n  {shown}\n"
+            "Use --overwrite to replace them (plot-batch can also --skip-existing to keep them)."
+        )
+
+
+def _view_record(rendered, written: list[Path]) -> dict:
+    return {
+        "files": {p.suffix[1:]: p.name for p in written},
+        "size_in": [round(rendered.width_in, 3), round(rendered.height_in, 3)],
+        "scale": round(rendered.scale, 4),
+        "min_font_pt": round(rendered.layout.min_font_pt * rendered.scale, 2),
+        "layout_issues": check_layout(rendered.layout),
+        "edge_crossings": edge_crossings(rendered.layout),
+    }
+
+
+def _definition_caption(d: ScenarioDefinition) -> tuple[str, ...]:
+    hosts = d.host_count_range
+    host_text = "?" if hosts[0] is None else (f"{hosts[0]}" if hosts[0] == hosts[1] else f"{hosts[0]}–{hosts[1]}")
+    return (f"{d.name} · scenario definition · {len(d.subnets)} subnets, {host_text} hosts",)
+
+
+def plot_definitions(
+    paths: Iterable[Path],
+    output_dir: Path,
+    *,
+    views: tuple[View, ...] = VIEWS,
+    formats: tuple[str, ...] = FORMATS,
+    dpi: int = DEFAULT_DPI,
+    size: str | float | None = "natural",
+    caption: bool = False,
+    overwrite: bool = False,
+    skip_existing: bool = False,
+    progress: Callable[[str], None] | None = None,
+) -> BatchResult:
+    """Draws each scenario *definition* (no network is generated) and merges
+    ``manifest.json``: ``<scenario>.<fmt>`` and ``<scenario>_verbose.<fmt>``."""
+    resolve_width(size)
+    say = progress or (lambda _msg: None)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    manifest = load_manifest(output_dir)
+    result = BatchResult()
+    definitions = sorted({load_scenario_definition(p).path: load_scenario_definition(p) for p in paths}.values(),
+                         key=lambda d: (d.name, d.sha256))
+    planned = []
+    collisions: list[Path] = []
+    for d in definitions:
+        file_name = _file_name_for(manifest, d.sha256, d.name)
+        _register_scenario(manifest, file_name, d.name, d.sha256, d.format, d.path)
+        targets = [output_dir / name for files in figure_files(file_name, None, views, formats).values()
+                   for name in files.values()]
+        existing = [t for t in targets if t.exists()]
+        if existing and skip_existing and len(existing) == len(targets):
+            result.skipped_existing.append(file_name)
+            continue
+        if existing and not overwrite and not skip_existing:
+            collisions.extend(existing)
+        planned.append((d, file_name))
+    _refuse_overwrite(collisions)
+    style = ScenarioFigureStyle()
+    for d, file_name in planned:
+        entry = manifest["figures"].get(file_name) or {"id": file_name, "kind": "definition", "views": {}}
+        entry.update({
+            "kind": "definition", "scenario": file_name, "scenario_name": d.name, "scenario_path": d.path,
+            "scenario_sha256": d.sha256, "n_subnets": len(d.subnets),
+            "hosts_min": d.host_count_range[0], "hosts_max": d.host_count_range[1],
+            "targets_min": d.targets_min, "targets_max": d.targets_max, "p_zero_targets": d.p_zero_targets,
+            "subnets": d.to_dict()["subnets"], "warnings": list(d.warnings),
+        })
+        for view in views:
+            rendered = build_figure(d, view, size=size, caption=_definition_caption(d) if caption else (), style=style)
+            written = export_figure(rendered, output_dir / figure_stem(file_name, None, view), formats, dpi)
+            entry["views"][view] = _view_record(rendered, written)
+            result.files_written.update(p.suffix[1:] for p in written)
+            if entry["views"][view]["layout_issues"]:
+                result.layout_issue_figures.append(file_name)
+            rendered.figure.clear()
+        entry.update({"formats": sorted(set(entry.get("formats", [])) | set(formats), key=FORMATS.index),
+                      "dpi": dpi, "size": size if size is not None else "natural", "caption": caption})
+        manifest["figures"][file_name] = entry
+        result.rendered.append(file_name)
+        say(f"{file_name}: definition ({', '.join(views)})")
+    result.manifest_path = write_manifest(output_dir, manifest)
+    return result
 
 
 def plot_requests(
@@ -477,11 +606,8 @@ def plot_requests(
         realizer = ScenarioRealizer(request.path)
         if realizer.sha256 != sha:
             raise ScenarioFigureError(f"{request.path} changed while plotting")
-        file_name = _file_name_for(manifest, realizer)
-        info = manifest["scenarios"].setdefault(file_name, {
-            "scenario_name": realizer.name, "sha256": realizer.sha256, "format": realizer.format, "source_paths": [],
-        })
-        info["source_paths"] = sorted(set(info["source_paths"]) | {str(realizer.path)})
+        file_name = _file_name_for(manifest, realizer.sha256, realizer.name)
+        _register_scenario(manifest, file_name, realizer.name, realizer.sha256, realizer.format, str(realizer.path))
         say(f"{file_name}: reconstructing {len(request.seeds)} seed(s)")
         groups: dict[str, list[tuple[ScenarioRealization, SeedRecord, dict]]] = defaultdict(list)
         for seed in sorted(request.seeds):
@@ -498,15 +624,16 @@ def plot_requests(
             key = realization.realization_fingerprint if deduplicate else f"{realization.realization_seed}"
             groups[key].append((realization, rec, verification))
 
-        existing = {e["realization_fingerprint"]: e for e in manifest["figures"].values() if e["scenario"] == file_name}
+        existing = {e["realization_fingerprint"]: e for e in manifest["figures"].values()
+                    if e["scenario"] == file_name and e.get("kind") == "realization"}
         for members in groups.values():
             members.sort(key=lambda m: (m[0].realization_seed, m[0].requested_seed))
             canonical = members[0][0]
             prior = existing.get(canonical.realization_fingerprint) if deduplicate else None
             effective = prior["effective_seed"] if prior else canonical.realization_seed
-            fig_id = figure_stem(file_name, effective, "default")
+            fig_id = figure_stem(file_name, effective, "simplified")
             entry = manifest["figures"].get(fig_id) or {
-                "id": fig_id, "scenario": file_name, "scenario_name": realizer.name,
+                "id": fig_id, "kind": "realization", "scenario": file_name, "scenario_name": realizer.name,
                 "scenario_path": str(realizer.path), "scenario_sha256": realizer.sha256,
                 "effective_seed": effective, "seeds": [], "views": {}, "warnings": [],
             }
@@ -557,7 +684,7 @@ def plot_requests(
 
     # 2. overwrite policy, before anything is written
     to_render: list[tuple[dict, RenderJob]] = []
-    collisions: list[str] = []
+    collisions: list[Path] = []
     for entry, job in planned:
         targets = [output_dir / name for files in figure_files(job.file_name, job.effective_seed, views, formats).values()
                    for name in files.values()]
@@ -566,14 +693,9 @@ def plot_requests(
             result.skipped_existing.append(entry["id"])
             continue
         if existing_files and not overwrite and not skip_existing:
-            collisions.extend(str(t) for t in existing_files)
+            collisions.extend(existing_files)
         to_render.append((entry, job))
-    if collisions:
-        shown = "\n  ".join(collisions[:10]) + ("\n  ..." if len(collisions) > 10 else "")
-        raise ScenarioFigureError(
-            f"{len(collisions)} figure file(s) already exist:\n  {shown}\n"
-            "Use --overwrite to replace them (plot-batch can also --skip-existing to keep them)."
-        )
+    _refuse_overwrite(collisions)
 
     # 3. render (optionally in parallel; every job is independent and deterministic)
     entries = {job: entry for entry, job in to_render}

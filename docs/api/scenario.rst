@@ -18,3 +18,6 @@ for the conceptual overview; this page is the generated API reference.
 
 .. automodule:: marla.scenario.preflight
    :members:
+
+.. automodule:: marla.scenario.definition
+   :members:

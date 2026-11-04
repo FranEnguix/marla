@@ -180,24 +180,26 @@ not verified.
 
 .. code-block:: text
 
-   marla scenario plot [SCENARIO] (--seed N ... | --seeds LIST) [--verbose | --view default|verbose|both]
-                       [--run-dir RUN] [--output-dir DIR] [--format pdf,svg,png] [--dpi 300]
+   marla scenario plot [SCENARIO] [--seed N ... | --seeds LIST] [--mode both|simplified|verbose]
+                       [--format all|pdf,svg,png] [--dpi 300] [--output-dir DIR] [--run-dir RUN]
                        [--size natural|single|double|INCHES] [--caption] [--overwrite]
    marla scenario plot-batch [SCENARIO] [--from-episodes PATH ...] [--eval-only] [--split NAME]
-                             [--from-census CSV] [--seeds LIST] [--view both] [--output-dir DIR]
-                             [--format ...] [--dpi ...] [--size ...] [--caption] [--no-dedupe]
+                             [--from-census CSV] [--seeds LIST] [--mode both] [--output-dir DIR]
+                             [--format all] [--dpi ...] [--size ...] [--caption] [--no-dedupe]
                              [--overwrite | --skip-existing] [--jobs N]
 
-Draws the network NASimEmu generates for ``SCENARIO`` at each seed --
-rebuilt with the real generator, including MARLA's zero-target
-regeneration -- as PDF/SVG/PNG figures: topology only by default, every
-host's sampled attributes with ``--verbose``. ``plot-batch`` takes its
-seeds from recorded episodes and/or a scenario census, verifies each
-reconstruction against them, renders identical realizations once, and
-merges everything into ``manifest.json``. Default output:
-``plots/scenarios/`` (``RUN/plots/scenarios/`` with ``--run-dir``). See
-:doc:`scenario_visualization` for the figures, naming, manifest and seed
-semantics.
+Without a seed, ``plot`` draws the scenario **definition** read from the
+YAML (no network is generated): ``<scenario>.<fmt>`` with the topology and
+each subnet's host-count and target ranges, and ``<scenario>_verbose.<fmt>``
+adding every generation probability. With ``--seed``, it draws the exact
+network generated for that seed (``<scenario>_seed_<seed>[_verbose].<fmt>``):
+its hosts and targets, and in the verbose figure every host's sampled
+attributes. Both figures are produced unless ``--mode`` selects one.
+``plot-batch`` draws the realizations an experiment used, from recorded
+episodes and/or a scenario census, verified against them and deduplicated.
+Everything goes to one flat ``plots/scenarios/`` directory
+(``RUN/plots/scenarios/`` with ``--run-dir``) with a single
+``manifest.json``. See :doc:`scenario_visualization`.
 
 ``marla validate``
 --------------------
@@ -223,8 +225,8 @@ statistics from ``summary.json`` and writes plots to
 ``RUN_DIRECTORY/plots/`` -- see :doc:`metrics` for what's read and what
 each plot shows. Safe to re-run at any time; it only reads existing
 artifacts and (re)writes the ``plots/`` directory. ``--scenarios`` (off by
-default) also draws the scenario realization of every evaluation episode
-seed into ``RUN_DIRECTORY/plots/scenarios/`` (see
+default) also draws the run's scenario definition and the realization of
+every evaluation episode seed into ``RUN_DIRECTORY/plots/scenarios/`` (see
 :doc:`scenario_visualization`), skipping figures that already exist.
 
 ``marla compare``

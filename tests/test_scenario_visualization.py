@@ -164,7 +164,8 @@ def test_ground_truth_reader_is_never_imported_by_policy_code():
     src = REPO / "src" / "marla"
     allowed = {src / "environment" / "scenario_realization.py", src / "cli.py", src / "scenario_cli.py"}
     allowed |= set((src / "visualization").glob("*.py"))
-    importers = {p for p in src.rglob("*.py") if "scenario_realization" in p.read_text(encoding="utf-8")}
+    pattern = re.compile(r"^\s*(from|import)\s+marla\.environment\.scenario_realization\b", re.MULTILINE)
+    importers = {p for p in src.rglob("*.py") if pattern.search(p.read_text(encoding="utf-8"))}
     assert importers and importers <= allowed, sorted(str(p) for p in importers - allowed)
 
 
@@ -174,7 +175,7 @@ def test_ground_truth_reader_is_never_imported_by_policy_code():
 @pytest.mark.parametrize("path", STUDY_SCENARIOS, ids=lambda p: p.name)
 def test_default_view_shows_topology_and_targets_only(path):
     r = realize_scenario(path, 3_000_000_001)
-    layout = compute_layout(r, "default")
+    layout = compute_layout(r, "simplified")
     subnets = [b for b in layout.boxes if b.kind == "subnet"]
     assert sorted(b.subnet_id for b in subnets) == sorted(s.subnet_id for s in r.subnets)
     assert [b for b in layout.boxes if b.kind == "internet"]
@@ -194,7 +195,7 @@ def test_default_layout_keeps_yaml_subnets_in_place_across_seeds():
     centers = {}
     for seed in range(12):
         r = realizer.realize(seed)
-        layout = compute_layout(r, "default")
+        layout = compute_layout(r, "simplified")
         boxes = {b.subnet_id: b.rect for b in layout.boxes if b.kind == "subnet"}
         for s in r.subnets:
             centers.setdefault(s.source_index, set()).add((round(boxes[s.subnet_id].cx, 6), round(boxes[s.subnet_id].y1, 6)))
@@ -280,7 +281,7 @@ def test_layouts_have_no_overlaps_clipping_or_edges_through_boxes(path):
     realizer = ScenarioRealizer(path)
     for seed in (0, 1, 2):
         r = realizer.realize(seed)
-        for view in ("default", "verbose"):
+        for view in ("simplified", "verbose"):
             layout = compute_layout(r, view)
             assert check_layout(layout) == []
             assert layout.min_font_pt >= 5.0
@@ -318,7 +319,7 @@ def test_exports_are_vector_nonempty_and_byte_reproducible(tmp_path):
 
 
 def test_paper_widths_scale_down_but_refuse_unreadable_text():
-    small = build_figure(realize_scenario(SCENARIO_C, 1), "default", size="single")
+    small = build_figure(realize_scenario(SCENARIO_C, 1), "simplified", size="single")
     assert small.width_in == pytest.approx(3.33)
     assert small.scale == 1.0  # never scaled up
     with pytest.raises(FigureTooSmallError):
@@ -369,7 +370,7 @@ def test_identical_realizations_are_rendered_once(tmp_path):
             break
         seen[fp] = seed
     assert pair, "scenario B2 has identical realizations among its test seeds"
-    result = plot_requests(_request(SCENARIO_B2, pair), tmp_path, views=("default",), formats=("png",), dpi=72)
+    result = plot_requests(_request(SCENARIO_B2, pair), tmp_path, views=("simplified",), formats=("png",), dpi=72)
     assert len(result.rendered) == 1 and result.aliases == 1
     manifest = json.loads((tmp_path / "manifest.json").read_text())
     (entry,) = manifest["figures"].values()
@@ -377,13 +378,13 @@ def test_identical_realizations_are_rendered_once(tmp_path):
 
 
 def test_existing_files_are_never_silently_overwritten(tmp_path):
-    plot_requests(_request(SCENARIO_C, [3]), tmp_path, views=("default",), formats=("png",), dpi=72)
+    plot_requests(_request(SCENARIO_C, [3]), tmp_path, views=("simplified",), formats=("png",), dpi=72)
     with pytest.raises(ScenarioFigureError, match="already exist"):
-        plot_requests(_request(SCENARIO_C, [3]), tmp_path, views=("default",), formats=("png",), dpi=72)
-    skipped = plot_requests(_request(SCENARIO_C, [3]), tmp_path, views=("default",), formats=("png",), dpi=72,
+        plot_requests(_request(SCENARIO_C, [3]), tmp_path, views=("simplified",), formats=("png",), dpi=72)
+    skipped = plot_requests(_request(SCENARIO_C, [3]), tmp_path, views=("simplified",), formats=("png",), dpi=72,
                             skip_existing=True)
     assert skipped.skipped_existing and not skipped.rendered
-    redone = plot_requests(_request(SCENARIO_C, [3]), tmp_path, views=("default",), formats=("png",), dpi=72,
+    redone = plot_requests(_request(SCENARIO_C, [3]), tmp_path, views=("simplified",), formats=("png",), dpi=72,
                            overwrite=True)
     assert redone.rendered
 
@@ -393,8 +394,8 @@ def test_same_name_different_scenario_gets_a_hash_suffix(tmp_path):
     other.parent.mkdir()
     other.write_text(SCENARIO_C.read_text().replace("prob: 0.8", "prob: 0.7"))
     out = tmp_path / "out"
-    plot_requests(_request(SCENARIO_C, [1]), out, views=("default",), formats=("png",), dpi=72)
-    plot_requests(_request(other, [1]), out, views=("default",), formats=("png",), dpi=72)
+    plot_requests(_request(SCENARIO_C, [1]), out, views=("simplified",), formats=("png",), dpi=72)
+    plot_requests(_request(other, [1]), out, views=("simplified",), formats=("png",), dpi=72)
     manifest = json.loads((out / "manifest.json").read_text())
     names = sorted(manifest["scenarios"])
     sha = ScenarioRealizer(other).sha256
@@ -465,7 +466,7 @@ def test_episode_batch_deduplicates_across_conditions_and_checks_target_counts(t
     source = _episodes(tmp_path, rows)
     out = tmp_path / "out"
     result = runner.invoke(app, ["scenario", "plot-batch", "--from-episodes", str(source), "--eval-only",
-                                 "--output-dir", str(out), "--view", "default", "--format", "png", "--dpi", "72"])
+                                 "--output-dir", str(out), "--mode", "simplified", "--format", "png", "--dpi", "72"])
     assert result.exit_code == 1, result.output  # seed 22's recorded target count does not match
     manifest = json.loads((out / "manifest.json").read_text())
     assert sorted(e["effective_seed"] for e in manifest["figures"].values()) == [20, 21]
@@ -490,20 +491,20 @@ def test_episode_batch_refuses_a_scenario_changed_since_the_run(tmp_path):
 # --------------------------------------------------------------------- CLI
 
 
-def test_cli_plot_seed_view_format_and_output_dir(tmp_path):
+def test_cli_plot_seed_mode_format_and_output_dir(tmp_path):
     out = tmp_path / "figs"
     result = runner.invoke(app, ["scenario", "plot", str(SCENARIO_A), "--seed", "11", "--output-dir", str(out),
                                  "--dpi", "72"])
     assert result.exit_code == 0, result.output
     assert sorted(p.name for p in out.iterdir()) == sorted(
-        [f"sm_entry_dmz_one_target_seed_11.{f}" for f in ("pdf", "svg", "png")] + ["manifest.json"])
-    result = runner.invoke(app, ["scenario", "plot", str(SCENARIO_A), "--seeds", "11-12", "--verbose",
-                                 "--output-dir", str(out), "--format", "png", "--dpi", "72"])
+        [f"sm_entry_dmz_one_target_seed_11{v}.{f}" for v in ("", "_verbose") for f in ("pdf", "svg", "png")]
+        + ["manifest.json"])  # both figures by default
+    result = runner.invoke(app, ["scenario", "plot", str(SCENARIO_A), "--seeds", "11-12", "--mode", "verbose",
+                                 "--output-dir", str(out), "--format", "png", "--dpi", "72", "--overwrite"])
     assert result.exit_code == 0, result.output
-    assert (out / "sm_entry_dmz_one_target_seed_11_verbose.png").is_file()
     assert (out / "sm_entry_dmz_one_target_seed_12_verbose.png").is_file()
-    assert not (out / "sm_entry_dmz_one_target_seed_12.png").exists()  # --verbose renders only the verbose view
-    assert not (out / "sm_entry_dmz_one_target_seed_11_verbose.pdf").exists()
+    assert not (out / "sm_entry_dmz_one_target_seed_12.png").exists()  # --mode verbose: only the verbose figure
+    assert not (out / "sm_entry_dmz_one_target_seed_12_verbose.pdf").exists()
 
 
 def test_cli_plot_refuses_to_overwrite_without_flag(tmp_path):
@@ -519,9 +520,10 @@ def test_cli_plot_refuses_to_overwrite_without_flag(tmp_path):
     (["does/not/exist.v2.yaml", "--seed", "1"], "not found"),
     ([str(SCENARIO_C), "--seed", "-3"], "seed"),
     ([str(SCENARIO_C), "--seeds", "abc"], "seed"),
-    ([str(SCENARIO_C)], "--seed"),
     ([str(SCENARIO_C), "--seed", "1", "--format", "jpg"], "format"),
-    ([str(SCENARIO_C), "--seed", "1", "--view", "fancy"], "--view"),
+    ([str(SCENARIO_C), "--seed", "1", "--mode", "fancy"], "--mode"),
+    ([str(REPO / "examples" / "baseline.yaml")], "not a NASimEmu scenario"),
+    ([str(REPO / "pyproject.toml")], "not valid YAML"),
 ])
 def test_cli_plot_reports_helpful_errors(tmp_path, args, message):
     result = runner.invoke(app, ["scenario", "plot", *args, "--output-dir", str(tmp_path)])
@@ -560,6 +562,7 @@ def test_summarize_renders_scenarios_only_when_asked(tmp_path, monkeypatch):
     assert result.exit_code == 0, result.output
     names = sorted(p.name for p in (run / "plots" / "scenarios").iterdir())
     assert "evidence_c_multi_target_seed_5.pdf" in names and "evidence_c_multi_target_seed_5_verbose.png" in names
+    assert "evidence_c_multi_target.pdf" in names and "evidence_c_multi_target_verbose.svg" in names
     assert not [n for n in names if "seed_6" in n]
 
 

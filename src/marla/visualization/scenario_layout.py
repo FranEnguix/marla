@@ -4,6 +4,11 @@ The layout is computed entirely here -- every box, glyph, edge and text
 item with its measured extent -- so the renderer only draws, and tests can
 check the geometry (no overlaps, nothing outside the canvas) directly.
 
+One topology engine serves both figure kinds; only what goes inside the
+subnet boxes (and the legend, notes and tables explaining it) differs:
+a seeded realization's hosts (:class:`_RealizationContent`) or a scenario
+definition's host-count ranges and probabilities (:class:`_DefinitionContent`).
+
 **Hierarchical placement.** The internet is the root; every subnet sits on
 the layer given by its breadth-first distance from the internet in the
 scenario topology, so an attacker's path into the network reads top to
@@ -32,10 +37,11 @@ from dataclasses import dataclass, field, replace
 from typing import Literal
 
 from marla.environment.scenario_realization import RealizedHost, ScenarioRealization, SubnetConnection
+from marla.scenario.definition import SENSITIVE_SERVICE_ON_NON_TARGET, ScenarioDefinition, SubnetDefinition
 from marla.visualization.scenario_style import ScenarioFigureStyle, TextMeasurer
 
-View = Literal["default", "verbose"]
-VIEWS: tuple[View, ...] = ("default", "verbose")
+View = Literal["simplified", "verbose"]
+VIEWS: tuple[View, ...] = ("simplified", "verbose")
 
 NO_PROCESSES = "n/a"
 NO_PROCESSES_NOTE = "Processes n/a: the scenario defines no processes."
@@ -383,13 +389,14 @@ def _ordered_least_squares(desired: list[float], offsets: list[float]) -> list[f
 
 
 def compute_layout(
-    realization: ScenarioRealization,
+    model: ScenarioRealization | ScenarioDefinition,
     view: View,
     style: ScenarioFigureStyle | None = None,
     measurer: TextMeasurer | None = None,
     caption: tuple[str, ...] = (),
 ) -> DiagramLayout:
-    """The complete, deterministic geometry of one figure (see module docstring)."""
+    """The complete, deterministic geometry of one figure (see module
+    docstring) of a seeded realization or of a scenario definition."""
     if view not in VIEWS:
         raise ValueError(f"unknown view {view!r}; expected one of {VIEWS}")
     style = style or ScenarioFigureStyle()
@@ -397,10 +404,13 @@ def compute_layout(
     layout = DiagramLayout(view=view)
     b = _Builder(layout, style, m)
     verbose = view == "verbose"
+    if isinstance(model, ScenarioDefinition):
+        content: _Content = _DefinitionContent(model, verbose, style, m)
+    else:
+        content = _RealizationContent(model, verbose, style, m)
 
-    layers, adjacency = _layers(realization)
-    subnet_by_source = {s.source_index: s for s in realization.subnets}
-    hosts_by_subnet = {s.subnet_id: realization.hosts_in(s.subnet_id) for s in realization.subnets}
+    layers, adjacency = _layers(model)
+    subnet_by_source = {s.source_index: s for s in model.subnets}
 
     # -- node sizes
     title_asc, title_desc = m.line_metrics(style.subnet_title_pt, "bold")
@@ -410,49 +420,17 @@ def compute_layout(
         s = subnet_by_source[source]
         return f"Subnet {s.subnet_id} · {s.label}" if s.label else f"Subnet {s.subnet_id}"
 
-    cards: dict[tuple[int, int], CardContent] = {}
-    cm: _CardMetrics | None = None
-    default_cell_h = 0.0
-    if verbose:
-        cards = {c.address: c for c in card_contents(realization)}
-        cm = _card_metrics(list(cards.values()), style, m) if cards else None
-        cell_w = cm.w if cm else style.host_cell_min_w
-        cell_gap_x = cell_gap_y = style.card_gap
-        column_cap = style.verbose_columns
-    else:
-        label_size = style.host_label_pt
-        label_w = max([m.measure(f"({h.address[0]},{h.address[1]})", label_size)[0] for h in realization.hosts] or [0.0])
-        la, ld = m.line_metrics(label_size)
-        cell_w = max(style.host_cell_min_w, label_w + 0.1)
-        default_cell_h = style.target_size + style.host_label_gap + la + ld
-        cell_gap_x, cell_gap_y = 0.0, style.host_row_gap
-        column_cap = style.default_columns
-
-    def grid_w(columns: int) -> float:
-        return columns * cell_w + max(columns - 1, 0) * cell_gap_x
-
-    def cell_height(subnet_id: int) -> float:
-        hosts = hosts_by_subnet[subnet_id]
-        if not hosts:
-            return 0.0
-        return cm.height([h.address for h in hosts]) if verbose else default_cell_h
-
     def make_node(source: int, cap: int) -> _Node:
-        s = subnet_by_source[source]
-        n_hosts = len(hosts_by_subnet[s.subnet_id])
-        cell_h = cell_height(s.subnet_id)
         title_w = m.measure(subnet_title(source), style.subnet_title_pt, "bold")[0]
-        cols = max(1, min(n_hosts, cap))
-        slot_cols = max(1, min(max(s.size_bounds[1], n_hosts), cap))
-        rows = math.ceil(n_hosts / cols) if n_hosts else 0
-        w = max(title_w, grid_w(cols)) + 2 * style.box_pad
-        slot_w = max(title_w, grid_w(slot_cols)) + 2 * style.box_pad
-        h = 2 * style.box_pad + title_h + (style.title_gap + rows * cell_h + max(rows - 1, 0) * cell_gap_y if rows else 0)
-        return _Node(source, s.subnet_id, w, h, max(w, slot_w), cols)
+        inner_w, inner_h, slot_inner_w, cols = content.node(source, cap)
+        w = max(title_w, inner_w) + 2 * style.box_pad
+        slot_w = max(title_w, slot_inner_w) + 2 * style.box_pad
+        h = 2 * style.box_pad + title_h + (style.title_gap + inner_h if inner_h else 0.0)
+        return _Node(source, subnet_by_source[source].subnet_id, w, h, max(w, slot_w), cols)
 
     nodes: dict[int, _Node] = {}
     for layer in layers[1:]:
-        cap = column_cap
+        cap = content.column_cap
         while True:
             for source in layer:
                 nodes[source] = make_node(source, cap)
@@ -468,13 +446,13 @@ def compute_layout(
                      m.measure(internet_lines[1], style.internet_sub_pt)[0]) + 2 * style.box_pad
     internet_h = 2 * 0.055 + ia + idsc + 0.01 + sa + sd
 
-    source_of = {realized: source for source, realized in enumerate(realization.subnet_permutation)}
+    source_of = {realized: source for source, realized in enumerate(model.subnet_permutation)}
     layer_of = {source: k for k, layer in enumerate(layers) for source in layer}
 
     # -- vertical positions
     gaps = [style.layer_gap] * (len(layers) - 1)
     # Extra room under a layer for edges between non-adjacent subnets of that layer.
-    same_layer = [c for c in realization.connections if layer_of[source_of[c.a]] == layer_of[source_of[c.b]]]
+    same_layer = [c for c in model.connections if layer_of[source_of[c.a]] == layer_of[source_of[c.b]]]
     routed: dict[int, list[SubnetConnection]] = {}
     for c in same_layer:
         layer = layers[layer_of[source_of[c.a]]]
@@ -507,7 +485,7 @@ def compute_layout(
             gap = style.node_gap
             for c in same_layer:
                 if {source_of[c.a], source_of[c.b]} == {left, right} and c.restricted:
-                    gap = max(gap, _firewall_w(b, len(realization.connections), verbose) + 0.14)
+                    gap = max(gap, _firewall_w(b, len(model.connections), verbose) + 0.14)
             between.append(gap)
         # Offsets of each slot center from the first one when packed tightly.
         offsets = [0.0]
@@ -526,39 +504,367 @@ def compute_layout(
             rect_of[source] = node.rect
             layout.subnet_slots[source] = (k, idx)
 
-    # -- subnet boxes, titles and hosts
+    # -- subnet boxes, titles and contents
     for source, node in sorted(nodes.items()):
         r = node.rect
         layout.boxes.append(PlacedBox("subnet", r, subnet_id=node.subnet_id))
         b.text(r.x0 + style.box_pad, r.y1 - style.box_pad - title_asc, subnet_title(source), style.subnet_title_pt,
                weight="bold", role="subnet_title")
-        hosts = hosts_by_subnet[node.subnet_id]
-        cell_h = cell_height(node.subnet_id)
-        grid_top = r.y1 - style.box_pad - title_h - style.title_gap
-        for row_start in range(0, len(hosts), node.columns):
-            row = hosts[row_start:row_start + node.columns]
-            row_index = row_start // node.columns
-            x0 = r.cx - grid_w(len(row)) / 2
-            y_top = grid_top - row_index * (cell_h + cell_gap_y)
-            for col, host in enumerate(row):
-                cell = Rect(x0 + col * (cell_w + cell_gap_x), y_top - cell_h, x0 + col * (cell_w + cell_gap_x) + cell_w, y_top)
-                if verbose:
-                    _place_card(b, cards[host.address], cell, cm, style)
-                else:
-                    _place_host_glyph(b, host, cell, style)
+        content.place(b, source, node, r.y1 - style.box_pad - title_h - style.title_gap)
 
     # -- edges between subnets
-    firewalls = _place_edges(b, realization, layers, layer_of, source_of, rect_of, routed, verbose)
+    firewalls = _place_edges(b, model, layers, layer_of, source_of, rect_of, routed, verbose)
 
-    # -- legend, firewall rules and notes below the diagram
+    # -- legend, firewall rules, tables and notes below the diagram
     diagram = layout.bounds()
-    _place_legend(b, realization, diagram, verbose, caption, firewalls)
+    _place_legend(b, model, diagram, verbose, caption, firewalls, content)
 
     bounds = layout.bounds()
     layout.shifted(style.margin - bounds.x0, style.margin - bounds.y0)
     layout.width = bounds.w + 2 * style.margin
     layout.height = bounds.h + 2 * style.margin
     return layout
+
+
+class _Content:
+    """What goes inside the subnet boxes, and the legend/notes/tables that
+    explain it; the topology around it is shared by every figure type."""
+
+    column_cap: int = 1
+
+    def node(self, source: int, cap: int) -> tuple[float, float, float, int]:
+        """(content width, content height, width of the subnet's largest
+        possible content, columns) for subnet ``source``."""
+        raise NotImplementedError
+
+    def place(self, b: _Builder, source: int, node: _Node, top: float) -> None:
+        raise NotImplementedError
+
+    def legend_entries(self) -> list[tuple[str, str]]:
+        raise NotImplementedError
+
+    def notes(self) -> list[str]:
+        return []
+
+    def tables(self) -> list[_Table]:
+        return []
+
+
+class _RealizationContent(_Content):
+    """Hosts of a seeded realization: glyphs (simplified) or cards (verbose)."""
+
+    def __init__(self, r: ScenarioRealization, verbose: bool, style: ScenarioFigureStyle, m: TextMeasurer) -> None:
+        self.r, self.verbose, self.style, self.m = r, verbose, style, m
+        self.hosts = {s.source_index: r.hosts_in(s.subnet_id) for s in r.subnets}
+        self.bounds = {s.source_index: s.size_bounds for s in r.subnets}
+        self.cards: dict[tuple[int, int], CardContent] = {}
+        self.cm: _CardMetrics | None = None
+        if verbose:
+            self.cards = {c.address: c for c in card_contents(r)}
+            self.cm = _card_metrics(list(self.cards.values()), style, m) if self.cards else None
+            self.cell_w = self.cm.w if self.cm else style.host_cell_min_w
+            self.gap_x = self.gap_y = style.card_gap
+            self.column_cap = style.verbose_columns
+        else:
+            label_w = max([m.measure(f"({h.address[0]},{h.address[1]})", style.host_label_pt)[0] for h in r.hosts] or [0.0])
+            la, ld = m.line_metrics(style.host_label_pt)
+            self.cell_w = max(style.host_cell_min_w, label_w + 0.1)
+            self.glyph_cell_h = style.target_size + style.host_label_gap + la + ld
+            self.gap_x, self.gap_y = 0.0, style.host_row_gap
+            self.column_cap = style.default_columns
+
+    def _grid_w(self, columns: int) -> float:
+        return columns * self.cell_w + max(columns - 1, 0) * self.gap_x
+
+    def _cell_h(self, source: int) -> float:
+        hosts = self.hosts[source]
+        if not hosts:
+            return 0.0
+        return self.cm.height([h.address for h in hosts]) if self.verbose else self.glyph_cell_h
+
+    def node(self, source, cap):
+        n_hosts = len(self.hosts[source])
+        cols = max(1, min(n_hosts, cap))
+        slot_cols = max(1, min(max(self.bounds[source][1], n_hosts), cap))
+        rows = math.ceil(n_hosts / cols) if n_hosts else 0
+        h = rows * self._cell_h(source) + max(rows - 1, 0) * self.gap_y
+        return self._grid_w(cols) if n_hosts else 0.0, h, self._grid_w(slot_cols), cols
+
+    def place(self, b, source, node, top):
+        hosts = self.hosts[source]
+        cell_h = self._cell_h(source)
+        r = node.rect
+        for row_start in range(0, len(hosts), node.columns):
+            row = hosts[row_start:row_start + node.columns]
+            x0 = r.cx - self._grid_w(len(row)) / 2
+            y_top = top - (row_start // node.columns) * (cell_h + self.gap_y)
+            for col, host in enumerate(row):
+                cx0 = x0 + col * (self.cell_w + self.gap_x)
+                cell = Rect(cx0, y_top - cell_h, cx0 + self.cell_w, y_top)
+                if self.verbose:
+                    _place_card(b, self.cards[host.address], cell, self.cm, self.style)
+                else:
+                    _place_host_glyph(b, host, cell, self.style)
+
+    def legend_entries(self):
+        return [("host", "Host"), ("target", "Sensitive target")]
+
+    def notes(self):
+        if not self.verbose:
+            return []
+        return [GROUND_TRUTH_NOTE] + ([] if self.r.defines_processes else [NO_PROCESSES_NOTE])
+
+
+def _pct(p: float) -> str:
+    """Probabilities as percentages, exact when they are round."""
+    value = 100 * p
+    if abs(value - round(value)) < 1e-9:
+        return f"{round(value)}%"
+    return f"{value:.1f}%"
+
+
+def _counted(bounds: tuple[int | None, int | None], noun: str) -> str:
+    text = _count_range(*bounds)
+    return f"{text} {noun}" + ("" if text == "1" else "s")
+
+
+def _count_range(lo: int | None, hi: int | None) -> str:
+    if lo is None or hi is None:
+        return "unspecified"
+    return f"{lo}" if lo == hi else f"{lo}–{hi}"
+
+
+class _DefinitionContent(_Content):
+    """A scenario definition: host-count and target ranges (simplified), plus
+    every generation probability (verbose)."""
+
+    def __init__(self, d: ScenarioDefinition, verbose: bool, style: ScenarioFigureStyle, m: TextMeasurer) -> None:
+        self.d, self.verbose, self.style, self.m = d, verbose, style, m
+        self.subnets = {s.source_index: s for s in d.subnets}
+        self.rows = {idx: self._rows(s) for idx, s in self.subnets.items()}
+        size = style.card_pt if verbose else style.host_label_pt
+        self.size = size
+        ascent, descent = m.line_metrics(size)
+        self.line_h = size / 72.0 * style.card_line_factor
+        self.ascent = ascent
+        self.marker = style.target_size * 0.75
+        self.indent = self.marker + 0.05
+        if verbose:
+            self.label_w = max((m.measure(label, size)[0] for rows in self.rows.values() for label, _ in rows), default=0.0)
+        self.wrapped = {idx: [(label, [piece for v in values for piece in _wrap_tokens(v, style.card_max_value_w, size, m)])
+                              for label, values in rows] for idx, rows in self.rows.items()}
+
+    def _target_values(self, s: SubnetDefinition) -> list[str]:
+        if self.d.format == "v1":
+            return [f"({a},{h}), value {v:g}" for (a, h), v in s.explicit_targets] or ["none"]
+        p = s.target_probability
+        if p is None:
+            return ["unspecified"]
+        if p <= 0.0:
+            return ["none (0% per host)"] if self.verbose else ["none"]
+        count = _count_range(s.targets_min, s.targets_max)
+        if not self.verbose:
+            return [count]
+        if p >= 1.0:
+            return ["every host (100%)", f"→ {count} per network"]
+        return [f"each host {_pct(p)}, independently", f"→ {count} per network"]
+
+    def _rows(self, s: SubnetDefinition) -> list[tuple[str, list[str]]]:
+        hosts = _count_range(s.size_min, s.size_max)
+        if not self.verbose:
+            targets = self._target_values(s)[0]
+            return [("Hosts", [hosts]), ("Targets", [targets])]
+        host_values = [hosts]
+        if s.size_min is not None and s.size_max is not None and s.size_max > s.size_min:
+            host_values.append(f"uniform, {_pct(1 / (s.size_max - s.size_min + 1))} each")
+        if s.size_note:
+            host_values.append(s.size_note)
+        rows = [("Hosts", host_values), ("Targets", self._target_values(s))]
+        for service, presence in s.sensitive_service_presence:
+            rows.append(("Sensitive svc", [f"{service}: {_pct(presence)} of hosts"]))
+        for host in s.static_hosts:
+            values = [host.os or "OS unspecified", "services: " + (", ".join(host.services) or "none")]
+            if self.d.defines_processes:
+                values.append("processes: " + (", ".join(host.processes) or "none"))
+            values += [f"denies {', '.join(svcs)} from ({src[0]},{src[1]})" for src, svcs in host.firewall_denied]
+            rows.append((f"({host.address[0]},{host.address[1]})", values))
+        return rows
+
+    def _has_targets(self, s: SubnetDefinition) -> bool:
+        return bool(s.explicit_targets) or bool(s.target_probability and s.targets_max)
+
+    def node(self, source, cap):
+        rows = self.wrapped[source]
+        n_lines = sum(len(values) for _, values in rows)
+        if self.verbose:
+            w = self.indent + self.label_w + self.style.card_col_gap + max(
+                self.m.measure(v, self.size)[0] for _, values in rows for v in values)
+        else:
+            w = self.indent + max(self.m.measure(f"{label}: {values[0]}", self.size)[0] for label, values in rows)
+        h = n_lines * self.line_h
+        return w, h, w, 1
+
+    def place(self, b, source, node, top):
+        s = self.subnets[source]
+        x0 = node.rect.x0 + self.style.box_pad
+        y = top - self.ascent
+        for label, values in self.wrapped[source]:
+            if label == "Targets" and self._has_targets(s):
+                cy = y + self.ascent * 0.38
+                b.layout.glyphs.append(PlacedGlyph("target", Rect(x0, cy - self.marker / 2, x0 + self.marker, cy + self.marker / 2)))
+            if self.verbose:
+                b.text(x0 + self.indent, y, label, self.size, color=self.style.muted_ink, role="subnet_label")
+                for value in values:
+                    b.text(x0 + self.indent + self.label_w + self.style.card_col_gap, y, value, self.size, role="subnet_value")
+                    y -= self.line_h
+                continue
+            b.text(x0 + self.indent, y, f"{label}: {values[0]}", self.size, role="subnet_value")
+            y -= self.line_h
+
+    def legend_entries(self):
+        return [("target", "Subnet can hold sensitive targets")]
+
+    def notes(self):
+        d = self.d
+        notes = []
+        if self.verbose:
+            what = ("ranges and probabilities of NASimEmu's generator, read from the YAML" if d.randomized_hosts or
+                    d.format == "v2" else "a static scenario: every host is listed in the YAML")
+            notes.append(f"Scenario definition, not a realization: {what}. Subnet numbers are YAML indices; every "
+                         "realization randomly permutes the non-internet subnet IDs.")
+            summary = (f"Per network: {_counted(d.host_count_range, 'host')}, "
+                       f"{_counted((d.targets_min, d.targets_max), 'target')}")
+            if d.p_zero_targets is not None and d.format == "v2":
+                summary += f"; P(no target) = {_pct(d.p_zero_targets)}"
+                if d.p_zero_targets > 0:
+                    summary += " (MARLA regenerates such draws: its networks have at least 1 target)"
+            notes.append(summary + ".")
+        else:
+            notes.append("Host and target counts are ranges over every network the scenario can generate.")
+            if d.format == "v2" and d.p_zero_targets:
+                notes.append(f"MARLA regenerates the {_pct(d.p_zero_targets)} of draws without a target.")
+        notes += [f"Warning: {w}" for w in d.warnings]
+        return notes
+
+    def tables(self):
+        if not self.verbose:
+            return []
+        tables = []
+        d = self.d
+        if d.randomized_hosts:
+            rows: list[tuple[str, ...]] = []
+            for i, model in enumerate(d.host_model):
+                rows.append(("OS" if i == 0 else "", model.os, _pct(model.probability)))
+            for model in d.host_model:
+                n = len(model.service_candidates)
+                k = _count_range(1, n) if n else "0"
+                for j, service in enumerate(model.service_candidates):
+                    label = f"Services | {model.os}" if j == 0 else (f"  {k} of {n}" if j == 1 else "")
+                    rows.append((label, service, _pct(model.service_presence)))
+                if n == 1:
+                    rows.append((f"  {k} of {n}", "", ""))
+            for service in d.sensitive_services:
+                oses = [m.os for m in d.host_model if service in m.sensitive_services]
+                share = {len(m.sensitive_services) for m in d.host_model if service in m.sensitive_services}
+                per = 1 / share.pop() if len(share) == 1 else None
+                p_target = _pct(per) if per is not None else "1/|sensitive services|"
+                p_other = _pct(SENSITIVE_SERVICE_ON_NON_TARGET * per) if per is not None else "10%/|sensitive services|"
+                rows.append(("Sensitive service", service, f"target {p_target}, other {p_other}"))
+                if len(oses) < len(d.host_model):
+                    rows.append(("", f"(on {', '.join(oses)} only)", ""))
+            if d.defines_processes:
+                for model in d.host_model:
+                    for j, process in enumerate(model.process_candidates):
+                        rows.append((f"Processes | {model.os}" if j == 0 else "", process, _pct(model.process_presence)))
+            else:
+                rows.append(("Processes", "none defined", "–"))
+            rows.append(("Value", "target 100, other 0", ""))
+            notes = []
+            for model in d.host_model:
+                if model.service_count_distribution:
+                    dist = ", ".join(_pct(p) for _, p in model.service_count_distribution)
+                    notes.append(f"{model.os}: k = {_count_range(1, len(model.service_candidates))} with P = {dist}")
+            footnotes = [
+                "Every host draws its OS uniformly; given the OS it gets k of the n non-sensitive services for that OS "
+                "(a uniformly random subset, P(k) ∝ 0.5^k), so service presences are not independent: "
+                + "; ".join(notes) + ". Percentages are P(present | OS).",
+            ]
+            tables.append(_Table("Host attributes (NASimEmu _random generator, every host)",
+                                 ("Attribute", "Value", "Probability"), rows, ("l", "l", "r"), footnotes))
+        rows = []
+        for a in d.actions:
+            requires = f"{a.requires}" if a.requires else "–"
+            rows.append((a.name, requires, a.os or "any", f"{a.prob:g}", a.access, f"{a.cost:g}"))
+        footnotes = []
+        if d.scan_costs:
+            footnotes.append("Scan costs: " + ", ".join(f"{label} {cost:g}" for label, cost in d.scan_costs) + ".")
+        footnotes.append("Requires: the service (exploits) or process (privilege escalations) the target host must run "
+                         "(–: none); p: success probability once the preconditions hold; Grants: access level gained.")
+        tables.append(_Table("Actions", ("Action", "Requires", "OS", "p", "Grants", "Cost"), rows,
+                             ("l", "l", "l", "r", "l", "r"), footnotes))
+        return tables
+
+
+@dataclass(frozen=True)
+class _Table:
+    title: str
+    header: tuple[str, ...]
+    rows: list[tuple[str, ...]]
+    align: tuple[str, ...]
+    footnotes: list[str]
+
+
+def _table_geometry(b: _Builder, table: _Table, max_w: float) -> tuple[float, float, list[float]]:
+    style, m = b.style, b.m
+    size = style.card_pt
+    widths = [max([m.measure(table.header[i], size, "bold")[0]] + [m.measure(row[i], size)[0] for row in table.rows])
+              for i in range(len(table.header))]
+    w = sum(widths) + style.table_col_gap * (len(widths) - 1)
+    title_w = m.measure(table.title, style.legend_pt, "bold")[0]
+    inner_w = max(w, title_w)
+    line_h = size / 72.0 * style.card_line_factor
+    foot_lines = sum(len(_wrap_tokens(f, min(inner_w, max_w), style.caption_pt, m)) for f in table.footnotes)
+    ta, td = m.line_metrics(style.legend_pt, "bold")
+    fa, fd = m.line_metrics(style.caption_pt)
+    h = (ta + td + 0.05) + line_h * (len(table.rows) + 1) + 0.04 + foot_lines * (fa + fd + 0.015)
+    return inner_w + 2 * style.card_pad, h + 2 * style.card_pad, widths
+
+
+def _place_table(b: _Builder, table: _Table, x0: float, y_top: float, max_w: float) -> Rect:
+    style, m = b.style, b.m
+    w, h, widths = _table_geometry(b, table, max_w)
+    rect = Rect(x0, y_top - h, x0 + w, y_top)
+    b.layout.boxes.append(PlacedBox("panel", rect))
+    size = style.card_pt
+    line_h = size / 72.0 * style.card_line_factor
+    ta, td = m.line_metrics(style.legend_pt, "bold")
+    ascent, _ = m.line_metrics(size)
+    x = x0 + style.card_pad
+    y = y_top - style.card_pad - ta
+    b.text(x, y, table.title, style.legend_pt, weight="bold", role="table_title")
+    y -= td + 0.05 + ascent
+    lefts = []
+    cursor = x
+    for width in widths:
+        lefts.append(cursor)
+        cursor += width + style.table_col_gap
+    for row, weight, color in [(table.header, "bold", style.muted_ink)] + [(r, "normal", style.ink) for r in table.rows]:
+        for i, cell in enumerate(row):
+            if not cell:
+                continue
+            if table.align[i] == "r":
+                b.text(lefts[i] + widths[i], y, cell, size, weight=weight, color=color, ha="right", role="table_cell")
+            else:
+                b.text(lefts[i], y, cell, size, weight=weight, color=color, role="table_cell")
+        y -= line_h
+    fa, fd = m.line_metrics(style.caption_pt)
+    y += line_h - ascent - 0.04
+    inner_w = w - 2 * style.card_pad
+    for footnote in table.footnotes:
+        for line in _wrap_tokens(footnote, min(inner_w, max_w), style.caption_pt, m):
+            b.text(x, y - fa, line, style.caption_pt, color=style.muted_ink, role="table_note")
+            y -= fa + fd + 0.015
+    return rect
 
 
 def _place_host_glyph(b: _Builder, host: RealizedHost, cell: Rect, style: ScenarioFigureStyle) -> None:
@@ -704,16 +1010,16 @@ def _place_edges(b, realization, layers, layer_of, source_of, rect_of, routed, v
     return labelled
 
 
-def _place_legend(b: _Builder, realization: ScenarioRealization, diagram: Rect, verbose: bool, caption: tuple[str, ...],
-                  firewalls: list[tuple[str, SubnetConnection]]) -> None:
+def _place_legend(b: _Builder, model, diagram: Rect, verbose: bool, caption: tuple[str, ...],
+                  firewalls: list[tuple[str, SubnetConnection]], content: _Content) -> None:
     style = b.style
     m = b.m
-    entries: list[tuple[str, str]] = [("host", "Host"), ("target", "Sensitive target")]
-    one_way = any(not c.bidirectional for c in realization.connections)
+    entries: list[tuple[str, str]] = content.legend_entries()
+    one_way = any(not c.bidirectional for c in model.connections)
     entries.append(("link", "Subnet link (bidirectional)" if not one_way else "Subnet link"))
     if one_way:
         entries.append(("arrow", "One-way subnet link"))
-    if any(c.restricted for c in realization.connections):
+    if any(c.restricted for c in model.connections):
         entries.append(("firewall", "Subnet firewall restricts services" + (" (rules below)" if verbose else "")))
 
     size = style.legend_pt
@@ -775,9 +1081,27 @@ def _place_legend(b: _Builder, realization: ScenarioRealization, diagram: Rect, 
                 baseline -= fa + fd + 0.015
             y_top = baseline + fa - 0.015
 
-    notes = ([GROUND_TRUTH_NOTE] if verbose else []) + list(caption)
-    if verbose and not realization.defines_processes:
-        notes.insert(1, NO_PROCESSES_NOTE)
+    tables = content.tables()
+    if tables:
+        sizes = [_table_geometry(b, t, max(max_w, style.table_max_w))[:2] for t in tables]
+        side_by_side = sum(w for w, _ in sizes) + style.table_gap * (len(sizes) - 1) <= max(max_w, style.table_max_w)
+        y_top -= 0.08
+        if side_by_side:
+            x = diagram.cx - (sum(w for w, _ in sizes) + style.table_gap * (len(sizes) - 1)) / 2
+            for t, (w, h) in zip(tables, sizes):
+                _place_table(b, t, x, y_top, max(max_w, style.table_max_w))
+                x += w + style.table_gap
+            y_top -= max(h for _, h in sizes)
+        else:
+            for t, (w, h) in zip(tables, sizes):
+                _place_table(b, t, diagram.cx - w / 2, y_top, max(max_w, style.table_max_w))
+                y_top -= h + style.table_gap
+            y_top += style.table_gap
+        max_w = max(max_w, sum(w for w, _ in sizes) + style.table_gap * (len(sizes) - 1) if side_by_side
+                    else max(w for w, _ in sizes))
+        y_top -= 0.05
+
+    notes = content.notes() + list(caption)
     na, nd = m.line_metrics(style.caption_pt)
     if notes:
         y_top -= 0.03
@@ -856,7 +1180,7 @@ def check_layout(layout: DiagramLayout) -> list[str]:
             if glyphs[i].rect.overlaps(glyphs[j].rect, tol=0.002):
                 issues.append(f"{glyphs[i].kind} glyph overlaps {glyphs[j].kind} glyph")
 
-    containers = [b for b in layout.boxes if b.kind in ("internet", "subnet")]
+    containers = [b for b in layout.boxes if b.kind in ("internet", "subnet", "panel")]
     for i in range(len(containers)):
         for j in range(i + 1, len(containers)):
             if containers[i].rect.overlaps(containers[j].rect):

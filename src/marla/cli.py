@@ -430,8 +430,9 @@ def summarize(
         ..., exists=False, help="Path to a run directory (runs/<experiment>/<run-id>)."
     ),
     scenarios: bool = typer.Option(
-        False, "--scenarios", help="Also draw the scenario realization of every evaluation episode seed "
-        "(plots/scenarios/; see `marla scenario plot-batch`). Off by default: it can be many figures."
+        False, "--scenarios", help="Also draw the run's scenario definition and the realization of every "
+        "evaluation episode seed (plots/scenarios/; see `marla scenario plot-batch`). Off by default: it can be "
+        "many figures."
     ),
 ) -> None:
     """Summarize metrics for a completed run and plot them (episodes.csv / summary.json)."""
@@ -537,7 +538,10 @@ def summarize(
 
     if scenarios:
         from marla.environment.scenario_realization import ScenarioRealizationError
-        from marla.visualization.scenario_figures import ScenarioFigureError, collect_episode_seeds, plot_requests
+        from marla.scenario.definition import ScenarioDefinitionError
+        from marla.visualization.scenario_figures import (
+            ScenarioFigureError, collect_episode_seeds, plot_definitions, plot_requests,
+        )
 
         scenarios_dir = plots_dir / "scenarios"
         try:
@@ -546,13 +550,16 @@ def summarize(
             if not requests:
                 typer.secho("\nNo evaluation episodes recorded: no scenario figures.", fg=typer.colors.YELLOW)
                 return
+            definitions = plot_definitions([r.path for r in requests.values()], scenarios_dir, skip_existing=True)
             result = plot_requests(requests, scenarios_dir, skip_existing=True)
-        except (ScenarioFigureError, ScenarioRealizationError, ValueError, FileNotFoundError) as exc:
+        except (ScenarioFigureError, ScenarioRealizationError, ScenarioDefinitionError, ValueError,
+                FileNotFoundError) as exc:
             typer.secho(f"Scenario figures failed: {exc}", fg=typer.colors.RED, err=True)
             raise typer.Exit(code=1) from exc
         typer.secho(
-            f"\nScenario figures: {len(result.rendered)} realization(s) rendered, {len(result.skipped_existing)} "
-            f"already present, in {scenarios_dir}/ (manifest: {result.manifest_path.name})",
+            f"\nScenario figures: {len(definitions.rendered)} definition(s) and {len(result.rendered)} realization(s) "
+            f"rendered, {len(definitions.skipped_existing) + len(result.skipped_existing)} already present, "
+            f"in {scenarios_dir}/ (manifest: {result.manifest_path.name})",
             fg=typer.colors.GREEN if not result.unreconstructed else typer.colors.YELLOW,
         )
         for u in result.unreconstructed:
