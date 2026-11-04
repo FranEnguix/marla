@@ -1,4 +1,6 @@
-"""``marla scenario`` command group: solvability checking and repair.
+"""``marla scenario`` command group: solvability checking and repair, and
+seeded scenario figures (``plot``/``plot-batch``, see
+:mod:`marla.visualization.scenario_figures`).
 
 All CLI formatting lives here, deliberately separate from the typed
 analysis results in :mod:`marla.scenario.models` -- the checker itself
@@ -23,7 +25,7 @@ from marla.scenario.solvability import check_solvability
 from marla.scenario.spec import load_scenario_spec
 from marla.scenarios.uri import ScenarioReferenceError, resolve_scenario_reference
 
-scenario_app = typer.Typer(help="Validate and repair NASimEmu scenario solvability.")
+scenario_app = typer.Typer(help="Validate, repair and plot NASimEmu scenarios.")
 
 
 def format_check_report(result: ScenarioSolvabilityResult, verbose: bool = False) -> str:
@@ -249,4 +251,187 @@ def repair(
         # Should be unreachable -- repair_scenario() itself raises
         # RepairVerificationError in this case -- but never claim success
         # if it somehow weren't.
+        raise typer.Exit(code=1)
+
+
+def _parse_view(view: str | None, verbose: bool, default: str) -> tuple[str, ...]:
+    from marla.visualization.scenario_layout import VIEWS
+
+    chosen = view or ("verbose" if verbose else default)
+    if chosen == "both":
+        return VIEWS
+    if chosen not in VIEWS:
+        raise ValueError(f"--view must be default, verbose or both, not {chosen!r}")
+    if view is not None and verbose and chosen == "default":
+        raise ValueError("--verbose conflicts with --view default")
+    return (chosen,)
+
+
+def _run_scenario(run_dir: Path) -> Path:
+    metadata_path = run_dir / "metadata.json"
+    if not metadata_path.is_file():
+        raise ValueError(f"no metadata.json in {run_dir} -- is this a run directory written by `marla run`?")
+    scenario = json.loads(metadata_path.read_text(encoding="utf-8")).get("scenario")
+    if not scenario:
+        raise ValueError(f"{metadata_path} does not record a scenario")
+    return Path(scenario)
+
+
+def _report_batch(result, output_dir: Path) -> None:
+    color = typer.colors.GREEN if not result.unreconstructed else typer.colors.YELLOW
+    typer.secho(
+        f"Rendered {len(result.rendered)} realization(s) into {output_dir}/"
+        + (f"; {len(result.skipped_existing)} already present (skipped)" if result.skipped_existing else "")
+        + (f"; {result.aliases} seed(s) generate an already-listed identical network (recorded, not re-rendered)"
+           if result.aliases else ""),
+        fg=color,
+    )
+    if result.files_written:
+        typer.echo("  files: " + ", ".join(f"{n} {fmt.upper()}" for fmt, n in sorted(result.files_written.items())))
+    typer.echo(f"  manifest: {result.manifest_path}")
+    if result.layout_issue_figures:
+        typer.secho(f"  layout warnings in {len(result.layout_issue_figures)} figure(s); see layout_issues in the manifest",
+                    fg=typer.colors.YELLOW)
+    if result.unreconstructed:
+        typer.secho(f"  {len(result.unreconstructed)} seed(s) could NOT be reconstructed reliably; no figure written:",
+                    fg=typer.colors.RED, err=True)
+        for u in result.unreconstructed[:20]:
+            typer.secho(f"    {u['scenario']} seed {u['requested_seed']}: {u['reason']}", fg=typer.colors.RED, err=True)
+
+
+_FORMAT_HELP = "Comma-separated output formats (pdf, svg, png)."
+_SIZE_HELP = ("Figure width: natural (fonts at their nominal print size), single (3.33 in column), "
+              "double (7.0 in text width) or a width in inches; content is scaled down, never up.")
+
+
+@scenario_app.command("plot")
+def plot(
+    scenario: str = typer.Argument(
+        None, help="Scenario YAML path or marla://<name> reference (default: the scenario of --run-dir)."
+    ),
+    seed: list[int] = typer.Option(None, "--seed", help="Scenario seed to reconstruct (repeatable)."),
+    seeds: str = typer.Option(None, "--seeds", help="Comma-separated seeds and inclusive ranges, e.g. 11,12,20-29."),
+    verbose: bool = typer.Option(False, "--verbose", "-v", help="Add each host's sampled attributes (simulator ground truth)."),
+    view: str = typer.Option(None, "--view", help="default, verbose or both (overrides --verbose)."),
+    run_dir: Path = typer.Option(None, "--run-dir", help="A `marla run` directory: its scenario is plotted and the "
+                                 "default output is <run-dir>/plots/scenarios/."),
+    output_dir: Path = typer.Option(None, "--output-dir", "-o", help="Output directory (default: plots/scenarios/)."),
+    formats: str = typer.Option("pdf,svg,png", "--format", help=_FORMAT_HELP),
+    dpi: int = typer.Option(300, "--dpi", help="PNG resolution."),
+    size: str = typer.Option("natural", "--size", help=_SIZE_HELP),
+    caption: bool = typer.Option(False, "--caption/--no-caption", help="Print scenario, seed and counts under the figure."),
+    overwrite: bool = typer.Option(False, "--overwrite", help="Replace figure files that already exist."),
+) -> None:
+    """Draw the network NASimEmu generates for SCENARIO at the given seed(s).
+
+    The realization is rebuilt with the real scenario generator (including
+    MARLA's zero-target regeneration), so the figure shows the exact network
+    an episode with that seed plays on. Default view: topology only; --verbose
+    adds every host's sampled OS, services, processes and target status.
+    """
+    from marla.environment.scenario_realization import ScenarioRealizationError, ScenarioRealizer, validate_scenario_seed
+    from marla.visualization.scenario_figures import (
+        ScenarioFigureError, ScenarioRequest, parse_formats, parse_seed_list, plot_requests,
+    )
+
+    try:
+        views = _parse_view(view, verbose, "default")
+        fmt = parse_formats(formats)
+        if scenario is None and run_dir is None:
+            raise ValueError("give a SCENARIO or --run-dir")
+        path = _resolve_cli_scenario_argument(scenario) if scenario is not None else _run_scenario(run_dir)
+        requested = [validate_scenario_seed(s) for s in (seed or [])] + (parse_seed_list(seeds) if seeds else [])
+        if not requested:
+            raise ValueError("give at least one --seed or --seeds")
+        realizer = ScenarioRealizer(path)
+        request = ScenarioRequest(realizer.path)
+        for s in requested:
+            request.record(s).sources.add("cli")
+        out = output_dir or ((run_dir / "plots" / "scenarios") if run_dir is not None else Path("plots") / "scenarios")
+        result = plot_requests({realizer.sha256: request}, out, views=views, formats=fmt, dpi=dpi, size=size,
+                               caption=caption, deduplicate=False, overwrite=overwrite)
+    except (ScenarioFigureError, ScenarioRealizationError, ValueError, FileNotFoundError) as exc:
+        typer.secho(str(exc), fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=1) from exc
+    _report_batch(result, out)
+    if result.unreconstructed:
+        raise typer.Exit(code=1)
+
+
+@scenario_app.command("plot-batch")
+def plot_batch(
+    scenario: str = typer.Argument(
+        None, help="Scenario YAML path or marla://<name>. Required with --from-census/--seeds; with "
+                   "--from-episodes it keeps only that scenario's episodes."
+    ),
+    from_census: Path = typer.Option(None, "--from-census", help="Scenario census CSV (seed,host,os,services,sensitive): "
+                                     "plot its seeds and verify every host against it."),
+    from_episodes: list[Path] = typer.Option(None, "--from-episodes", help="A MARLA episodes.csv, or a directory searched "
+                                             "recursively for them (runs, evaluations); repeatable."),
+    seeds: str = typer.Option(None, "--seeds", help="Additional seeds/ranges for SCENARIO, e.g. 3000000000-3000000199."),
+    split: str = typer.Option(None, "--split", help="Only census/episode rows of this split (e.g. test)."),
+    eval_only: bool = typer.Option(False, "--eval-only", help="Only episodes flagged is_eval."),
+    view: str = typer.Option("both", "--view", help="default, verbose or both."),
+    output_dir: Path = typer.Option(Path("plots") / "scenarios", "--output-dir", "-o", help="Output directory."),
+    formats: str = typer.Option("pdf,svg,png", "--format", help=_FORMAT_HELP),
+    dpi: int = typer.Option(300, "--dpi", help="PNG resolution."),
+    size: str = typer.Option("natural", "--size", help=_SIZE_HELP),
+    caption: bool = typer.Option(False, "--caption/--no-caption", help="Print scenario, seed and counts under each figure."),
+    dedupe: bool = typer.Option(True, "--dedupe/--no-dedupe", help="Render identical realizations once (default)."),
+    overwrite: bool = typer.Option(False, "--overwrite", help="Replace figure files that already exist."),
+    skip_existing: bool = typer.Option(False, "--skip-existing", help="Keep realizations whose files all exist."),
+    jobs: int = typer.Option(1, "--jobs", "-j", help="Parallel rendering processes."),
+) -> None:
+    """Draw every distinct realization used by an experiment, deduplicated.
+
+    Seeds come from a scenario census, from recorded MARLA episodes (training
+    runs or evaluations -- the same seed evaluated by several conditions or
+    training seeds is plotted once), and/or --seeds. Each reconstruction is
+    checked against what was recorded (census host attributes, episode
+    target counts, the run's scenario hash); seeds that do not match are
+    reported and get no figure.
+    """
+    from marla.environment.scenario_realization import ScenarioRealizationError, ScenarioRealizer
+    from marla.visualization.scenario_figures import (
+        ScenarioFigureError, ScenarioRequest, collect_episode_seeds, parse_formats, parse_seed_list, plot_requests,
+        read_census,
+    )
+
+    try:
+        views = _parse_view(view, False, "both")
+        fmt = parse_formats(formats)
+        if not (from_census or from_episodes or seeds):
+            raise ValueError("give at least one of --from-census, --from-episodes, --seeds")
+        realizer = ScenarioRealizer(_resolve_cli_scenario_argument(scenario)) if scenario is not None else None
+        if (from_census or seeds) and realizer is None:
+            raise ValueError("--from-census and --seeds need a SCENARIO argument")
+        requests: dict = {}
+        if realizer is not None:
+            requests[realizer.sha256] = ScenarioRequest(realizer.path)
+        if from_episodes:
+            stats = collect_episode_seeds(from_episodes, requests, eval_only=eval_only, split=split, only_scenario=realizer)
+            typer.echo(f"Read {stats.get('episodes', 0)} episode row(s) from {stats.get('files', 0)} file(s)"
+                       + (f"; ignored {stats['skipped_other_scenario']} row(s) of other scenarios"
+                          if stats.get("skipped_other_scenario") else ""))
+        if from_census:
+            census = read_census(from_census, split=split)
+            request = requests[realizer.sha256]
+            for s, hosts in census.items():
+                rec = request.record(s)
+                rec.sources.add("census")
+                rec.census_hosts = hosts
+        if seeds:
+            for s in parse_seed_list(seeds):
+                requests[realizer.sha256].record(s).sources.add("cli")
+        requests = {sha: r for sha, r in requests.items() if r.seeds}
+        if not requests:
+            raise ValueError("the inputs select no seeds")
+        result = plot_requests(requests, output_dir, views=views, formats=fmt, dpi=dpi, size=size, caption=caption,
+                               deduplicate=dedupe, overwrite=overwrite, skip_existing=skip_existing, jobs=jobs,
+                               progress=typer.echo)
+    except (ScenarioFigureError, ScenarioRealizationError, ValueError, FileNotFoundError) as exc:
+        typer.secho(str(exc), fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=1) from exc
+    _report_batch(result, output_dir)
+    if result.unreconstructed:
         raise typer.Exit(code=1)

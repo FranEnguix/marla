@@ -429,6 +429,10 @@ def summarize(
     run_or_directory: Path = typer.Argument(
         ..., exists=False, help="Path to a run directory (runs/<experiment>/<run-id>)."
     ),
+    scenarios: bool = typer.Option(
+        False, "--scenarios", help="Also draw the scenario realization of every evaluation episode seed "
+        "(plots/scenarios/; see `marla scenario plot-batch`). Off by default: it can be many figures."
+    ),
 ) -> None:
     """Summarize metrics for a completed run and plot them (episodes.csv / summary.json)."""
     import json
@@ -530,6 +534,29 @@ def summarize(
             typer.echo(f"  {path.name}")
     else:
         typer.secho("\nNo plots generated (no episode/update/decision data found).", fg=typer.colors.YELLOW)
+
+    if scenarios:
+        from marla.environment.scenario_realization import ScenarioRealizationError
+        from marla.visualization.scenario_figures import ScenarioFigureError, collect_episode_seeds, plot_requests
+
+        scenarios_dir = plots_dir / "scenarios"
+        try:
+            requests: dict = {}
+            collect_episode_seeds([run_or_directory / "episodes.csv"], requests, eval_only=True)
+            if not requests:
+                typer.secho("\nNo evaluation episodes recorded: no scenario figures.", fg=typer.colors.YELLOW)
+                return
+            result = plot_requests(requests, scenarios_dir, skip_existing=True)
+        except (ScenarioFigureError, ScenarioRealizationError, ValueError, FileNotFoundError) as exc:
+            typer.secho(f"Scenario figures failed: {exc}", fg=typer.colors.RED, err=True)
+            raise typer.Exit(code=1) from exc
+        typer.secho(
+            f"\nScenario figures: {len(result.rendered)} realization(s) rendered, {len(result.skipped_existing)} "
+            f"already present, in {scenarios_dir}/ (manifest: {result.manifest_path.name})",
+            fg=typer.colors.GREEN if not result.unreconstructed else typer.colors.YELLOW,
+        )
+        for u in result.unreconstructed:
+            typer.secho(f"  seed {u['requested_seed']} not reconstructed: {u['reason']}", fg=typer.colors.RED, err=True)
 
 
 @app.command()

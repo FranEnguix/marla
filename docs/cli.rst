@@ -175,6 +175,30 @@ either check fails, the candidate file is removed and the command exits
 non-zero rather than leaving anyone with a file believed to be fixed but
 not verified.
 
+``marla scenario plot`` / ``plot-batch``
+------------------------------------------
+
+.. code-block:: text
+
+   marla scenario plot [SCENARIO] (--seed N ... | --seeds LIST) [--verbose | --view default|verbose|both]
+                       [--run-dir RUN] [--output-dir DIR] [--format pdf,svg,png] [--dpi 300]
+                       [--size natural|single|double|INCHES] [--caption] [--overwrite]
+   marla scenario plot-batch [SCENARIO] [--from-episodes PATH ...] [--eval-only] [--split NAME]
+                             [--from-census CSV] [--seeds LIST] [--view both] [--output-dir DIR]
+                             [--format ...] [--dpi ...] [--size ...] [--caption] [--no-dedupe]
+                             [--overwrite | --skip-existing] [--jobs N]
+
+Draws the network NASimEmu generates for ``SCENARIO`` at each seed --
+rebuilt with the real generator, including MARLA's zero-target
+regeneration -- as PDF/SVG/PNG figures: topology only by default, every
+host's sampled attributes with ``--verbose``. ``plot-batch`` takes its
+seeds from recorded episodes and/or a scenario census, verifies each
+reconstruction against them, renders identical realizations once, and
+merges everything into ``manifest.json``. Default output:
+``plots/scenarios/`` (``RUN/plots/scenarios/`` with ``--run-dir``). See
+:doc:`scenario_visualization` for the figures, naming, manifest and seed
+semantics.
+
 ``marla validate``
 --------------------
 
@@ -191,14 +215,17 @@ network. Useful in CI or before a long run.
 
 .. code-block:: text
 
-   marla summarize RUN_DIRECTORY
+   marla summarize RUN_DIRECTORY [--scenarios]
 
 Where ``RUN_DIRECTORY`` is ``<metrics.output_directory>/<experiment-name>/<run-id>``
 (printed by ``marla run`` on completion). Prints the run's aggregate
 statistics from ``summary.json`` and writes plots to
 ``RUN_DIRECTORY/plots/`` -- see :doc:`metrics` for what's read and what
 each plot shows. Safe to re-run at any time; it only reads existing
-artifacts and (re)writes the ``plots/`` directory.
+artifacts and (re)writes the ``plots/`` directory. ``--scenarios`` (off by
+default) also draws the scenario realization of every evaluation episode
+seed into ``RUN_DIRECTORY/plots/scenarios/`` (see
+:doc:`scenario_visualization`), skipping figures that already exist.
 
 ``marla compare``
 --------------------

@@ -93,6 +93,11 @@ class NasimEmuAdapter:
         )
         # MARLA-owned, reset every episode (see EnvironmentState.successfully_scanned_subnets).
         self._successfully_scanned_subnets: set[int] = set()
+        # Which seed actually generated the current episode's network (see
+        # reset() and realization_seed). Recorded only; never read back by reset().
+        self._requested_seed: int | None = None
+        self._regeneration_attempt: int | None = None
+        self._realization_seed: int | None = None
 
     @property
     def max_episode_steps(self) -> int:
@@ -109,6 +114,25 @@ class NasimEmuAdapter:
     @property
     def premature_finish_reward_per_remaining_target(self) -> float:
         return self._premature_finish_reward_per_remaining_target
+
+    @property
+    def requested_seed(self) -> int | None:
+        """The ``seed`` passed to the last :meth:`reset` (``None`` before any reset)."""
+        return self._requested_seed
+
+    @property
+    def regeneration_attempt(self) -> int | None:
+        """How many zero-target realizations the last :meth:`reset` discarded
+        (``0``: the requested seed itself generated the episode's network)."""
+        return self._regeneration_attempt
+
+    @property
+    def realization_seed(self) -> int | None:
+        """The seed ``random``/``numpy`` were set to immediately before the
+        NASimEmu reset that generated the current episode's network: the
+        requested seed, or its deterministic zero-target replacement (see
+        :meth:`reset`). ``None`` for an unseeded reset."""
+        return self._realization_seed
 
     def reset(self, seed: int | None = None) -> EnvironmentState:
         """Start a new episode, generating a fresh scenario instance.
@@ -138,6 +162,9 @@ class NasimEmuAdapter:
             self._successfully_scanned_subnets = set()
             raw_observation = self._env.reset()
             if self._env.env.network.sensitive_addresses:
+                self._requested_seed = seed
+                self._regeneration_attempt = attempt
+                self._realization_seed = attempt_seed
                 return self._make_state(raw_observation)
         raise ValueError(
             f"Scenario {self._scenario!r} generated no sensitive target in "

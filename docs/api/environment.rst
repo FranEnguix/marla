@@ -18,3 +18,6 @@ this subpackage imports ``nasimemu`` directly.
 
 .. automodule:: marla.environment.finish
    :members:
+
+.. automodule:: marla.environment.scenario_realization
+   :members:

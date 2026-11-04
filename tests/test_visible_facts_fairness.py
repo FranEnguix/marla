@@ -138,11 +138,16 @@ def test_no_second_visible_fact_extraction_implementation_exists():
     # processes fields with no connection to VisibleHostFacts at all.
     scoped_dirs = [REPO_ROOT / "src" / "marla" / "environment", REPO_ROOT / "src" / "marla" / "learning"]
     visible_facts_path = REPO_ROOT / "src" / "marla" / "environment" / "visible_facts.py"
+    # scenario_realization.py deliberately reads the *hidden* ground truth of a
+    # generated network for offline scenario figures -- the opposite of a
+    # visible-fact extraction; that it never reaches a policy is guarded by
+    # tests/test_scenario_visualization.py::test_ground_truth_reader_is_never_imported_by_policy_code.
+    ground_truth_path = REPO_ROOT / "src" / "marla" / "environment" / "scenario_realization.py"
     offending: list[str] = []
 
     for scoped_dir in scoped_dirs:
         for path in scoped_dir.rglob("*.py"):
-            if path == visible_facts_path:
+            if path in (visible_facts_path, ground_truth_path):
                 continue
             source = path.read_text(encoding="utf-8")
             combined = all(token in source for token in (".os", ".services", ".processes"))

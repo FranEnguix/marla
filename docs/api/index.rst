@@ -19,4 +19,5 @@ Auto-generated from docstrings. Organized by subpackage, matching
    runtime
    scenario
    utils
+   visualization
    cli
